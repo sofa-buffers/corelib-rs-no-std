@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Build & test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry & build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build (all features)
+        run: cargo build --all-features --verbose
+
+      - name: Test (all features)
+        run: cargo test --all-features --verbose
+
+      - name: Test (default features)
+        run: cargo test --verbose
+
+  no_std:
+    name: no_std bare-metal build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (thumbv7em target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv7em-none-eabihf
+
+      - name: Cache cargo registry & build
+        uses: Swatinem/rust-cache@v2
+
+      # Building the library for a bare-metal Cortex-M target with no host std
+      # proves the crate is genuinely no_std / heap-free.
+      - name: Build for thumbv7em-none-eabihf (all features)
+        run: cargo build --lib --all-features --target thumbv7em-none-eabihf
