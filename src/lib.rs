@@ -4,9 +4,11 @@
 //! SofaBuffers (Sofab) serialization format, ported from the C `corelib`
 //! (`istream.c` / `ostream.c`). It targets very small Cortex-M class devices.
 //!
-//! The wire format is specified in `ARCHITECTURE.md` at the repository root and
-//! is reproduced byte-for-byte here (the unit tests use the exact test vectors
-//! from the C implementation).
+//! The wire format is specified in the [SofaBuffers documentation][docs] and is
+//! reproduced byte-for-byte here (the unit tests use the exact test vectors from
+//! the C implementation).
+//!
+//! [docs]: https://github.com/sofa-buffers/documentation
 //!
 //! ## Design highlights
 //!

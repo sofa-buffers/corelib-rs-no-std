@@ -1,4 +1,5 @@
-//! Shared types and wire constants (see `ARCHITECTURE.md` §2).
+//! Shared types and wire constants (see the SofaBuffers documentation §2:
+//! <https://github.com/sofa-buffers/documentation>).
 
 /// Field identifier type. Application-assigned; need not be contiguous.
 pub type Id = u32;

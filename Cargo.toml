@@ -5,7 +5,7 @@ edition = "2021"
 rust-version = "1.70"
 license = "MIT"
 description = "SofaBuffers (Sofab) — compact, streaming, no_std/no-heap serialization core for very small Cortex-M targets. Rust port of the C corelib (istream/ostream)."
-repository = "https://github.com/sofa-buffers/corelib-c-cpp"
+repository = "https://github.com/sofa-buffers/corelib-rs"
 keywords = ["serialization", "embedded", "no_std", "varint", "cortex-m"]
 categories = ["embedded", "encoding", "no-std"]
 

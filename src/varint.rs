@@ -1,4 +1,5 @@
-//! Base-128 varint and ZigZag codecs (see `ARCHITECTURE.md` §2.2 / §2.3).
+//! Base-128 varint and ZigZag codecs (see the SofaBuffers documentation
+//! §2.2 / §2.3: <https://github.com/sofa-buffers/documentation>).
 //!
 //! The decoder is incremental (one byte at a time) so it works across streaming
 //! chunk boundaries. The encoder side is implemented inline in [`crate::ostream`]

@@ -1,14 +1,18 @@
 # sofab — SofaBuffers Rust core library
 
+[![CI](https://github.com/sofa-buffers/corelib-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/sofa-buffers/corelib-rs/actions/workflows/ci.yml)
+
 A `#![no_std]`, **heap-free**, **streaming** Rust implementation of the
 SofaBuffers (*Sofab*) serialization format. It is a port of the C `corelib`
 (`istream.c` / `ostream.c`) and is intended for very small Cortex-M class
 microcontrollers.
 
-The wire format is specified, language-neutrally, in
-[`../ARCHITECTURE.md`](../ARCHITECTURE.md). The unit tests here use the exact
-byte vectors from the C reference suite (`../test/c/test_ostream.c`) to guarantee
-byte-for-byte interoperability with the C implementation.
+The wire format is specified, language-neutrally, in the
+[SofaBuffers documentation](https://github.com/sofa-buffers/documentation). The
+unit tests here use the exact byte vectors from the
+[C corelib](https://github.com/sofa-buffers/corelib-c-cpp)'s reference suite
+(`test/c/test_ostream.c`) to guarantee byte-for-byte interoperability with the C
+implementation.
 
 ## Why this design
 
@@ -78,8 +82,9 @@ sofab = { version = "0.1", default-features = false }
 
 > **Note on value width:** like the C default configuration, the scalar value
 > type is 64-bit (`u64`/`i64`). On a 32-bit Cortex-M this pulls in libgcc/compiler
-> 64-bit helpers — the single largest footprint item (see the C lib's
-> `ARCHITECTURE.md`/footprint notes). A 32-bit value mode is a planned feature.
+> 64-bit helpers — the single largest footprint item (see the SofaBuffers
+> [documentation](https://github.com/sofa-buffers/documentation) footprint
+> notes). A 32-bit value mode is a planned feature.
 
 ## Layering vs. the C library
 
