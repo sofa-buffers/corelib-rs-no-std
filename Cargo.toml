@@ -1,0 +1,57 @@
+[package]
+name = "sofab"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.70"
+license = "MIT"
+description = "SofaBuffers (Sofab) — compact, streaming, no_std/no-heap serialization core for very small Cortex-M targets. Rust port of the C corelib (istream/ostream)."
+repository = "https://github.com/sofa-buffers/corelib-c-cpp"
+keywords = ["serialization", "embedded", "no_std", "varint", "cortex-m"]
+categories = ["embedded", "encoding", "no-std"]
+
+[lib]
+name = "sofab"
+
+[dev-dependencies]
+# Instruction/cycle-count benchmarking via Valgrind/Callgrind. Counts are
+# deterministic and independent of machine speed, so they measure the *code*
+# rather than the host CPU.
+iai-callgrind = "0.16.1"
+
+[[bench]]
+name = "perf"
+harness = false
+
+# ---------------------------------------------------------------------------
+# Feature flags mirror the C corelib's SOFAB_DISABLE_* compile switches, but
+# expressed positively (a feature *enables* support). Turn features off to
+# shrink the binary on tiny targets — see README "Footprint".
+# ---------------------------------------------------------------------------
+[features]
+default = ["fixlen", "array", "sequence", "fp64"]
+# Fixed-length fields: fp32, fp64, string, blob (wire types FIXLEN / FIXLENARRAY).
+fixlen = []
+# Array fields (wire types VARINTARRAY_* and, with `fixlen`, FIXLENARRAY).
+array = []
+# Nested sequences (wire types SEQUENCE_START / SEQUENCE_END).
+sequence = []
+# 64-bit floating point. Implies `fixlen`.
+fp64 = ["fixlen"]
+
+# ---------------------------------------------------------------------------
+# Size-optimized release profile suitable for Cortex-M firmware.
+# ---------------------------------------------------------------------------
+[profile.release]
+opt-level = "z"      # optimize for size
+lto = true           # let the linker strip everything unused
+codegen-units = 1    # better cross-function size optimization
+panic = "abort"      # no unwinding tables
+strip = true
+
+# Benchmark profile for iai-callgrind: keep debug symbols (so Callgrind can
+# anchor its collect-toggle on the benchmark function) and do not strip.
+[profile.bench]
+opt-level = 3
+debug = true
+strip = false
+lto = false
