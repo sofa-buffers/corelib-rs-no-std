@@ -128,59 +128,6 @@ rustup component add llvm-tools-preview
 cargo install cargo-llvm-cov
 ```
 
-## Benchmarks
-
-Two runtime benchmarks mirror the C/C++ corelib's `bench/{c,cpp}/` tools — same
-messages, same methodology, **identical output format** — so the C, C++ and Rust
-implementations can be compared directly. Both are plain binaries
-(`harness = false`): no Valgrind or special privileges, runs anywhere `cargo`
-does. Throughput is measured against **process CPU time** (`clock_gettime`, not
-wall-clock) and `MB = 1e6` bytes.
-
-```bash
-cargo bench --bench perf     # per-op cost: cycles/op + MB/s
-cargo bench --bench bench    # throughput speedtest: MB/s table
-cargo bench                  # both
-```
-
-### `benches/perf.rs` — per-op cost (cycles/op + MB/s)
-
-Encodes/decodes one representative message (scalars of every width, integer and
-float arrays, a string and a nested sequence) in a ~1 s loop, reporting hardware
-**cycles/op** (x86 `_rdtsc` / AArch64 `cntvct_el0`) alongside **CPU-time ns/op**
-and **MB/s**. cycles/op tracks the cost of the code; MB/s is this machine's
-throughput.
-
-```
---- perf: serialize (stream API) ---
-  iterations    : 842517
-  message size  : 170 bytes
-  cycles/op     : 3317.5  (hardware cycle counter)
-  CPU time/op   : 1186.9 ns  (process CPU time, not wall-clock)
-  throughput    : 143.2 MB/s  (speedtest, MB = 1e6 bytes)
-```
-
-### `benches/bench.rs` — throughput speedtest (MB/s)
-
-Two workloads — a 1000-element `u64` array and a small "typical" mixed message —
-each looped ~1 s, encode and decode:
-
-```
-Workload                           MB/s
---------                           ----
-encode: u64 array (1000)         690.06
-encode: typical message           35.83
-decode: u64 array (1000)         340.62
-decode: typical message           33.34
-```
-
-Numbers vary with CPU speed, load and build flags (that's the point — they show
-real throughput here). The "typical message" figures are small because, exactly
-as in the C/C++ tools, the per-iteration CPU-clock read dominates a sub-100 ns
-operation; they are comparable *across languages* but are not an absolute
-small-message speed. `black_box` guards keep the optimizer from eliding the work,
-and input construction runs outside the timed loop.
-
 ## License
 
 MIT (same as the SofaBuffers C corelib).
