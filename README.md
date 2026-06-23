@@ -12,7 +12,7 @@
 [GitHub repository](https://github.com/sofa-buffers/corelib-rs)
 
 [![CI](https://github.com/sofa-buffers/corelib-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/sofa-buffers/corelib-rs/actions/workflows/ci.yml)
-[![Coverage Status](https://coveralls.io/repos/github/sofa-buffers/corelib-rs/badge.svg?branch=main)](https://coveralls.io/github/sofa-buffers/corelib-rs?branch=main)
+[![Coverage](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fsofa-buffers%2Fcorelib-rs%2Fbadges%2Fcoverage.json)](https://github.com/sofa-buffers/corelib-rs/actions/workflows/ci.yml)
 
 A `#![no_std]`, **heap-free**, **streaming** Rust implementation of the
 SofaBuffers (*Sofab*) serialization format. It is a port of the C `corelib`

@@ -32,8 +32,10 @@ jobs:
         run: cargo test --verbose
 
   coverage:
-    name: Coverage (Coveralls)
+    name: Coverage
     runs-on: ubuntu-latest
+    permissions:
+      contents: write   # to push the badge JSON to the `badges` branch
     steps:
       - uses: actions/checkout@v4
 
@@ -48,14 +50,35 @@ jobs:
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
 
-      - name: Generate LCOV coverage (all features)
-        run: cargo llvm-cov --all-features --lcov --output-path lcov.info
+      - name: Measure coverage
+        run: |
+          cargo llvm-cov --all-features --summary-only --json --output-path coverage.json
+          PCT=$(jq '.data[0].totals.lines.percent' coverage.json)
+          printf 'line coverage: %.1f%%\n' "$PCT"
+          echo "COVERAGE_PCT=$PCT" >> "$GITHUB_ENV"
 
-      - name: Upload to Coveralls
-        uses: coverallsapp/github-action@v2
-        with:
-          file: lcov.info
-          format: lcov
+      # Publish a Shields.io endpoint badge driven by the real CI coverage
+      # number. The JSON lives on an orphan `badges` branch so it never
+      # clutters main; the README points Shields at its raw URL.
+      - name: Publish coverage badge
+        if: github.ref == 'refs/heads/main'
+        run: |
+          PCT_INT=$(printf '%.0f' "$COVERAGE_PCT")
+          if   [ "$PCT_INT" -ge 90 ]; then COLOR=brightgreen
+          elif [ "$PCT_INT" -ge 75 ]; then COLOR=green
+          elif [ "$PCT_INT" -ge 60 ]; then COLOR=yellowgreen
+          elif [ "$PCT_INT" -ge 40 ]; then COLOR=orange
+          else COLOR=red; fi
+          MSG=$(printf '%.1f%%' "$COVERAGE_PCT")
+          mkdir badge-out && cd badge-out
+          printf '{"schemaVersion":1,"label":"coverage","message":"%s","color":"%s"}\n' "$MSG" "$COLOR" > coverage.json
+          git init -q
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -q -b badges
+          git add coverage.json
+          git commit -q -m "chore: update coverage badge ($MSG)"
+          git push -f "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" badges
 
   no_std:
     name: no_std bare-metal build
