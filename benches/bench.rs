@@ -1,22 +1,31 @@
-//! Wall-clock **throughput** speedtest for the sofab encoder/decoder.
+//! SofaBuffers Rust — throughput benchmark (MB/s, CPU time).
 //!
-//! This is the machine-*dependent* counterpart to `perf.rs`. Where `perf.rs`
-//! uses iai-callgrind to report deterministic instruction counts that are
-//! independent of the host CPU, this benchmark times the real code on *this*
-//! machine and reports results in **MB/s** (1 MB = 1_000_000 bytes). The
-//! numbers vary with CPU speed, load and build flags — that is exactly the
-//! point: it answers "how fast does the implementation actually run here?".
+//! Mirror of `bench/c/bench.c` and `bench/cpp/bench.cpp`: encode/decode
+//! throughput for two workloads — a 1000-element u64 array and a small
+//! "typical" mixed message. Each workload runs in a ~1 s loop and reports MB/s,
+//! and the output table matches the C/C++ tools so the implementations can be
+//! compared directly.
 //!
-//! It is a plain binary (`harness = false`), so it needs no Valgrind and no
-//! special privileges — unlike `perf.rs` it runs anywhere `cargo` does.
+//! Throughput is measured against *process CPU time* (`clock()`, not
+//! wall-clock), so the number reflects the cost of the implementation rather
+//! than OS scheduling noise or the wall-clock speed of the host. MB = 1e6 bytes.
 //!
-//! Run with:
-//!   cargo bench --bench bench
-//!   BENCH_MS=2000 cargo bench --bench bench   # longer/steadier measurement
+//! Run with:  `cargo bench --bench bench`
 
 use sofab::{Id, IStream, OStream, Signed, Unsigned, Visitor};
 use std::hint::black_box;
-use std::time::{Duration, Instant};
+
+const N: usize = 1000;
+
+/// Process CPU time in seconds (not wall-clock), via
+/// `clock_gettime(CLOCK_PROCESS_CPUTIME_ID)` — the higher-resolution equivalent
+/// of the C tool's `clock()`.
+fn cpu_now() -> f64 {
+    let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    // SAFETY: ts is a valid, writable timespec; the clock id is valid on Linux.
+    unsafe { libc::clock_gettime(libc::CLOCK_PROCESS_CPUTIME_ID, &mut ts) };
+    ts.tv_sec as f64 + ts.tv_nsec as f64 / 1e9
+}
 
 /// Decode sink that folds every value into a checksum so the optimizer cannot
 /// elide the decode work.
@@ -47,21 +56,8 @@ impl Visitor for Checksum {
 }
 
 /// A spread of unsigned values exercising 1..10-byte varints.
-fn make_u64_src(n: usize) -> Vec<u64> {
-    (0..n as u64).map(|i| i.wrapping_mul(0x9E37_79B9_7F4A_7C15)).collect()
-}
-
-/// Pre-encode an unsigned array message (used as decode input).
-fn make_u64_array_buf(n: usize) -> Vec<u8> {
-    let src = make_u64_src(n);
-    let mut buf = vec![0u8; n * 11 + 16];
-    let used = {
-        let mut os = OStream::new(&mut buf);
-        os.write_array_unsigned(1, &src).unwrap();
-        os.bytes_used()
-    };
-    buf.truncate(used);
-    buf
+fn make_src() -> Vec<u64> {
+    (0..N as u64).map(|i| i.wrapping_mul(0x9E37_79B9_7F4A_7C15)).collect()
 }
 
 /// A representative small telemetry-style message: a few scalars, a float, a
@@ -79,130 +75,80 @@ fn encode_typical(os: &mut OStream) {
     os.write_sequence_end().unwrap();
 }
 
-/// Pre-encode the typical message (used as decode input).
-fn make_typical_buf() -> Vec<u8> {
-    let mut buf = vec![0u8; 256];
-    let used = {
-        let mut os = OStream::new(&mut buf);
-        encode_typical(&mut os);
-        os.bytes_used()
-    };
-    buf.truncate(used);
-    buf
-}
-
-/// Run `body` repeatedly for at least `budget` (after a short warm-up) and
-/// return how many iterations completed and the elapsed time. The clock is
-/// only read once per batch so timer overhead stays off the hot path.
-fn time_loop(budget: Duration, mut body: impl FnMut()) -> (u64, Duration) {
-    // Warm up (~10% of the budget) so caches and branch predictors are hot.
-    let warm = Instant::now();
-    while warm.elapsed() < budget / 10 {
-        body();
-    }
-
-    const BATCH: u64 = 256;
-    let start = Instant::now();
-    let mut iters = 0u64;
+/// Run `body` repeatedly until ~1 s of CPU time has elapsed (after one warm-up
+/// call) and return throughput in MB/s for a message of `bytes` bytes.
+fn measure(bytes: usize, mut body: impl FnMut()) -> f64 {
+    body(); // warmup
+    let t0 = cpu_now();
+    let mut it: u64 = 0;
+    let mut el;
     loop {
-        for _ in 0..BATCH {
-            body();
-        }
-        iters += BATCH;
-        if start.elapsed() >= budget {
+        body();
+        it += 1;
+        el = cpu_now() - t0;
+        if el >= 1.0 {
             break;
         }
     }
-    (iters, start.elapsed())
-}
-
-/// Print one result line. `bytes_per_iter` is the size of the wire message the
-/// operation produces (encode) or consumes (decode); throughput is reported
-/// against that volume.
-fn report(name: &str, bytes_per_iter: usize, iters: u64, elapsed: Duration) {
-    let total = bytes_per_iter as f64 * iters as f64;
-    let secs = elapsed.as_secs_f64();
-    let mb_s = total / secs / 1.0e6;
-    let ns_per_op = secs * 1.0e9 / iters as f64;
-    println!(
-        "{name:<26} {mb_s:>9.1} MB/s   ({bytes_per_iter:>4} B/op, {ns_per_op:>8.1} ns/op, {iters} ops)"
-    );
+    bytes as f64 * it as f64 / el / 1e6 // MB/s, MB = 1e6 bytes
 }
 
 fn main() {
-    let budget = Duration::from_millis(
-        std::env::var("BENCH_MS").ok().and_then(|s| s.parse().ok()).unwrap_or(1000),
-    );
+    let src = make_src();
 
-    println!(
-        "sofab throughput speedtest  (MB = 1_000_000 bytes, {} ms/bench)\n",
-        budget.as_millis()
-    );
-    println!("{:<26} {:>9}        details", "benchmark", "throughput");
-    println!("{}", "-".repeat(74));
+    // Pre-encode the messages (to learn their byte sizes and as decode input).
+    let mut u64_buf = vec![0u8; N * 11 + 16];
+    let enc_u64_used = {
+        let mut os = OStream::new(&mut u64_buf);
+        os.write_array_unsigned(1, &src).unwrap();
+        os.bytes_used()
+    };
+    u64_buf.truncate(enc_u64_used);
 
-    // --- encode: unsigned array (varint-encode hot loop) -------------------
-    {
-        let src = make_u64_src(1000);
-        let mut buf = vec![0u8; 1000 * 11 + 16];
-        let out_len = {
-            let mut os = OStream::new(&mut buf);
-            os.write_array_unsigned(1, &src).unwrap();
-            os.bytes_used()
-        };
-        let (iters, el) = time_loop(budget, || {
-            let used = {
-                let mut os = OStream::new(&mut buf);
-                os.write_array_unsigned(1, black_box(&src)).unwrap();
-                os.bytes_used()
-            };
-            black_box(&buf[..used]);
-        });
-        report("encode_u64_array[1000]", out_len, iters, el);
-    }
+    let mut typ_buf = vec![0u8; 256];
+    let typ_used = {
+        let mut os = OStream::new(&mut typ_buf);
+        encode_typical(&mut os);
+        os.bytes_used()
+    };
+    typ_buf.truncate(typ_used);
 
-    // --- decode: unsigned array (varint-decode state machine) --------------
-    {
-        let enc = make_u64_array_buf(1000);
-        let len = enc.len();
-        let (iters, el) = time_loop(budget, || {
-            let mut sink = Checksum::default();
-            let mut is = IStream::new();
-            is.feed(black_box(&enc), &mut sink).unwrap();
-            black_box(sink.acc);
-        });
-        report("decode_u64_array[1000]", len, iters, el);
-    }
+    let ba = enc_u64_used;
+    let bt = typ_used;
 
-    // --- encode: realistic mixed message -----------------------------------
-    {
-        let mut buf = [0u8; 256];
-        let out_len = {
-            let mut os = OStream::new(&mut buf);
-            encode_typical(&mut os);
-            os.bytes_used()
-        };
-        let (iters, el) = time_loop(budget, || {
-            let used = {
-                let mut os = OStream::new(&mut buf);
-                encode_typical(&mut os);
-                os.bytes_used()
-            };
-            black_box(&buf[..used]);
-        });
-        report("encode_typical_message", out_len, iters, el);
-    }
+    // Encode targets (reused across iterations; allocation is outside the loop).
+    let mut enc_u64_out = vec![0u8; N * 11 + 16];
+    let mut enc_typ_out = [0u8; 256];
 
-    // --- decode: realistic mixed message -----------------------------------
-    {
-        let enc = make_typical_buf();
-        let len = enc.len();
-        let (iters, el) = time_loop(budget, || {
-            let mut sink = Checksum::default();
-            let mut is = IStream::new();
-            is.feed(black_box(&enc), &mut sink).unwrap();
-            black_box(sink.acc);
-        });
-        report("decode_typical_message", len, iters, el);
-    }
+    let enc_u64 = measure(ba, || {
+        let mut os = OStream::new(&mut enc_u64_out);
+        os.write_array_unsigned(1, black_box(&src)).unwrap();
+        black_box(os.bytes_used());
+    });
+    let enc_typ = measure(bt, || {
+        let mut os = OStream::new(&mut enc_typ_out);
+        encode_typical(&mut os);
+        black_box(os.bytes_used());
+    });
+    let dec_u64 = measure(ba, || {
+        let mut sink = Checksum::default();
+        let mut is = IStream::new();
+        is.feed(black_box(&u64_buf), &mut sink).unwrap();
+        black_box(sink.acc);
+    });
+    let dec_typ = measure(bt, || {
+        let mut sink = Checksum::default();
+        let mut is = IStream::new();
+        is.feed(black_box(&typ_buf), &mut sink).unwrap();
+        black_box(sink.acc);
+    });
+
+    println!("=== SofaBuffers Rust throughput (CPU time, MB/s) ===");
+    println!("{:<26} {:>12}", "Workload", "MB/s");
+    println!("{:<26} {:>12}", "--------", "----");
+    println!("{:<26} {:>12.2}", "encode: u64 array (1000)", enc_u64);
+    println!("{:<26} {:>12.2}", "encode: typical message", enc_typ);
+    println!("{:<26} {:>12.2}", "decode: u64 array (1000)", dec_u64);
+    println!("{:<26} {:>12.2}", "decode: typical message", dec_typ);
+    println!("\nMB = 1e6 bytes. ~1s CPU-time loop per workload.");
 }
