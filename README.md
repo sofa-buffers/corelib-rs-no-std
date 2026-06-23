@@ -149,7 +149,3 @@ Coverage prerequisites (one-time):
 rustup component add llvm-tools-preview
 cargo install cargo-llvm-cov
 ```
-
-## License
-
-MIT (same as the SofaBuffers C corelib).
