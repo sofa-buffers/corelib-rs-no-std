@@ -13,16 +13,18 @@ categories = ["embedded", "encoding", "no-std"]
 name = "sofab"
 
 [dev-dependencies]
-# Instruction/cycle-count benchmarking via Valgrind/Callgrind. Counts are
-# deterministic and independent of machine speed, so they measure the *code*
-# rather than the host CPU.
-iai-callgrind = "0.16.1"
+# Process CPU time (clock()) for the runtime benchmarks, so throughput is
+# measured against CPU time rather than wall-clock — matching the C/C++ tools.
+libc = "0.2"
 
+# Per-op cost: cycles/op (hardware cycle counter) + throughput MB/s, over a
+# ~1s CPU-time loop. Mirrors bench/c/perf.c and bench/cpp/perf.cpp.
 [[bench]]
 name = "perf"
 harness = false
 
-# Wall-clock throughput speedtest (MB/s) on the host machine — see benches/bench.rs.
+# Throughput speedtest: MB/s table over a ~1s CPU-time loop per workload.
+# Mirrors bench/c/bench.c and bench/cpp/bench.cpp.
 [[bench]]
 name = "bench"
 harness = false
@@ -53,8 +55,7 @@ codegen-units = 1    # better cross-function size optimization
 panic = "abort"      # no unwinding tables
 strip = true
 
-# Benchmark profile for iai-callgrind: keep debug symbols (so Callgrind can
-# anchor its collect-toggle on the benchmark function) and do not strip.
+# Benchmark profile: -O3 for a fair comparison with the C/C++ -O3 builds.
 [profile.bench]
 opt-level = 3
 debug = true

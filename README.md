@@ -128,73 +128,58 @@ rustup component add llvm-tools-preview
 cargo install cargo-llvm-cov
 ```
 
-## Performance (CPU-cost) benchmarks
+## Benchmarks
 
-`benches/perf.rs` measures the **cost of the code, not the speed of the
-machine**. It uses [`iai-callgrind`](https://crates.io/crates/iai-callgrind),
-which runs each benchmark under Valgrind/Callgrind and reports **instruction
-counts, cache hits/misses and an estimated cycle count**. These numbers are
-deterministic and independent of CPU clock speed — re-running (here, or on a
-different machine) yields the same counts, so they are meaningful for tracking an
-embedded library's efficiency and for catching regressions in CI.
-
-Prerequisites (one-time):
+Two runtime benchmarks mirror the C/C++ corelib's `bench/{c,cpp}/` tools — same
+messages, same methodology, **identical output format** — so the C, C++ and Rust
+implementations can be compared directly. Both are plain binaries
+(`harness = false`): no Valgrind or special privileges, runs anywhere `cargo`
+does. Throughput is measured against **process CPU time** (`clock_gettime`, not
+wall-clock) and `MB = 1e6` bytes.
 
 ```bash
-apt-get install valgrind
-cargo install iai-callgrind-runner --version 0.16.1   # must match the dev-dependency
+cargo bench --bench perf     # per-op cost: cycles/op + MB/s
+cargo bench --bench bench    # throughput speedtest: MB/s table
+cargo bench                  # both
 ```
 
-Run:
+### `benches/perf.rs` — per-op cost (cycles/op + MB/s)
 
-```bash
-cargo bench
-# In a restricted container where setarch/ASLR control is blocked:
-IAI_CALLGRIND_ALLOW_ASLR=1 cargo bench
+Encodes/decodes one representative message (scalars of every width, integer and
+float arrays, a string and a nested sequence) in a ~1 s loop, reporting hardware
+**cycles/op** (x86 `_rdtsc` / AArch64 `cntvct_el0`) alongside **CPU-time ns/op**
+and **MB/s**. cycles/op tracks the cost of the code; MB/s is this machine's
+throughput.
+
+```
+--- perf: serialize (stream API) ---
+  iterations    : 842517
+  message size  : 170 bytes
+  cycles/op     : 3317.5  (hardware cycle counter)
+  CPU time/op   : 1186.9 ns  (process CPU time, not wall-clock)
+  throughput    : 143.2 MB/s  (speedtest, MB = 1e6 bytes)
 ```
 
-Reference measurements (deterministic; identical on every run):
+### `benches/bench.rs` — throughput speedtest (MB/s)
 
-| Benchmark | Instructions | Estimated cycles |
-|-----------|-------------:|-----------------:|
-| `encode_u64_array` (1000 × `u64`) | 176,525 | 219,564 |
-| `encode_typical_message` | 568 | 1,740 |
-| `decode_u64_array` (1000 × `u64`) | 269,594 | 324,075 |
-| `decode_typical_message` | 1,452 | 2,608 |
+Two workloads — a 1000-element `u64` array and a small "typical" mixed message —
+each looped ~1 s, encode and decode:
 
-That is roughly **177 instructions per element to encode** and **270 to decode** a
-varint `u64` (worst-case spread of 1–10 byte values). `setup` functions (building
-inputs) run outside measurement, so only the encode/decode work is counted.
-
-## Throughput (MB/s) speedtest
-
-`benches/bench.rs` is the machine-*dependent* counterpart to `perf.rs`: it times
-the real code on **this** machine and reports **throughput in MB/s** (where
-`1 MB = 1,000,000` wire bytes). The numbers vary with CPU speed, system load and
-build flags — that is the point: they answer "how fast does it run *here*?". It
-is a plain binary (`harness = false`), so it needs **no Valgrind and no special
-privileges** and runs anywhere `cargo` does.
-
-Run:
-
-```bash
-cargo bench --bench bench
-BENCH_MS=2000 cargo bench --bench bench   # longer, steadier measurement (default 1000 ms)
+```
+Workload                           MB/s
+--------                           ----
+encode: u64 array (1000)         690.06
+encode: typical message           35.83
+decode: u64 array (1000)         340.62
+decode: typical message           33.34
 ```
 
-Example results (will differ on your hardware):
-
-| Benchmark | Throughput |
-|-----------|-----------:|
-| `encode_u64_array` (1000 × `u64`) | ~690 MB/s |
-| `decode_u64_array` (1000 × `u64`) | ~340 MB/s |
-| `encode_typical_message` | ~850 MB/s |
-| `decode_typical_message` | ~260 MB/s |
-
-Each benchmark warms up, then loops for a fixed time budget; input construction
-runs outside the timed loop, and `black_box` guards keep the optimizer from
-eliding the work. Use `perf.rs` to catch regressions deterministically and
-`bench.rs` to see real-world throughput.
+Numbers vary with CPU speed, load and build flags (that's the point — they show
+real throughput here). The "typical message" figures are small because, exactly
+as in the C/C++ tools, the per-iteration CPU-clock read dominates a sub-100 ns
+operation; they are comparable *across languages* but are not an absolute
+small-message speed. `black_box` guards keep the optimizer from eliding the work,
+and input construction runs outside the timed loop.
 
 ## License
 
