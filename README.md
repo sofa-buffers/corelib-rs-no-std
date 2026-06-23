@@ -13,8 +13,8 @@
 
 A `#![no_std]`, **heap-free**, **streaming** Rust implementation of the
 SofaBuffers (*Sofab*) serialization format. It is a port of the C `corelib`
-(`istream.c` / `ostream.c`) and is intended for very small Cortex-M class
-microcontrollers.
+(`istream.c` / `ostream.c`) and runs on any platform, from tiny
+microcontrollers to desktops and servers.
 
 The wire format is specified, language-neutrally, in the
 [SofaBuffers documentation](https://github.com/sofa-buffers/documentation). The
@@ -90,7 +90,7 @@ sofab = { version = "0.1", default-features = false }
 ```
 
 > **Note on value width:** like the C default configuration, the scalar value
-> type is 64-bit (`u64`/`i64`). On a 32-bit Cortex-M this pulls in libgcc/compiler
+> type is 64-bit (`u64`/`i64`). On a 32-bit target this pulls in libgcc/compiler
 > 64-bit helpers — the single largest footprint item (see the SofaBuffers
 > [documentation](https://github.com/sofa-buffers/documentation) footprint
 > notes). A 32-bit value mode is a planned feature.
@@ -165,6 +165,36 @@ Reference measurements (deterministic; identical on every run):
 That is roughly **177 instructions per element to encode** and **270 to decode** a
 varint `u64` (worst-case spread of 1–10 byte values). `setup` functions (building
 inputs) run outside measurement, so only the encode/decode work is counted.
+
+## Throughput (MB/s) speedtest
+
+`benches/bench.rs` is the machine-*dependent* counterpart to `perf.rs`: it times
+the real code on **this** machine and reports **throughput in MB/s** (where
+`1 MB = 1,000,000` wire bytes). The numbers vary with CPU speed, system load and
+build flags — that is the point: they answer "how fast does it run *here*?". It
+is a plain binary (`harness = false`), so it needs **no Valgrind and no special
+privileges** and runs anywhere `cargo` does.
+
+Run:
+
+```bash
+cargo bench --bench bench
+BENCH_MS=2000 cargo bench --bench bench   # longer, steadier measurement (default 1000 ms)
+```
+
+Example results (will differ on your hardware):
+
+| Benchmark | Throughput |
+|-----------|-----------:|
+| `encode_u64_array` (1000 × `u64`) | ~690 MB/s |
+| `decode_u64_array` (1000 × `u64`) | ~340 MB/s |
+| `encode_typical_message` | ~850 MB/s |
+| `decode_typical_message` | ~260 MB/s |
+
+Each benchmark warms up, then loops for a fixed time budget; input construction
+runs outside the timed loop, and `black_box` guards keep the optimizer from
+eliding the work. Use `perf.rs` to catch regressions deterministically and
+`bench.rs` to see real-world throughput.
 
 ## License
 

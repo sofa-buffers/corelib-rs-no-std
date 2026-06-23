@@ -4,9 +4,9 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.70"
 license = "MIT"
-description = "SofaBuffers (Sofab) — compact, streaming, no_std/no-heap serialization core for very small Cortex-M targets. Rust port of the C corelib (istream/ostream)."
+description = "SofaBuffers (Sofab) — compact, streaming, no_std/no-heap serialization core for any platform, from microcontrollers to servers. Rust port of the C corelib (istream/ostream)."
 repository = "https://github.com/sofa-buffers/corelib-rs"
-keywords = ["serialization", "embedded", "no_std", "varint", "cortex-m"]
+keywords = ["serialization", "embedded", "no_std", "varint", "streaming"]
 categories = ["embedded", "encoding", "no-std"]
 
 [lib]
@@ -20,6 +20,11 @@ iai-callgrind = "0.16.1"
 
 [[bench]]
 name = "perf"
+harness = false
+
+# Wall-clock throughput speedtest (MB/s) on the host machine — see benches/bench.rs.
+[[bench]]
+name = "bench"
 harness = false
 
 # ---------------------------------------------------------------------------
@@ -39,7 +44,7 @@ sequence = []
 fp64 = ["fixlen"]
 
 # ---------------------------------------------------------------------------
-# Size-optimized release profile suitable for Cortex-M firmware.
+# Size-optimized release profile suitable for embedded firmware.
 # ---------------------------------------------------------------------------
 [profile.release]
 opt-level = "z"      # optimize for size
