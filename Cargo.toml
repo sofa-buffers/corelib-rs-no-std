@@ -22,6 +22,11 @@ iai-callgrind = "0.16.1"
 name = "perf"
 harness = false
 
+# Wall-clock throughput speedtest (MB/s) on the host machine — see benches/bench.rs.
+[[bench]]
+name = "bench"
+harness = false
+
 # ---------------------------------------------------------------------------
 # Feature flags mirror the C corelib's SOFAB_DISABLE_* compile switches, but
 # expressed positively (a feature *enables* support). Turn features off to

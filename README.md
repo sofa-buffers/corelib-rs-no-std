@@ -166,6 +166,36 @@ That is roughly **177 instructions per element to encode** and **270 to decode**
 varint `u64` (worst-case spread of 1–10 byte values). `setup` functions (building
 inputs) run outside measurement, so only the encode/decode work is counted.
 
+## Throughput (MB/s) speedtest
+
+`benches/bench.rs` is the machine-*dependent* counterpart to `perf.rs`: it times
+the real code on **this** machine and reports **throughput in MB/s** (where
+`1 MB = 1,000,000` wire bytes). The numbers vary with CPU speed, system load and
+build flags — that is the point: they answer "how fast does it run *here*?". It
+is a plain binary (`harness = false`), so it needs **no Valgrind and no special
+privileges** and runs anywhere `cargo` does.
+
+Run:
+
+```bash
+cargo bench --bench bench
+BENCH_MS=2000 cargo bench --bench bench   # longer, steadier measurement (default 1000 ms)
+```
+
+Example results (will differ on your hardware):
+
+| Benchmark | Throughput |
+|-----------|-----------:|
+| `encode_u64_array` (1000 × `u64`) | ~690 MB/s |
+| `decode_u64_array` (1000 × `u64`) | ~340 MB/s |
+| `encode_typical_message` | ~850 MB/s |
+| `decode_typical_message` | ~260 MB/s |
+
+Each benchmark warms up, then loops for a fixed time budget; input construction
+runs outside the timed loop, and `black_box` guards keep the optimizer from
+eliding the work. Use `perf.rs` to catch regressions deterministically and
+`bench.rs` to see real-world throughput.
+
 ## License
 
 MIT (same as the SofaBuffers C corelib).
