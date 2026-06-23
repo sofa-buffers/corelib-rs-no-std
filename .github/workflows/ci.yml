@@ -31,6 +31,32 @@ jobs:
       - name: Test (default features)
         run: cargo test --verbose
 
+  coverage:
+    name: Coverage (Coveralls)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Cache cargo registry & build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Generate LCOV coverage (all features)
+        run: cargo llvm-cov --all-features --lcov --output-path lcov.info
+
+      - name: Upload to Coveralls
+        uses: coverallsapp/github-action@v2
+        with:
+          file: lcov.info
+          format: lcov
+
   no_std:
     name: no_std bare-metal build
     runs-on: ubuntu-latest
