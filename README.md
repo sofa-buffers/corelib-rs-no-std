@@ -107,6 +107,25 @@ sofab = { version = "0.1", default-features = false }
 | `istream.c` | `istream` ([`IStream`] + [`Visitor`]) | ported (push/visitor model instead of bind-target callbacks) |
 | `object.c` (descriptor transcoder) | — | not ported. The idiomatic Rust equivalent is a `#[derive(Sofab)]` proc-macro generating `Visitor`/encode glue; the streaming core above already covers serialize/deserialize. |
 
+## Build & test
+
+```bash
+cargo build --all-features       # build with every feature enabled
+cargo build                      # build with default features
+cargo test --all-features        # unit + integration + doctests
+cargo test                       # tests with default features
+```
+
+To prove the crate is genuinely `no_std` / heap-free, build the library for a
+bare-metal target with no host `std`:
+
+```bash
+rustup target add thumbv7em-none-eabihf
+cargo build --lib --all-features --target thumbv7em-none-eabihf
+```
+
+These are exactly the steps run in CI (see [`.github/workflows/ci.yml`](.github/workflows/ci.yml)).
+
 ## Testing & coverage
 
 ```bash
