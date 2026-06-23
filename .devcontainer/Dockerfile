@@ -19,7 +19,7 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
     | sh -s -- -y --default-toolchain $RUST_VERSION --profile minimal \
     && rustup component add rustfmt clippy rust-src
 
-# Node.js (LTS) für Claude Code
+# Node.js (LTS) for Claude Code
 RUN curl -fsSL https://deb.nodesource.com/setup_lts.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
