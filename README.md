@@ -37,6 +37,10 @@ implementation.
 | Reserve-offset | `OStream::with_offset` leaves room at the front of the buffer for a lower-layer protocol header (saves a copy). |
 | Small footprint | Cargo features drop whole code paths; size-optimized release profile (`opt-level="z"`, LTO, `panic="abort"`). |
 
+### Source documentation
+
+[Documentation](https://sofa-buffers.github.io/corelib-rs/)
+
 ## Usage
 
 ```rust
