@@ -1,11 +1,13 @@
 <p align="center"><img src="assets/sofabuffers_logo.png" alt="SofaBuffers Logo" height="140"></p>
 
-# SofaBuffers
+<h1 align="center">SofaBuffers</h1>
 
+<p align="center">
 <b>Structured Objects For Anyone</b><br>
 <i>... so optimized, feels amazing.</i>
+</p>
 
-[Would you like to know more?](https://github.com/sofa-buffers)
+<p align="center"><a href="https://github.com/sofa-buffers">Would you like to know more?</a></p>
 
 ## SofaBuffers Rust library
 
@@ -13,11 +15,18 @@
 
 [![CI](https://github.com/sofa-buffers/corelib-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/sofa-buffers/corelib-rs/actions/workflows/ci.yml)
 [![Coverage](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fsofa-buffers%2Fcorelib-rs%2Fbadges%2Fcoverage.json)](https://github.com/sofa-buffers/corelib-rs/actions/workflows/ci.yml)
+[![Docs](https://img.shields.io/badge/docs-GitHub%20Pages-1f7feb)](https://sofa-buffers.github.io/corelib-rs/)
 
 A `#![no_std]`, **heap-free**, **streaming** Rust implementation of the
 SofaBuffers (*Sofab*) serialization format. It is a port of the C `corelib`
 (`istream.c` / `ostream.c`) and runs on any platform, from tiny
 microcontrollers to desktops and servers.
+
+**Minimum Rust version:** 1.70. **Install:**
+
+```bash
+cargo add sofab
+```
 
 The wire format is specified, language-neutrally, in the
 [SofaBuffers documentation](https://github.com/sofa-buffers/documentation). For
@@ -81,6 +90,33 @@ let mut os = OStream::with_flush(&mut scratch, 0, |chunk: &[u8]| out.extend_from
 for i in 0..1000u32 { os.write_unsigned(i, i as u64).unwrap(); }
 os.flush();                                   // push the tail
 ```
+
+## API summary
+
+**Encoder — [`OStream`]** (writes into a caller buffer; never allocates):
+
+| Operation | Purpose |
+|-----------|---------|
+| `new` / `with_offset` / `with_flush` | construct over a buffer; reserve a header offset; attach a flush sink |
+| `write_unsigned` / `write_signed` / `write_boolean` | scalar integers (varint / zig-zag) and booleans |
+| `write_fp32` / `write_fp64` / `write_str` / `write_blob` / `write_fixlen` | fixed-length values (LE floats, UTF-8 text, raw bytes) |
+| `write_array_unsigned` / `write_array_signed` / `write_array_fp32` / `write_array_fp64` | arrays with a single shared descriptor |
+| `write_sequence_begin` / `write_sequence_end` | open / close a nested sequence |
+| `flush` / `buffer_set` / `bytes_used` | drain pending bytes; swap the output buffer mid-stream; bytes written |
+
+**Decoder — [`IStream`] + [`Visitor`]** (push-feed; suspends/resumes at any byte boundary):
+
+| Operation | Purpose |
+|-----------|---------|
+| `IStream::new` | construct a fresh decoder |
+| `feed(bytes, visitor)` | feed an arbitrarily small chunk; decoded fields are pushed to the visitor |
+| `Visitor::unsigned` / `signed` / `fp32` / `fp64` | scalar fields and array elements |
+| `Visitor::string` / `blob` | fixed-length payloads, delivered in chunks (`total` / `offset` / `chunk`) |
+| `Visitor::array_begin` | start of an array (`kind`, `count`); elements follow via the scalar/float callbacks |
+| `Visitor::sequence_begin` / `sequence_end` | nested-sequence framing |
+
+A `Visitor` method left at its default (empty) implementation transparently skips
+that field — the equivalent of the C decoder's auto-skip.
 
 ## Feature flags
 
@@ -157,4 +193,25 @@ Coverage prerequisites (one-time):
 ```bash
 rustup component add llvm-tools-preview
 cargo install cargo-llvm-cov
+```
+
+## Benchmarks
+
+Two tools mirror the C/C++ benchmark suite and run the **same** reference
+workloads (a 1000-element integer array and a typical composite message), so
+results are comparable across language ports.
+
+`perf` — CPU-speed-independent per-operation cost: hardware cycles/op (x86 TSC /
+AArch64 counter) plus CPU ns/op and throughput, measured over a ~1 s CPU-time
+loop:
+
+```bash
+cargo bench --bench perf
+```
+
+`bench` — practical throughput in **MB/s** (MB = 1,000,000 bytes), against
+process CPU time, for encode and decode of each workload:
+
+```bash
+cargo bench --bench bench
 ```
