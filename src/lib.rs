@@ -64,7 +64,7 @@ mod varint;
 pub use error::{Error, Result};
 pub use istream::{IStream, Visitor};
 pub use ostream::{Flush, NoFlush, OStream};
-pub use types::{Id, Signed, Unsigned, ID_MAX};
+pub use types::{Id, Signed, Unsigned, API_VERSION, ID_MAX};
 
 #[cfg(feature = "fixlen")]
 pub use types::FixlenType;

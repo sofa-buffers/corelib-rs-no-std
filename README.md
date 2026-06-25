@@ -20,11 +20,15 @@ SofaBuffers (*Sofab*) serialization format. It is a port of the C `corelib`
 microcontrollers to desktops and servers.
 
 The wire format is specified, language-neutrally, in the
-[SofaBuffers documentation](https://github.com/sofa-buffers/documentation). The
-unit tests here use the exact byte vectors from the
-[C corelib](https://github.com/sofa-buffers/corelib-c-cpp)'s reference suite
-(`test/c/test_ostream.c`) to guarantee byte-for-byte interoperability with the C
-implementation.
+[SofaBuffers documentation](https://github.com/sofa-buffers/documentation). For
+byte-for-byte interoperability across every language port, the test suite
+replays the **shared** cross-language test vectors
+([`assets/test_vectors.json`](assets/test_vectors.json), copied verbatim from
+the documentation repository — the single source of truth) and asserts the
+encoder's output and the decoder's recovered fields match for all of them.
+
+This library implements SofaBuffers **API version 1** (exposed as
+`sofab::API_VERSION`).
 
 ## Why this design
 
@@ -139,10 +143,11 @@ cargo test --all-features        # unit + integration + doctests
 
 Tests live in `tests/` as separate integration files:
 
-- `ostream_tests.rs` — encoder, byte-exact vs. C vectors
+- `vectors_tests.rs` — replays the shared `assets/test_vectors.json` (encode, decode, chunked)
+- `ostream_tests.rs` — encoder, byte-exact vs. reference vectors
 - `istream_tests.rs` — decoder over the same vectors + malformed-input errors
 - `roundtrip_tests.rs` — encode→decode value preservation
-- `api_tests.rs` — offset reserve, buffer swap, large chunked streaming
+- `api_tests.rs` — offset reserve, buffer swap, large chunked streaming, API version
 - `tests/common/mod.rs` — shared recording `Visitor`
 
 Current coverage: **~93% lines** (`cargo llvm-cov --all-features`).

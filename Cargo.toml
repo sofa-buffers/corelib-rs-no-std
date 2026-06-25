@@ -17,6 +17,11 @@ name = "sofab"
 # measured against CPU time rather than wall-clock — matching the C/C++ tools.
 libc = "0.2"
 
+# Parse the shared `assets/test_vectors.json` (the cross-language source of
+# truth) in the conformance test suite. Test-only; not pulled into the no_std
+# library build.
+serde_json = "1"
+
 # Per-op cost: cycles/op (hardware cycle counter) + throughput MB/s, over a
 # ~1s CPU-time loop. Mirrors bench/c/perf.c and bench/cpp/perf.cpp.
 [[bench]]
