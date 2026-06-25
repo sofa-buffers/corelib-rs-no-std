@@ -1,13 +1,11 @@
 <p align="center"><img src="assets/sofabuffers_logo.png" alt="SofaBuffers Logo" height="140"></p>
 
-<h1 align="center">SofaBuffers</h1>
+# SofaBuffers
 
-<p align="center">
 <b>Structured Objects For Anyone</b><br>
 <i>... so optimized, feels amazing.</i>
-</p>
 
-<p align="center"><a href="https://github.com/sofa-buffers">Would you like to know more?</a></p>
+[Would you like to know more?](https://github.com/sofa-buffers)
 
 ## SofaBuffers Rust library
 
