@@ -16,10 +16,10 @@ use crate::types::*;
 use crate::varint::{zigzag_decode, VarintDecoder};
 use crate::{Id, Signed, Unsigned};
 
-#[cfg(feature = "fixlen")]
-use crate::FixlenType;
 #[cfg(feature = "array")]
 use crate::ArrayKind;
+#[cfg(feature = "fixlen")]
+use crate::FixlenType;
 
 /// Receives decoded fields from an [`IStream`].
 ///
