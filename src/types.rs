@@ -1,6 +1,12 @@
 //! Shared types and wire constants (see the SofaBuffers documentation §2:
 //! <https://github.com/sofa-buffers/documentation>).
 
+/// SofaBuffers wire/API version implemented by this library.
+///
+/// Normative per the architecture spec (`API_VERSION == 1`); matches
+/// `SOFAB_API_VERSION` in the C reference.
+pub const API_VERSION: u32 = 1;
+
 /// Field identifier type. Application-assigned; need not be contiguous.
 pub type Id = u32;
 

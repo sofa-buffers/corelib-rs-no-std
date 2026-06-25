@@ -79,3 +79,9 @@ fn default_constructors_work() {
     is.feed(&buf[..used], &mut rec).unwrap();
     assert_eq!(rec.events, [Event::Unsigned(1, 0)]);
 }
+
+#[test]
+fn api_version_is_one() {
+    // Normative per the architecture spec: the library must expose version 1.
+    assert_eq!(sofab::API_VERSION, 1);
+}
