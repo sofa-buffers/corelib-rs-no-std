@@ -17,7 +17,13 @@
 //!
 //! Run with:  `cargo bench --bench perf`
 
-use sofab::{Id, IStream, OStream, Signed, Unsigned, Visitor};
+// The float workload values (3.14159…, 6.28318…, e, …) are fixed payload bytes
+// chosen to match the C/C++ bench tools exactly. They are deliberately *not*
+// `std::f64::consts::{PI,TAU,E}` — using those would change the encoded bytes
+// and break cross-language comparison — so silence clippy's approx-constant lint.
+#![allow(clippy::approx_constant)]
+
+use sofab::{IStream, Id, OStream, Signed, Unsigned, Visitor};
 use std::hint::black_box;
 
 // ---------------------------------------------------------------------------
@@ -28,10 +34,10 @@ mod cycles {
     pub const HAVE: bool = true;
     #[inline]
     pub fn read() -> u64 {
-        #[cfg(target_arch = "x86_64")]
-        use core::arch::x86_64::_rdtsc;
         #[cfg(target_arch = "x86")]
         use core::arch::x86::_rdtsc;
+        #[cfg(target_arch = "x86_64")]
+        use core::arch::x86_64::_rdtsc;
         // SAFETY: rdtsc is part of the baseline x86/x86_64 instruction set.
         unsafe { _rdtsc() }
     }
@@ -59,7 +65,10 @@ mod cycles {
 /// `clock_gettime(CLOCK_PROCESS_CPUTIME_ID)` — the higher-resolution equivalent
 /// of the C tool's `clock()`.
 fn cpu_now() -> f64 {
-    let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
     // SAFETY: ts is a valid, writable timespec; the clock id is valid on Linux.
     unsafe { libc::clock_gettime(libc::CLOCK_PROCESS_CPUTIME_ID, &mut ts) };
     ts.tv_sec as f64 + ts.tv_nsec as f64 / 1e9
@@ -70,10 +79,12 @@ fn cpu_now() -> f64 {
 // ---------------------------------------------------------------------------
 const PERF_STRING: &str = "perf-benchmark-message";
 
-const PERF_SAMPLES: [u32; 8] =
-    [1_000_000, 2_000_000, 3_000_000, 4_000_000, 5_000_000, 6_000_000, 7_000_000, 8_000_000];
-const PERF_DELTAS: [i32; 8] =
-    [-100_000, -200_000, -300_000, -400_000, -500_000, -600_000, -700_000, -800_000];
+const PERF_SAMPLES: [u32; 8] = [
+    1_000_000, 2_000_000, 3_000_000, 4_000_000, 5_000_000, 6_000_000, 7_000_000, 8_000_000,
+];
+const PERF_DELTAS: [i32; 8] = [
+    -100_000, -200_000, -300_000, -400_000, -500_000, -600_000, -700_000, -800_000,
+];
 const PERF_FP64: [f64; 4] = [3.14159265, 6.28318530, 9.42477795, 12.56637060];
 
 fn perf_encode(buf: &mut [u8]) -> usize {
@@ -99,18 +110,13 @@ fn perf_encode(buf: &mut [u8]) -> usize {
 /// Decode sink: folds every value into a checksum (so nothing is elided) and
 /// captures the top-level `u32` (id 1) and the string (id 8) for the self-check.
 /// Fixed-size string buffer — no per-iteration heap allocation, like the C tool.
+#[derive(Default)]
 struct PerfOut {
     acc: u64,
     depth: i32,
     u32_top: u32,
     str_len: usize,
     str_buf: [u8; 32],
-}
-
-impl Default for PerfOut {
-    fn default() -> Self {
-        PerfOut { acc: 0, depth: 0, u32_top: 0, str_len: 0, str_buf: [0; 32] }
-    }
 }
 
 impl Visitor for PerfOut {
@@ -168,12 +174,21 @@ fn perf_report(what: &str, r: &PerfResult, bytes: usize) {
     println!("  iterations    : {}", r.iters);
     println!("  message size  : {bytes} bytes");
     if cycles::HAVE {
-        println!("  cycles/op     : {:.1}  (hardware cycle counter)", r.cycles_op);
+        println!(
+            "  cycles/op     : {:.1}  (hardware cycle counter)",
+            r.cycles_op
+        );
     } else {
         println!("  cycles/op     : (cycle counter unavailable on this arch)");
     }
-    println!("  CPU time/op   : {:.1} ns  (process CPU time, not wall-clock)", r.ns_op);
-    println!("  throughput    : {:.1} MB/s  (speedtest, MB = 1e6 bytes)", r.mb_s);
+    println!(
+        "  CPU time/op   : {:.1} ns  (process CPU time, not wall-clock)",
+        r.ns_op
+    );
+    println!(
+        "  throughput    : {:.1} MB/s  (speedtest, MB = 1e6 bytes)",
+        r.mb_s
+    );
 }
 
 fn measure_encode(buf: &mut [u8]) -> (PerfResult, usize) {

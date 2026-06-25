@@ -12,7 +12,12 @@
 //!
 //! Run with:  `cargo bench --bench bench`
 
-use sofab::{Id, IStream, OStream, Signed, Unsigned, Visitor};
+// The float workload value (3.14159) is a fixed payload byte pattern matching
+// the C/C++ bench tools, deliberately not `std::f32::consts::PI`; silence the
+// approx-constant lint so the cross-language byte comparison stays intact.
+#![allow(clippy::approx_constant)]
+
+use sofab::{IStream, Id, OStream, Signed, Unsigned, Visitor};
 use std::hint::black_box;
 
 const N: usize = 1000;
@@ -21,7 +26,10 @@ const N: usize = 1000;
 /// `clock_gettime(CLOCK_PROCESS_CPUTIME_ID)` — the higher-resolution equivalent
 /// of the C tool's `clock()`.
 fn cpu_now() -> f64 {
-    let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
     // SAFETY: ts is a valid, writable timespec; the clock id is valid on Linux.
     unsafe { libc::clock_gettime(libc::CLOCK_PROCESS_CPUTIME_ID, &mut ts) };
     ts.tv_sec as f64 + ts.tv_nsec as f64 / 1e9
@@ -57,7 +65,9 @@ impl Visitor for Checksum {
 
 /// A spread of unsigned values exercising 1..10-byte varints.
 fn make_src() -> Vec<u64> {
-    (0..N as u64).map(|i| i.wrapping_mul(0x9E37_79B9_7F4A_7C15)).collect()
+    (0..N as u64)
+        .map(|i| i.wrapping_mul(0x9E37_79B9_7F4A_7C15))
+        .collect()
 }
 
 /// A representative small telemetry-style message: a few scalars, a float, a
