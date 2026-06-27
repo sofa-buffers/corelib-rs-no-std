@@ -49,20 +49,14 @@ array = []
 sequence = []
 # 64-bit floating point. Implies `fixlen`.
 fp64 = ["fixlen"]
-
-# ---------------------------------------------------------------------------
-# Narrowing the scalar value type to 32-bit (u32/i32) is done with the
-# `--cfg sofab_value32` flag, NOT a Cargo feature: it changes a public type, so
-# it is not additive and must not be subject to feature unification. On a 32-bit
-# MCU it removes all double-width integer arithmetic and the libgcc/compiler
-# 64-bit helpers it pulls in — the single largest footprint item. Trade-off:
-# values above 2^32-1 can no longer be represented or decoded (mirrors a 32-bit
-# `sofab_value_t` build of the C reference). Set it via RUSTFLAGS or
-# `.cargo/config.toml`; see README "Footprint". Declared here so the
-# `unexpected_cfgs` lint (Rust >= 1.80) knows it is intentional.
-# ---------------------------------------------------------------------------
-[lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(sofab_value32)'] }
+# Narrow the scalar value type from 64-bit to 32-bit (u32/i32). On a 32-bit MCU
+# this removes all double-width integer arithmetic and the libgcc/compiler 64-bit
+# helpers it pulls in (`__aeabi_llsl`, 8-byte `memclr`) — the single largest
+# footprint item. Trade-off: values above 2^32-1 can no longer be represented or
+# decoded (mirrors a 32-bit `sofab_value_t` build of the C reference). Because it
+# narrows a public type it is *not* additive: application code that needs the
+# 64-bit width should guard it with `sofab::require!(value64)` (see README).
+value32 = []
 
 # ---------------------------------------------------------------------------
 # Size-optimized release profile suitable for embedded firmware.

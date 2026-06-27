@@ -47,6 +47,7 @@ fixlen   = ["sofab/fixlen"]
 array    = ["sofab/array"]
 sequence = ["sofab/sequence"]
 fp64     = ["sofab/fp64"]
+value32  = ["sofab/value32"]
 EOF
 
 cat > "$WORK/src/lib.rs" <<'EOF'
@@ -109,11 +110,10 @@ SECTIONS {
 }
 EOF
 
-measure() { # label  feature-list (empty = integers only)  [extra-rustflags]
-  local label="$1" feats="$2" rflags="${3:-}"
+measure() { # label  feature-list (empty = integers only)
+  local label="$1" feats="$2"
   ( cd "$WORK"
     rm -rf target out.elf
-    export RUSTFLAGS="$rflags"
     if [ -z "$feats" ]; then
       cargo build --release --target "$TARGET" --quiet
     else
@@ -123,14 +123,14 @@ measure() { # label  feature-list (empty = integers only)  [extra-rustflags]
       "target/$TARGET/release/libsofab_footprint.a"
   )
   local text; text=$("$SIZE" "$WORK/out.elf" | awk 'NR==2{print $1}')
-  printf "  %-38s %6d B  (%5.2f KiB)\n" "$label" "$text" "$(awk "BEGIN{print $text/1024}")"
+  printf "  %-40s %6d B  (%5.2f KiB)\n" "$label" "$text" "$(awk "BEGIN{print $text/1024}")"
 }
 
 echo "sofab .text footprint on $TARGET (opt-z, LTO, panic=abort, gc-sections)"
+measure "MIN: integers only + value32"      "value32"
 measure "integers only"                     ""
 measure "+ sequence"                        "sequence"
 measure "+ array"                           "array"
 measure "+ fixlen"                          "fixlen"
-measure "FULL (fixlen,array,sequence,fp64)" "fixlen,array,sequence,fp64"
-measure "integers only + sofab_value32"     ""                           "--cfg sofab_value32"
-measure "FULL + sofab_value32"              "fixlen,array,sequence,fp64" "--cfg sofab_value32"
+measure "+ value32 (full wire, 32-bit)"     "value32,fixlen,array,sequence,fp64"
+measure "MAX: FULL (fixlen,array,sequence,fp64)" "fixlen,array,sequence,fp64"

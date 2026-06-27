@@ -85,3 +85,20 @@ fn api_version_is_one() {
     // Normative per the architecture spec: the library must expose version 1.
     assert_eq!(sofab::API_VERSION, 1);
 }
+
+#[test]
+fn config_constants_reflect_features() {
+    // The `config` module is the build-time introspection surface that
+    // `require!` is built on; it must mirror how the crate was compiled. This
+    // test runs under the default (all wire features, 64-bit) configuration.
+    assert!(sofab::config::FIXLEN);
+    assert!(sofab::config::ARRAY);
+    assert!(sofab::config::SEQUENCE);
+    assert!(sofab::config::FP64);
+    assert_eq!(sofab::config::VALUE_BITS, 64);
+    assert_eq!(sofab::config::VALUE_BITS, sofab::Unsigned::BITS);
+}
+
+// A satisfied `require!` must compile to nothing. (An unsatisfied one is a
+// compile error, exercised in the macro's `compile_fail` doctest.)
+sofab::require!(fixlen, array, sequence, fp64, value64);
