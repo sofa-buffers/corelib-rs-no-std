@@ -7,7 +7,7 @@
   "runArgs": ["--env-file", "${localWorkspaceFolder}/.devcontainer/.env"],
   "customizations": {
     "vscode": {
-      "extensions": ["rust-lang.rust-analyzer", "tamasfe.even-better-toml"]
+      "extensions": ["rust-lang.rust-analyzer", "tamasfe.even-better-toml", "anthropic.claude-code"]
     }
   }
 }

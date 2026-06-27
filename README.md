@@ -1,9 +1,9 @@
-<p align="center"><img src="assets/sofabuffers_logo.png" alt="SofaBuffers Logo" height="140"></p>
+<p align="center"><img src="assets/sofabuffers_logo.png" alt="SofaBuffers" height="140"></p>
 
 # SofaBuffers
 
-<b>Structured Objects For Anyone</b><br>
-<i>... so optimized, feels amazing.</i>
+**Structured Objects For Anyone** \
+*... so optimized, feels amazing.*
 
 [Would you like to know more?](https://github.com/sofa-buffers)
 
@@ -47,10 +47,6 @@ This library implements SofaBuffers **API version 1** (exposed as
 | Streaming **in** | [`IStream`] is a byte-at-a-time state machine fed arbitrary chunks; large string/blob payloads are delivered in pieces. |
 | Reserve-offset | `OStream::with_offset` leaves room at the front of the buffer for a lower-layer protocol header (saves a copy). |
 | Small footprint | Cargo features drop whole code paths; size-optimized release profile (`opt-level="z"`, LTO, `panic="abort"`). |
-
-### Source documentation
-
-[Documentation](https://sofa-buffers.github.io/corelib-rs/)
 
 ## Usage
 
@@ -168,10 +164,7 @@ cargo build --lib --all-features --target thumbv7em-none-eabihf
 
 These are exactly the steps run in CI (see [`.github/workflows/ci.yml`](.github/workflows/ci.yml)).
 
-## Testing & coverage
-
 ```bash
-cargo test --all-features        # unit + integration + doctests
 ./coverage.sh                    # llvm-cov: terminal summary + HTML + lcov.info
 ```
 
