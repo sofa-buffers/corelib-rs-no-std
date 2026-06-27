@@ -234,7 +234,7 @@ These are exactly the steps run in CI (see [`.github/workflows/ci.yml`](.github/
 
 Tests live in `tests/` as separate integration files:
 
-- `vectors_tests.rs` — replays the shared `assets/test_vectors.json` (encode, decode, chunked)
+- `vectors_tests.rs` — replays the shared `assets/test_vectors.json` (encode, decode, chunked, and `skip_ids` auto-skip)
 - `ostream_tests.rs` — encoder, byte-exact vs. reference vectors
 - `istream_tests.rs` — decoder over the same vectors + malformed-input errors
 - `roundtrip_tests.rs` — encode→decode value preservation
