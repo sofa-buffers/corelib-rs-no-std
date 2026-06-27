@@ -9,6 +9,9 @@
 //! 1. **Vector encode** — replay `fields[]`, assert output matches `serialized.hex`.
 //! 2. **Vector decode** — feed the official hex, assert the recovered fields match.
 //! 3. **Chunked streaming** — feed the same bytes one at a time, assert identical.
+//! 4. **Skip** — for vectors carrying `skip_ids`, a receiver that ignores those
+//!    ids (skipping a `sequence_begin` skips its whole sub-tree) must still
+//!    recover every other field, whole and chunked.
 //!
 //! Roundtrip (encode → decode) falls out of running (1) and (2) on every vector.
 
@@ -16,7 +19,7 @@ mod common;
 
 use common::{Event, Recorder};
 use serde_json::Value;
-use sofab::{ArrayKind, IStream, OStream};
+use sofab::{ArrayKind, IStream, Id, OStream, Signed, Unsigned, Visitor};
 
 /// The shared vectors, embedded from the verbatim asset copy.
 const VECTORS_JSON: &str = include_str!("../assets/test_vectors.json");
@@ -133,27 +136,74 @@ fn i_vec<T: TryFrom<i64>>(vals: &[Value]) -> Vec<T> {
 fn expected_events(fields: &[Value]) -> Vec<Event> {
     let mut ev = Vec::new();
     for f in fields {
+        push_field_events(&mut ev, f);
+    }
+    ev
+}
+
+/// Append the decoder events for a single `fields[]` entry.
+fn push_field_events(ev: &mut Vec<Event>, f: &Value) {
+    let op = f["op"].as_str().unwrap();
+    let id = f.get("id").and_then(Value::as_u64).unwrap_or(0) as u32;
+    match op {
+        "unsigned" => ev.push(Event::Unsigned(id, f["value"].as_u64().unwrap())),
+        // booleans decode as plain unsigned 0/1.
+        "boolean" => ev.push(Event::Unsigned(id, f["value"].as_bool().unwrap() as u64)),
+        "signed" => ev.push(Event::Signed(id, f["value"].as_i64().unwrap())),
+        "fp32" => ev.push(Event::Fp32(id, (as_f64(&f["value"]) as f32).to_bits())),
+        "fp64" => ev.push(Event::Fp64(id, as_f64(&f["value"]).to_bits())),
+        "string" => ev.push(Event::Str(
+            id,
+            f["value"].as_str().unwrap().as_bytes().to_vec(),
+        )),
+        "blob" => ev.push(Event::Blob(
+            id,
+            hex_to_bytes(f["value_hex"].as_str().unwrap()),
+        )),
+        "array" => expected_array_events(ev, id, f),
+        "sequence_begin" => ev.push(Event::SequenceBegin(id)),
+        "sequence_end" => ev.push(Event::SequenceEnd),
+        other => panic!("unknown op {other:?}"),
+    }
+}
+
+/// The events a receiver must observe for `fields[]` when it ignores `skip_ids`.
+///
+/// Scalars/arrays whose id is in `skip_ids` are dropped; a `sequence_begin`
+/// whose id is in `skip_ids` drops the *entire* nested sequence (its begin,
+/// everything inside, and the matching end), and decoding resumes after it.
+/// This mirrors the C decoder's auto-skip; in this push/visitor port the same
+/// behaviour is realised by a [`SkipRecorder`] that tracks nesting depth.
+fn expected_events_with_skip(fields: &[Value], skip: &[u32]) -> Vec<Event> {
+    let mut ev = Vec::new();
+    let mut depth: u32 = 0;
+    // `Some(d)` while inside a skipped sub-tree that was opened at depth `d`.
+    let mut skip_until: Option<u32> = None;
+    for f in fields {
         let op = f["op"].as_str().unwrap();
         let id = f.get("id").and_then(Value::as_u64).unwrap_or(0) as u32;
         match op {
-            "unsigned" => ev.push(Event::Unsigned(id, f["value"].as_u64().unwrap())),
-            // booleans decode as plain unsigned 0/1.
-            "boolean" => ev.push(Event::Unsigned(id, f["value"].as_bool().unwrap() as u64)),
-            "signed" => ev.push(Event::Signed(id, f["value"].as_i64().unwrap())),
-            "fp32" => ev.push(Event::Fp32(id, (as_f64(&f["value"]) as f32).to_bits())),
-            "fp64" => ev.push(Event::Fp64(id, as_f64(&f["value"]).to_bits())),
-            "string" => ev.push(Event::Str(
-                id,
-                f["value"].as_str().unwrap().as_bytes().to_vec(),
-            )),
-            "blob" => ev.push(Event::Blob(
-                id,
-                hex_to_bytes(f["value_hex"].as_str().unwrap()),
-            )),
-            "array" => expected_array_events(&mut ev, id, f),
-            "sequence_begin" => ev.push(Event::SequenceBegin(id)),
-            "sequence_end" => ev.push(Event::SequenceEnd),
-            other => panic!("unknown op {other:?}"),
+            "sequence_begin" => {
+                if skip_until.is_none() && skip.contains(&id) {
+                    skip_until = Some(depth);
+                } else if skip_until.is_none() {
+                    ev.push(Event::SequenceBegin(id));
+                }
+                depth += 1;
+            }
+            "sequence_end" => {
+                depth -= 1;
+                match skip_until {
+                    Some(d) if d == depth => skip_until = None,
+                    Some(_) => {}
+                    None => ev.push(Event::SequenceEnd),
+                }
+            }
+            _ => {
+                if skip_until.is_none() && !skip.contains(&id) {
+                    push_field_events(&mut ev, f);
+                }
+            }
         }
     }
     ev
@@ -186,6 +236,134 @@ fn decode_one_byte_at_a_time(bytes: &[u8]) -> Vec<Event> {
     let mut is = IStream::new();
     for &b in bytes {
         is.feed(&[b], &mut rec).expect("chunked decode");
+    }
+    rec.events
+}
+
+/// A [`Visitor`] modelling a receiver that ignores a set of field `skip_ids`.
+///
+/// Scalars/arrays with a skipped id are dropped; encountering a skipped
+/// `sequence_begin` drops the whole nested sequence by tracking depth until the
+/// matching `sequence_end`. This is how an application performs the spec's
+/// "auto-skip" in the push/visitor model — the decoder still streams every
+/// field, and the visitor chooses what to keep.
+struct SkipRecorder<'a> {
+    skip: &'a [Id],
+    events: Vec<Event>,
+    depth: u32,
+    skip_until: Option<u32>,
+    // chunked string/blob accumulator for kept fields: (id, is_blob, buffer)
+    pending: Option<(Id, bool, Vec<u8>)>,
+}
+
+impl<'a> SkipRecorder<'a> {
+    fn new(skip: &'a [Id]) -> Self {
+        SkipRecorder {
+            skip,
+            events: Vec::new(),
+            depth: 0,
+            skip_until: None,
+            pending: None,
+        }
+    }
+
+    fn skipping(&self) -> bool {
+        self.skip_until.is_some()
+    }
+
+    /// Drop this field's payload? True while inside a skipped sub-tree, or when
+    /// the field's own id is in `skip_ids`.
+    fn drop_id(&self, id: Id) -> bool {
+        self.skipping() || self.skip.contains(&id)
+    }
+
+    fn accumulate(&mut self, id: Id, is_blob: bool, total: usize, offset: usize, chunk: &[u8]) {
+        if offset == 0 {
+            self.pending = Some((id, is_blob, Vec::with_capacity(total)));
+        }
+        let (_, _, buf) = self.pending.as_mut().expect("chunk without begin");
+        buf.extend_from_slice(chunk);
+        if buf.len() == total {
+            let (pid, pblob, buf) = self.pending.take().unwrap();
+            self.events.push(if pblob {
+                Event::Blob(pid, buf)
+            } else {
+                Event::Str(pid, buf)
+            });
+        }
+    }
+}
+
+impl Visitor for SkipRecorder<'_> {
+    fn unsigned(&mut self, id: Id, value: Unsigned) {
+        if !self.drop_id(id) {
+            self.events.push(Event::Unsigned(id, value));
+        }
+    }
+    fn signed(&mut self, id: Id, value: Signed) {
+        if !self.drop_id(id) {
+            self.events.push(Event::Signed(id, value));
+        }
+    }
+    fn fp32(&mut self, id: Id, value: f32) {
+        if !self.drop_id(id) {
+            self.events.push(Event::Fp32(id, value.to_bits()));
+        }
+    }
+    fn fp64(&mut self, id: Id, value: f64) {
+        if !self.drop_id(id) {
+            self.events.push(Event::Fp64(id, value.to_bits()));
+        }
+    }
+    fn string(&mut self, id: Id, total: usize, offset: usize, chunk: &[u8]) {
+        if !self.drop_id(id) {
+            self.accumulate(id, false, total, offset, chunk);
+        }
+    }
+    fn blob(&mut self, id: Id, total: usize, offset: usize, chunk: &[u8]) {
+        if !self.drop_id(id) {
+            self.accumulate(id, true, total, offset, chunk);
+        }
+    }
+    fn array_begin(&mut self, id: Id, kind: ArrayKind, count: usize) {
+        // Array elements arrive via the scalar/float callbacks with this same
+        // id, so a skipped id drops them too — only the header is handled here.
+        if !self.drop_id(id) {
+            self.events.push(Event::ArrayBegin(id, kind, count));
+        }
+    }
+    fn sequence_begin(&mut self, id: Id) {
+        if !self.skipping() {
+            if self.skip.contains(&id) {
+                self.skip_until = Some(self.depth);
+            } else {
+                self.events.push(Event::SequenceBegin(id));
+            }
+        }
+        self.depth += 1;
+    }
+    fn sequence_end(&mut self) {
+        self.depth -= 1;
+        match self.skip_until {
+            Some(d) if d == self.depth => self.skip_until = None,
+            Some(_) => {}
+            None => self.events.push(Event::SequenceEnd),
+        }
+    }
+}
+
+fn decode_with_skip(bytes: &[u8], skip: &[Id]) -> Vec<Event> {
+    let mut rec = SkipRecorder::new(skip);
+    let mut is = IStream::new();
+    is.feed(bytes, &mut rec).expect("skip decode");
+    rec.events
+}
+
+fn decode_with_skip_chunked(bytes: &[u8], skip: &[Id]) -> Vec<Event> {
+    let mut rec = SkipRecorder::new(skip);
+    let mut is = IStream::new();
+    for &b in bytes {
+        is.feed(&[b], &mut rec).expect("skip chunked decode");
     }
     rec.events
 }
@@ -233,6 +411,50 @@ fn all_shared_vectors_conform() {
             "[{name}] chunked decode mismatch",
         );
     }
+}
+
+#[test]
+fn skip_ids_vectors_conform() {
+    // The spec's `skip_ids` dimension: a receiver that ignores those ids (a
+    // skipped `sequence_begin` skips the whole sub-tree) must still recover every
+    // other field, in order, without losing decoder sync — including over chunk
+    // boundaries.
+    let doc: Value = serde_json::from_str(VECTORS_JSON).unwrap();
+    let vectors = doc["vectors"].as_array().unwrap();
+
+    let mut seen = 0;
+    for vec in vectors {
+        let skip_ids: Vec<Id> = match vec.get("skip_ids").and_then(Value::as_array) {
+            Some(a) => a.iter().map(|x| x.as_u64().unwrap() as Id).collect(),
+            None => continue,
+        };
+        seen += 1;
+
+        let name = vec["name"].as_str().unwrap();
+        let fields = vec["fields"].as_array().unwrap();
+        let bytes = hex_to_bytes(vec["serialized"]["hex"].as_str().unwrap());
+
+        let want = expected_events_with_skip(fields, &skip_ids);
+        // Sanity: the skip set must actually drop something, otherwise the vector
+        // would not be exercising the feature.
+        assert!(
+            want.len() < expected_events(fields).len(),
+            "[{name}] skip_ids dropped nothing",
+        );
+
+        assert_eq!(
+            decode_with_skip(&bytes, &skip_ids),
+            want,
+            "[{name}] skip decode mismatch",
+        );
+        assert_eq!(
+            decode_with_skip_chunked(&bytes, &skip_ids),
+            want,
+            "[{name}] skip chunked decode mismatch",
+        );
+    }
+
+    assert!(seen >= 8, "expected the shared skip vectors (saw {seen})");
 }
 
 fn bytes_to_hex(b: &[u8]) -> String {
