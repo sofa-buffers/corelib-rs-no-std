@@ -123,6 +123,7 @@ to shrink the binary on tiny targets.
 | `array` | ✅ | array fields (`VARINTARRAY_*`, `FIXLENARRAY`) |
 | `sequence` | ✅ | nested sequences (`SEQUENCE_START`/`END`) |
 | `fp64` | ✅ | 64-bit floats (implies `fixlen`) |
+| `value32` | ❌ | Narrow the scalar value type to 32-bit (`u32`/`i32`) — see below |
 
 Example minimal build (integers only):
 
@@ -132,9 +133,46 @@ sofab = { version = "0.1", default-features = false }
 
 > **Note on value width:** like the C default configuration, the scalar value
 > type is 64-bit (`u64`/`i64`). On a 32-bit target this pulls in libgcc/compiler
-> 64-bit helpers — the single largest footprint item (see the SofaBuffers
-> [documentation](https://github.com/sofa-buffers/documentation) footprint
-> notes). A 32-bit value mode is a planned feature.
+> 64-bit helpers (e.g. `__aeabi_llsl`, 8-byte `memclr`) and widens every varint
+> operation — the single largest footprint item. Enabling **`value32`** narrows
+> the value type to `u32`/`i32`, which deletes that double-width arithmetic and
+> the helpers it drags in. The trade-off is that values above `2³²−1` can no
+> longer be represented or decoded (a `value32` decoder rejects an over-wide
+> varint with `Error::InvalidMsg`, mirroring a 32-bit `sofab_value_t` build of
+> the C reference). It is a *mutually-exclusive ABI variant*, so it is not part
+> of the additive `--all-features` set:
+>
+> ```toml
+> sofab = { version = "0.1", default-features = false, features = ["value32", "fixlen", "array", "sequence", "fp64"] }
+> ```
+
+## Footprint
+
+`.text` of the library, measured by linking a `no_std` staticlib that exercises
+the encode + decode API for **Cortex-M0** (`thumbv6m-none-eabi`) with the
+size-optimized release profile (`opt-level="z"`, fat LTO, `panic="abort"`) and
+`--gc-sections`:
+
+| Configuration | `.text` | with `value32` |
+|---------------|--------:|---------------:|
+| integers only (`--no-default-features`) | **902 B** | **724 B** |
+| + `sequence` | 982 B | — |
+| + `array` | 1 250 B | — |
+| + `fixlen` (fp32 / str / blob) | 1 501 B | — |
+| FULL (`fixlen,array,sequence,fp64`) | **2 229 B** | **1 797 B** |
+
+So the integer-only core fits in under **1 KiB** of flash and the whole
+streaming codec (every wire type) in well under **2.5 KiB**. On Cortex-M0
+`value32` removes ~20 % of the code — chiefly by deleting the 64-bit
+shift/`memclr` helpers (`__aeabi_llsl`, `__aeabi_memclr8`) and halving the width
+of every varint operation.
+
+Reproduce these numbers (and break them down per symbol) with:
+
+```bash
+tools/footprint.sh                 # Cortex-M0 (thumbv6m-none-eabi)
+tools/footprint.sh thumbv7em-none-eabihf   # Cortex-M4F
+```
 
 ## Layering vs. the C library
 

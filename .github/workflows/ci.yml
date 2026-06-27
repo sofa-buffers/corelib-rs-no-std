@@ -27,8 +27,15 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all --check
 
-      - name: Clippy (all features, all targets)
-        run: cargo clippy --all-features --all-targets -- -D warnings
+      # NB: `value32` is a mutually-exclusive ABI variant (it narrows the scalar
+      # value type), so it is *not* part of the additive `--all-features` set.
+      # Lint the full 64-bit wire-feature set here; `value32` is built separately
+      # in the no_std job.
+      - name: Clippy (all wire features, all targets)
+        run: cargo clippy --features fixlen,array,sequence,fp64 --all-targets -- -D warnings
+
+      - name: Clippy (value32, library)
+        run: cargo clippy --no-default-features --features value32,fixlen,array,sequence,fp64 --lib -- -D warnings
 
   test:
     name: Build & test
@@ -42,11 +49,11 @@ jobs:
       - name: Cache cargo registry & build
         uses: Swatinem/rust-cache@v2
 
-      - name: Build (all features)
-        run: cargo build --all-features --verbose
+      - name: Build (all wire features)
+        run: cargo build --features fixlen,array,sequence,fp64 --verbose
 
-      - name: Test (all features)
-        run: cargo test --all-features --verbose
+      - name: Test (all wire features)
+        run: cargo test --features fixlen,array,sequence,fp64 --verbose
 
       - name: Test (default features)
         run: cargo test --verbose
@@ -72,7 +79,7 @@ jobs:
 
       - name: Measure coverage
         run: |
-          cargo llvm-cov --all-features --summary-only --json --output-path coverage.json
+          cargo llvm-cov --features fixlen,array,sequence,fp64 --summary-only --json --output-path coverage.json
           PCT=$(jq '.data[0].totals.lines.percent' coverage.json)
           printf 'line coverage: %.1f%%\n' "$PCT"
           echo "COVERAGE_PCT=$PCT" >> "$GITHUB_ENV"
@@ -116,5 +123,9 @@ jobs:
 
       # Building the library for a bare-metal Cortex-M target with no host std
       # proves the crate is genuinely no_std / heap-free.
-      - name: Build for thumbv7em-none-eabihf (all features)
-        run: cargo build --lib --all-features --target thumbv7em-none-eabihf
+      - name: Build for thumbv7em-none-eabihf (all wire features)
+        run: cargo build --lib --features fixlen,array,sequence,fp64 --target thumbv7em-none-eabihf
+
+      # The 32-bit value ABI must also compile for bare metal.
+      - name: Build for thumbv7em-none-eabihf (value32)
+        run: cargo build --lib --no-default-features --features value32,fixlen,array,sequence,fp64 --target thumbv7em-none-eabihf

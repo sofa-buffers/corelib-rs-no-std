@@ -49,6 +49,13 @@ array = []
 sequence = []
 # 64-bit floating point. Implies `fixlen`.
 fp64 = ["fixlen"]
+# Narrow the scalar value type from 64-bit to 32-bit (u32/i32). On a 32-bit MCU
+# this removes all double-width integer arithmetic and the libgcc/compiler 64-bit
+# helpers it pulls in — the single largest footprint item. Trade-off: values
+# above 2^32-1 can no longer be represented or decoded. Mirrors a 32-bit
+# `sofab_value_t` build of the C reference. Independent of `fp64` (floats are
+# unaffected).
+value32 = []
 
 # ---------------------------------------------------------------------------
 # Size-optimized release profile suitable for embedded firmware.
