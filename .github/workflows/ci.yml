@@ -27,15 +27,17 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all --check
 
-      # NB: `value32` is a mutually-exclusive ABI variant (it narrows the scalar
-      # value type), so it is *not* part of the additive `--all-features` set.
-      # Lint the full 64-bit wire-feature set here; `value32` is built separately
-      # in the no_std job.
+      # NB: the 32-bit value ABI is a `--cfg sofab_value32` flag (it narrows the
+      # scalar value type, which is not additive), not a Cargo feature. Lint the
+      # full 64-bit wire-feature set here; `sofab_value32` is built separately in
+      # the no_std job.
       - name: Clippy (all wire features, all targets)
         run: cargo clippy --features fixlen,array,sequence,fp64 --all-targets -- -D warnings
 
-      - name: Clippy (value32, library)
-        run: cargo clippy --no-default-features --features value32,fixlen,array,sequence,fp64 --lib -- -D warnings
+      - name: Clippy (sofab_value32, library)
+        env:
+          RUSTFLAGS: --cfg sofab_value32
+        run: cargo clippy --features fixlen,array,sequence,fp64 --lib -- -D warnings
 
   test:
     name: Build & test
@@ -126,6 +128,8 @@ jobs:
       - name: Build for thumbv7em-none-eabihf (all wire features)
         run: cargo build --lib --features fixlen,array,sequence,fp64 --target thumbv7em-none-eabihf
 
-      # The 32-bit value ABI must also compile for bare metal.
-      - name: Build for thumbv7em-none-eabihf (value32)
-        run: cargo build --lib --no-default-features --features value32,fixlen,array,sequence,fp64 --target thumbv7em-none-eabihf
+      # The 32-bit value ABI (--cfg sofab_value32) must also compile for bare metal.
+      - name: Build for thumbv7em-none-eabihf (sofab_value32)
+        env:
+          RUSTFLAGS: --cfg sofab_value32
+        run: cargo build --lib --features fixlen,array,sequence,fp64 --target thumbv7em-none-eabihf

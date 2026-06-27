@@ -123,7 +123,10 @@ to shrink the binary on tiny targets.
 | `array` | ✅ | array fields (`VARINTARRAY_*`, `FIXLENARRAY`) |
 | `sequence` | ✅ | nested sequences (`SEQUENCE_START`/`END`) |
 | `fp64` | ✅ | 64-bit floats (implies `fixlen`) |
-| `value32` | ❌ | Narrow the scalar value type to 32-bit (`u32`/`i32`) — see below |
+
+Narrowing the scalar value type to 32 bits is **not** a Cargo feature — it is the
+`--cfg sofab_value32` flag (see *Footprint* below). It changes a public type, so
+it must not be subject to Cargo feature unification.
 
 Example minimal build (integers only):
 
@@ -134,16 +137,23 @@ sofab = { version = "0.1", default-features = false }
 > **Note on value width:** like the C default configuration, the scalar value
 > type is 64-bit (`u64`/`i64`). On a 32-bit target this pulls in libgcc/compiler
 > 64-bit helpers (e.g. `__aeabi_llsl`, 8-byte `memclr`) and widens every varint
-> operation — the single largest footprint item. Enabling **`value32`** narrows
-> the value type to `u32`/`i32`, which deletes that double-width arithmetic and
-> the helpers it drags in. The trade-off is that values above `2³²−1` can no
-> longer be represented or decoded (a `value32` decoder rejects an over-wide
-> varint with `Error::InvalidMsg`, mirroring a 32-bit `sofab_value_t` build of
-> the C reference). It is a *mutually-exclusive ABI variant*, so it is not part
-> of the additive `--all-features` set:
+> operation — the single largest footprint item. Building with
+> **`--cfg sofab_value32`** narrows the value type to `u32`/`i32`, which deletes
+> that double-width arithmetic and the helpers it drags in. The trade-off is that
+> values above `2³²−1` can no longer be represented or decoded (the decoder
+> rejects an over-wide varint with `Error::InvalidMsg`, mirroring a 32-bit
+> `sofab_value_t` build of the C reference).
+>
+> It is a `--cfg` flag rather than a Cargo feature **on purpose**: a feature that
+> changes a public type is not additive, and Cargo feature unification could then
+> silently narrow the type for an unrelated crate in the same build graph. Set it
+> via `RUSTFLAGS` or, preferably, `.cargo/config.toml` (which also scopes it to
+> your firmware crate):
 >
 > ```toml
-> sofab = { version = "0.1", default-features = false, features = ["value32", "fixlen", "array", "sequence", "fp64"] }
+> # .cargo/config.toml
+> [build]
+> rustflags = ["--cfg", "sofab_value32"]
 > ```
 
 ## Footprint
@@ -153,8 +163,8 @@ the encode + decode API for **Cortex-M0** (`thumbv6m-none-eabi`) with the
 size-optimized release profile (`opt-level="z"`, fat LTO, `panic="abort"`) and
 `--gc-sections`:
 
-| Configuration | `.text` | with `value32` |
-|---------------|--------:|---------------:|
+| Configuration | `.text` | `--cfg sofab_value32` |
+|---------------|--------:|----------------------:|
 | integers only (`--no-default-features`) | **902 B** | **724 B** |
 | + `sequence` | 982 B | — |
 | + `array` | 1 250 B | — |
@@ -163,7 +173,7 @@ size-optimized release profile (`opt-level="z"`, fat LTO, `panic="abort"`) and
 
 So the integer-only core fits in under **1 KiB** of flash and the whole
 streaming codec (every wire type) in well under **2.5 KiB**. On Cortex-M0
-`value32` removes ~20 % of the code — chiefly by deleting the 64-bit
+`sofab_value32` removes ~20 % of the code — chiefly by deleting the 64-bit
 shift/`memclr` helpers (`__aeabi_llsl`, `__aeabi_memclr8`) and halving the width
 of every varint operation.
 

@@ -17,21 +17,32 @@ pub const ID_MAX: Id = i32::MAX as u32;
 ///
 /// The reference C library uses a 64-bit value type by default; this port
 /// follows that so the wire format and varint lengths match exactly. Enabling
-/// the `value32` feature narrows it to 32 bits, which removes all double-width
-/// arithmetic on 32-bit MCUs (the single largest footprint item) at the cost of
-/// not being able to represent / decode values above 2³²−1 (mirrors a 32-bit
-/// `sofab_value_t` build of the C library).
-#[cfg(not(feature = "value32"))]
+/// building with `--cfg sofab_value32` narrows it to 32 bits, which removes all
+/// double-width arithmetic on 32-bit MCUs (the single largest footprint item) at
+/// the cost of not being able to represent / decode values above 2³²−1 (mirrors
+/// a 32-bit `sofab_value_t` build of the C library).
+///
+/// `sofab_value32` is a `--cfg` flag rather than a Cargo feature on purpose: it
+/// changes a public type, which is *not* additive, so it must not be subject to
+/// Cargo feature unification across a dependency graph. Set it via `RUSTFLAGS`
+/// or `.cargo/config.toml`:
+///
+/// ```toml
+/// # .cargo/config.toml
+/// [build]
+/// rustflags = ["--cfg", "sofab_value32"]
+/// ```
+#[cfg(not(sofab_value32))]
 pub type Unsigned = u64;
 /// Signed value type used by the scalar API.
-#[cfg(not(feature = "value32"))]
+#[cfg(not(sofab_value32))]
 pub type Signed = i64;
 
-/// Unsigned value type used by the scalar API (32-bit `value32` build).
-#[cfg(feature = "value32")]
+/// Unsigned value type used by the scalar API (`--cfg sofab_value32` build).
+#[cfg(sofab_value32)]
 pub type Unsigned = u32;
-/// Signed value type used by the scalar API (32-bit `value32` build).
-#[cfg(feature = "value32")]
+/// Signed value type used by the scalar API (`--cfg sofab_value32` build).
+#[cfg(sofab_value32)]
 pub type Signed = i32;
 
 /// Maximum number of elements in an array / bytes in a fixlen field

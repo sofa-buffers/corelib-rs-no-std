@@ -333,9 +333,9 @@ macro_rules! impl_signed_elem {
 
 #[cfg(feature = "array")]
 impl_unsigned_elem!(u8, u16, u32);
-#[cfg(all(feature = "array", not(feature = "value32")))]
+#[cfg(all(feature = "array", not(sofab_value32)))]
 impl_unsigned_elem!(u64);
 #[cfg(feature = "array")]
 impl_signed_elem!(i8, i16, i32);
-#[cfg(all(feature = "array", not(feature = "value32")))]
+#[cfg(all(feature = "array", not(sofab_value32)))]
 impl_signed_elem!(i64);
