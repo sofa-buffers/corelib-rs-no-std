@@ -16,11 +16,28 @@ pub const ID_MAX: Id = i32::MAX as u32;
 /// Unsigned value type used by the scalar API.
 ///
 /// The reference C library uses a 64-bit value type by default; this port
-/// follows that so the wire format and varint lengths match exactly.
+/// follows that so the wire format and varint lengths match exactly. Enabling
+/// disabling the (default-on) `value64` feature narrows it to 32 bits, which
+/// removes all double-width arithmetic on 32-bit MCUs (the single largest
+/// footprint item) at the cost of not being able to represent / decode values
+/// above 2³²−1 (mirrors a 32-bit `sofab_value_t` build of the C library).
+///
+/// The value width controls a public type, so it is *not* additive. Application
+/// code that depends on a specific width can guard it with
+/// [`require!`](crate::require)`(value64)` / `require!(value32)` (see the crate
+/// docs).
+#[cfg(feature = "value64")]
 pub type Unsigned = u64;
-
 /// Signed value type used by the scalar API.
+#[cfg(feature = "value64")]
 pub type Signed = i64;
+
+/// Unsigned value type used by the scalar API (32-bit build, `value64` off).
+#[cfg(not(feature = "value64"))]
+pub type Unsigned = u32;
+/// Signed value type used by the scalar API (32-bit build, `value64` off).
+#[cfg(not(feature = "value64"))]
+pub type Signed = i32;
 
 /// Maximum number of elements in an array / bytes in a fixlen field
 /// (`INT32_MAX`), matching `SOFAB_ARRAY_MAX` / `SOFAB_FIXLEN_MAX` on 32/64-bit

@@ -30,6 +30,11 @@ jobs:
       - name: Clippy (all features, all targets)
         run: cargo clippy --all-features --all-targets -- -D warnings
 
+      # The 32-bit value width (default features minus `value64`) is a separate
+      # ABI; lint the library in that configuration too.
+      - name: Clippy (32-bit value width, library)
+        run: cargo clippy --no-default-features --features fixlen,array,sequence,fp64 --lib -- -D warnings
+
   test:
     name: Build & test
     runs-on: ubuntu-latest
@@ -118,3 +123,8 @@ jobs:
       # proves the crate is genuinely no_std / heap-free.
       - name: Build for thumbv7em-none-eabihf (all features)
         run: cargo build --lib --all-features --target thumbv7em-none-eabihf
+
+      # The 32-bit value width (default features minus `value64`) must also
+      # compile for bare metal.
+      - name: Build for thumbv7em-none-eabihf (32-bit value width)
+        run: cargo build --lib --no-default-features --features fixlen,array,sequence,fp64 --target thumbv7em-none-eabihf

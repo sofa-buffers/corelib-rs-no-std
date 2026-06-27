@@ -74,3 +74,98 @@ pub use types::ArrayKind;
 
 #[cfg(feature = "array")]
 pub use ostream::{SignedElem, UnsignedElem};
+
+/// Compile-time view of how this `sofab` build was configured.
+///
+/// Each constant reflects the Cargo feature / value-width the **library** was
+/// compiled with, so application code can assert that the library supports what
+/// it needs — the Rust equivalent of a C `#ifdef` guard. Prefer the
+/// [`require!`](crate::require) macro for a ready-made message; these constants
+/// are the building blocks (e.g. for `cfg`-free runtime logging of the config).
+///
+/// ```
+/// // Hard-fail the build unless this app is linked against a config it supports.
+/// const _: () = assert!(sofab::config::FP64, "this firmware needs sofab fp64");
+/// const _: () = assert!(sofab::config::VALUE_BITS >= 64);
+/// ```
+pub mod config {
+    /// Fixed-length fields (`fp32` / `fp64` / string / blob) are compiled in.
+    pub const FIXLEN: bool = cfg!(feature = "fixlen");
+    /// Array fields are compiled in.
+    pub const ARRAY: bool = cfg!(feature = "array");
+    /// Nested sequences are compiled in.
+    pub const SEQUENCE: bool = cfg!(feature = "sequence");
+    /// 64-bit floating point (`fp64`) is compiled in.
+    pub const FP64: bool = cfg!(feature = "fp64");
+    /// Width of the scalar value type in bits: `64` with the default-on
+    /// `value64` feature, or `32` when it is disabled.
+    pub const VALUE_BITS: u32 = <crate::Unsigned>::BITS;
+}
+
+/// Assert at compile time that this `sofab` build supports what your code needs.
+///
+/// The Rust equivalent of a C `#ifdef` / `static_assert` guard: each argument is
+/// checked against [`config`](crate::config), and a missing capability fails the
+/// build with a clear message instead of producing a binary that silently lacks
+/// a wire type. Accepts any of `fixlen`, `array`, `sequence`, `fp64`, `value32`,
+/// `value64`, separated by commas.
+///
+/// ```
+/// // Compile error unless sofab was built with fp64 + array support and 64-bit values.
+/// sofab::require!(fp64, array, value64);
+/// ```
+///
+/// A build with, say, `default-features = false` (no `fp64`) would stop here:
+///
+/// ```compile_fail
+/// # // doctest is built with default features, so force the failure explicitly:
+/// const _: () = assert!(!sofab::config::FP64, "see require! docs");
+/// ```
+#[macro_export]
+macro_rules! require {
+    (fixlen) => {
+        #[allow(clippy::assertions_on_constants)]
+        const _: () = ::core::assert!(
+            $crate::config::FIXLEN,
+            "sofab: this application requires the `fixlen` feature, but it is disabled"
+        );
+    };
+    (array) => {
+        #[allow(clippy::assertions_on_constants)]
+        const _: () = ::core::assert!(
+            $crate::config::ARRAY,
+            "sofab: this application requires the `array` feature, but it is disabled"
+        );
+    };
+    (sequence) => {
+        #[allow(clippy::assertions_on_constants)]
+        const _: () = ::core::assert!(
+            $crate::config::SEQUENCE,
+            "sofab: this application requires the `sequence` feature, but it is disabled"
+        );
+    };
+    (fp64) => {
+        #[allow(clippy::assertions_on_constants)]
+        const _: () = ::core::assert!(
+            $crate::config::FP64,
+            "sofab: this application requires the `fp64` feature, but it is disabled"
+        );
+    };
+    (value32) => {
+        #[allow(clippy::assertions_on_constants)]
+        const _: () = ::core::assert!(
+            $crate::config::VALUE_BITS == 32,
+            "sofab: this application requires the 32-bit value width (disable the default `value64` feature)"
+        );
+    };
+    (value64) => {
+        #[allow(clippy::assertions_on_constants)]
+        const _: () = ::core::assert!(
+            $crate::config::VALUE_BITS == 64,
+            "sofab: this application requires the 64-bit value width (the default `value64` feature is disabled)"
+        );
+    };
+    ($($cap:ident),+ $(,)?) => {
+        $( $crate::require!($cap); )+
+    };
+}
