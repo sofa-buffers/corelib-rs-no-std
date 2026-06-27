@@ -234,7 +234,10 @@ These are exactly the steps run in CI (see [`.github/workflows/ci.yml`](.github/
 
 Tests live in `tests/` as separate integration files:
 
-- `vectors_tests.rs` — replays the shared `assets/test_vectors.json` (encode, decode, chunked, and `skip_ids` auto-skip)
+- `vectors_tests.rs` — replays the shared `assets/test_vectors.json` (encode,
+  chunked-encode through 1/3/7-byte flush buffers, decode, chunked-decode, and
+  `skip_ids` auto-skip). It is `requires`-aware, so it runs under any feature
+  subset and skips vectors a reduced build can't represent (`int64` → `value64`)
 - `ostream_tests.rs` — encoder, byte-exact vs. reference vectors
 - `istream_tests.rs` — decoder over the same vectors + malformed-input errors
 - `roundtrip_tests.rs` — encode→decode value preservation

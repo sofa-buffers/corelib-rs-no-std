@@ -56,6 +56,34 @@ jobs:
       - name: Test (default features)
         run: cargo test --verbose
 
+  vectors:
+    name: Shared vectors across feature configs
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The conformance suite is `requires`-aware: it runs the shared vectors a
+        # given build can represent and skips the rest, so the same file validates
+        # every feature configuration (incl. the 32-bit value width = no value64).
+        features:
+          - "--all-features"                                                # full, 64-bit
+          - "--no-default-features"                                         # integers only, 32-bit
+          - "--no-default-features --features fixlen,array,sequence,fp64"   # full wire, 32-bit width
+          - "--no-default-features --features value64"                      # integers only, 64-bit
+          - "--no-default-features --features fixlen,fp64,value64"          # scalars + floats only
+          - "--no-default-features --features array,sequence,value64"       # no fixlen
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry & build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run shared vectors
+        run: cargo test --test vectors_tests ${{ matrix.features }} --verbose
+
   coverage:
     name: Coverage
     runs-on: ubuntu-latest
