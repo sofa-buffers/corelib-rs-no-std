@@ -27,13 +27,10 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all --check
 
+      # Lints the default + dev-target build for fast feedback; the `features`
+      # job lints every individual feature combination (incl. the 32-bit width).
       - name: Clippy (all features, all targets)
         run: cargo clippy --all-features --all-targets -- -D warnings
-
-      # The 32-bit value width (default features minus `value64`) is a separate
-      # ABI; lint the library in that configuration too.
-      - name: Clippy (32-bit value width, library)
-        run: cargo clippy --no-default-features --features fixlen,array,sequence,fp64 --lib -- -D warnings
 
   test:
     name: Build & test
@@ -83,6 +80,35 @@ jobs:
 
       - name: Run shared vectors
         run: cargo test --test vectors_tests ${{ matrix.features }} --verbose
+
+  features:
+    name: Feature powerset
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo registry & build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-hack
+        uses: taiki-e/install-action@cargo-hack
+
+      # Compile + lint *every* combination of feature flags (2^N configs,
+      # including the 32-bit value width = no `value64`). Catches `cfg` mistakes
+      # that only surface when a feature is off. `--no-dev-deps` keeps it to the
+      # library (the conformance test crates need all wire types to compile).
+      - name: Clippy every feature combination (library)
+        run: cargo hack --feature-powerset --no-dev-deps clippy --lib -- -D warnings
+
+      # Behavioural smoke test (encode -> decode) under every combination. The
+      # config_tests crate is `cfg`-gated so it builds and runs for any subset.
+      - name: Test every feature combination (config smoke tests)
+        run: cargo hack --feature-powerset test --test config_tests
 
   coverage:
     name: Coverage
