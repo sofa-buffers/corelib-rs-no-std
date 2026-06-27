@@ -39,8 +39,10 @@ harness = false
 # expressed positively (a feature *enables* support). Turn features off to
 # shrink the binary on tiny targets — see README "Footprint".
 # ---------------------------------------------------------------------------
+# Every capability is ON by default; turn features *off* (via
+# `default-features = false`, then re-enable what you want) to shrink the binary.
 [features]
-default = ["fixlen", "array", "sequence", "fp64"]
+default = ["fixlen", "array", "sequence", "fp64", "value64"]
 # Fixed-length fields: fp32, fp64, string, blob (wire types FIXLEN / FIXLENARRAY).
 fixlen = []
 # Array fields (wire types VARINTARRAY_* and, with `fixlen`, FIXLENARRAY).
@@ -49,14 +51,16 @@ array = []
 sequence = []
 # 64-bit floating point. Implies `fixlen`.
 fp64 = ["fixlen"]
-# Narrow the scalar value type from 64-bit to 32-bit (u32/i32). On a 32-bit MCU
-# this removes all double-width integer arithmetic and the libgcc/compiler 64-bit
-# helpers it pulls in (`__aeabi_llsl`, 8-byte `memclr`) — the single largest
-# footprint item. Trade-off: values above 2^32-1 can no longer be represented or
-# decoded (mirrors a 32-bit `sofab_value_t` build of the C reference). Because it
-# narrows a public type it is *not* additive: application code that needs the
-# 64-bit width should guard it with `sofab::require!(value64)` (see README).
-value32 = []
+# 64-bit scalar value type (u64/i64), matching the C default. Disable it
+# (`default-features = false` without re-adding `value64`) to use a 32-bit value
+# type (u32/i32): on a 32-bit MCU this removes all double-width integer
+# arithmetic and the libgcc/compiler 64-bit helpers it pulls in (`__aeabi_llsl`,
+# 8-byte `memclr`) — the single largest footprint item. Trade-off: values above
+# 2^32-1 can no longer be represented or decoded (mirrors a 32-bit
+# `sofab_value_t` build of the C reference). Because it controls a public type it
+# is *not* additive: application code that needs a specific width should guard it
+# with `sofab::require!(value64)` / `require!(value32)` (see README).
+value64 = []
 
 # ---------------------------------------------------------------------------
 # Size-optimized release profile suitable for embedded firmware.

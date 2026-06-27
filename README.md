@@ -114,8 +114,9 @@ that field — the equivalent of the C decoder's auto-skip.
 
 ## Feature flags
 
-Mirror the C `SOFAB_DISABLE_*` switches, expressed positively. Turn features off
-to shrink the binary on tiny targets.
+Every capability is **on by default** (mirroring the C library's full build);
+mirror the C `SOFAB_DISABLE_*` switches by turning features *off* to shrink the
+binary on tiny targets, with `default-features = false`.
 
 | Feature | Default | Enables |
 |---------|:------:|---------|
@@ -123,25 +124,28 @@ to shrink the binary on tiny targets.
 | `array` | ✅ | array fields (`VARINTARRAY_*`, `FIXLENARRAY`) |
 | `sequence` | ✅ | nested sequences (`SEQUENCE_START`/`END`) |
 | `fp64` | ✅ | 64-bit floats (implies `fixlen`) |
-| `value32` | ❌ | 32-bit scalar value type (`u32`/`i32`) instead of 64-bit |
+| `value64` | ✅ | 64-bit scalar value type (`u64`/`i64`); disable for 32-bit (`u32`/`i32`) |
 
-Example minimal build (integers only, smallest possible):
+Example minimal build (integers only, 32-bit values — smallest possible). With
+`default-features = false` and nothing re-enabled, every capability (including
+`value64`) is off:
 
 ```toml
-sofab = { version = "0.1", default-features = false, features = ["value32"] }
+sofab = { version = "0.1", default-features = false }
 ```
 
 > **Note on value width:** like the C default configuration, the scalar value
-> type is 64-bit (`u64`/`i64`). On a 32-bit target this pulls in libgcc/compiler
-> 64-bit helpers (e.g. `__aeabi_llsl`, 8-byte `memclr`) and widens every varint
-> operation — the single largest footprint item. The `value32` feature narrows
-> the value type to `u32`/`i32`, deleting that double-width arithmetic and the
-> helpers it drags in. The trade-off is that values above `2³²−1` can no longer
-> be represented or decoded (the decoder rejects an over-wide varint with
-> `Error::InvalidMsg`, mirroring a 32-bit `sofab_value_t` build of the C
-> reference). Unlike the other flags, `value32` *narrows a public type* and is
-> therefore **not additive** — application code that relies on the 64-bit width
-> should guard it with `sofab::require!(value64)` (see *Verifying the build
+> type is 64-bit (`u64`/`i64`) — the default-on `value64` feature. On a 32-bit
+> target the 64-bit type pulls in libgcc/compiler helpers (e.g. `__aeabi_llsl`,
+> 8-byte `memclr`) and widens every varint operation — the single largest
+> footprint item. *Disabling* `value64` narrows the value type to `u32`/`i32`,
+> deleting that double-width arithmetic and the helpers it drags in. The
+> trade-off is that values above `2³²−1` can no longer be represented or decoded
+> (the decoder rejects an over-wide varint with `Error::InvalidMsg`, mirroring a
+> 32-bit `sofab_value_t` build of the C reference). Unlike the wire-type flags,
+> the value width *controls a public type* and so is **not additive** —
+> application code that relies on a specific width should guard it with
+> `sofab::require!(value64)` / `require!(value32)` (see *Verifying the build
 > configuration* below).
 
 ### Verifying the build configuration
@@ -173,19 +177,19 @@ the encode + decode API with the size-optimized release profile
 (`opt-level="z"`, fat LTO, `panic="abort"`) and `--gc-sections`. Columns are two
 representative bare-metal targets:
 
-| Configuration (features) | Cortex-M0 `.text` | Cortex-M4F `.text` |
-|--------------------------|------------------:|-------------------:|
-| **MIN** — `value32` only (integers, 32-bit) | **724 B** | **740 B** |
-| integers only (`--no-default-features`) | 902 B | 936 B |
-| `+ sequence` | 982 B | 1 008 B |
-| `+ array` | 1 250 B | 1 238 B |
-| `+ fixlen` (fp32 / str / blob) | 1 501 B | 1 587 B |
-| `value32,fixlen,array,sequence,fp64` (all wire, 32-bit) | 1 797 B | 1 825 B |
-| **MAX** — FULL `fixlen,array,sequence,fp64` (64-bit) | **2 229 B** | **2 245 B** |
+| Configuration | Cortex-M0 `.text` | Cortex-M4F `.text` |
+|---------------|------------------:|-------------------:|
+| **MIN** — integers only, 32-bit (`default-features = false`) | **724 B** | **740 B** |
+| integers only, 64-bit (`value64`) | 902 B | 936 B |
+| `+ sequence` (64-bit) | 982 B | 1 008 B |
+| `+ array` (64-bit) | 1 250 B | 1 238 B |
+| `+ fixlen` (fp32 / str / blob, 64-bit) | 1 501 B | 1 587 B |
+| all wire types, 32-bit (`fixlen,array,sequence,fp64`) | 1 797 B | 1 825 B |
+| **MAX** — all wire types, 64-bit (default / `--all-features`) | **2 229 B** | **2 245 B** |
 
 So the whole spectrum lives between **≈0.7 KiB** (integer-only, 32-bit values)
 and **≈2.2 KiB** (every wire type, 64-bit values) of flash. On Cortex-M0
-`value32` removes ~20 % of the code — chiefly by deleting the 64-bit
+disabling `value64` removes ~20 % of the code — chiefly by deleting the 64-bit
 shift/`memclr` helpers (`__aeabi_llsl`, `__aeabi_memclr8`) and halving the width
 of every varint operation.
 

@@ -97,8 +97,8 @@ pub mod config {
     pub const SEQUENCE: bool = cfg!(feature = "sequence");
     /// 64-bit floating point (`fp64`) is compiled in.
     pub const FP64: bool = cfg!(feature = "fp64");
-    /// Width of the scalar value type in bits: `32` with the `value32` feature,
-    /// otherwise `64`.
+    /// Width of the scalar value type in bits: `64` with the default-on
+    /// `value64` feature, or `32` when it is disabled.
     pub const VALUE_BITS: u32 = <crate::Unsigned>::BITS;
 }
 
@@ -124,39 +124,45 @@ pub mod config {
 #[macro_export]
 macro_rules! require {
     (fixlen) => {
+        #[allow(clippy::assertions_on_constants)]
         const _: () = ::core::assert!(
             $crate::config::FIXLEN,
             "sofab: this application requires the `fixlen` feature, but it is disabled"
         );
     };
     (array) => {
+        #[allow(clippy::assertions_on_constants)]
         const _: () = ::core::assert!(
             $crate::config::ARRAY,
             "sofab: this application requires the `array` feature, but it is disabled"
         );
     };
     (sequence) => {
+        #[allow(clippy::assertions_on_constants)]
         const _: () = ::core::assert!(
             $crate::config::SEQUENCE,
             "sofab: this application requires the `sequence` feature, but it is disabled"
         );
     };
     (fp64) => {
+        #[allow(clippy::assertions_on_constants)]
         const _: () = ::core::assert!(
             $crate::config::FP64,
             "sofab: this application requires the `fp64` feature, but it is disabled"
         );
     };
     (value32) => {
+        #[allow(clippy::assertions_on_constants)]
         const _: () = ::core::assert!(
             $crate::config::VALUE_BITS == 32,
-            "sofab: this application requires the 32-bit value width (`value32` feature)"
+            "sofab: this application requires the 32-bit value width (disable the default `value64` feature)"
         );
     };
     (value64) => {
+        #[allow(clippy::assertions_on_constants)]
         const _: () = ::core::assert!(
             $crate::config::VALUE_BITS == 64,
-            "sofab: this application requires the 64-bit value width (build without `value32`)"
+            "sofab: this application requires the 64-bit value width (the default `value64` feature is disabled)"
         );
     };
     ($($cap:ident),+ $(,)?) => {

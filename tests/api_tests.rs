@@ -91,10 +91,15 @@ fn config_constants_reflect_features() {
     // The `config` module is the build-time introspection surface that
     // `require!` is built on; it must mirror how the crate was compiled. This
     // test runs under the default (all wire features, 64-bit) configuration.
-    assert!(sofab::config::FIXLEN);
-    assert!(sofab::config::ARRAY);
-    assert!(sofab::config::SEQUENCE);
-    assert!(sofab::config::FP64);
+    assert_eq!(
+        [
+            sofab::config::FIXLEN,
+            sofab::config::ARRAY,
+            sofab::config::SEQUENCE,
+            sofab::config::FP64,
+        ],
+        [true, true, true, true]
+    );
     assert_eq!(sofab::config::VALUE_BITS, 64);
     assert_eq!(sofab::config::VALUE_BITS, sofab::Unsigned::BITS);
 }

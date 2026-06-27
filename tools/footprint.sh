@@ -47,7 +47,7 @@ fixlen   = ["sofab/fixlen"]
 array    = ["sofab/array"]
 sequence = ["sofab/sequence"]
 fp64     = ["sofab/fp64"]
-value32  = ["sofab/value32"]
+value64  = ["sofab/value64"]
 EOF
 
 cat > "$WORK/src/lib.rs" <<'EOF'
@@ -126,11 +126,13 @@ measure() { # label  feature-list (empty = integers only)
   printf "  %-40s %6d B  (%5.2f KiB)\n" "$label" "$text" "$(awk "BEGIN{print $text/1024}")"
 }
 
+# Builds are --no-default-features, so a config is exactly the features listed.
+# Omitting `value64` selects the 32-bit value width.
 echo "sofab .text footprint on $TARGET (opt-z, LTO, panic=abort, gc-sections)"
-measure "MIN: integers only + value32"      "value32"
-measure "integers only"                     ""
-measure "+ sequence"                        "sequence"
-measure "+ array"                           "array"
-measure "+ fixlen"                          "fixlen"
-measure "+ value32 (full wire, 32-bit)"     "value32,fixlen,array,sequence,fp64"
-measure "MAX: FULL (fixlen,array,sequence,fp64)" "fixlen,array,sequence,fp64"
+measure "MIN: integers only, 32-bit"        ""
+measure "integers only, 64-bit"             "value64"
+measure "+ sequence (64-bit)"               "value64,sequence"
+measure "+ array (64-bit)"                  "value64,array"
+measure "+ fixlen (64-bit)"                 "value64,fixlen"
+measure "all wire types, 32-bit"            "fixlen,array,sequence,fp64"
+measure "MAX: all wire types, 64-bit"       "value64,fixlen,array,sequence,fp64"
