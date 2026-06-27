@@ -242,9 +242,27 @@ Tests live in `tests/` as separate integration files:
 - `istream_tests.rs` — decoder over the same vectors + malformed-input errors
 - `roundtrip_tests.rs` — encode→decode value preservation
 - `api_tests.rs` — offset reserve, buffer swap, large chunked streaming, API version
+- `config_tests.rs` — per-configuration encode→decode smoke tests; `#[cfg]`-gated
+  so they build and run under **any** feature subset (the conformance suites
+  above need every wire type and only build with all features on)
 - `tests/common/mod.rs` — shared recording `Visitor`
 
 Current coverage: **~93% lines** (`cargo llvm-cov --all-features`).
+
+### Testing every feature combination
+
+The conformance suites run with all features. To check the whole
+**feature powerset** — every on/off combination of `fixlen` / `array` /
+`sequence` / `fp64` / `value64`, including the 32-bit value width — use
+[`cargo-hack`](https://github.com/taiki-e/cargo-hack):
+
+```bash
+cargo install cargo-hack
+cargo hack --feature-powerset --no-dev-deps clippy --lib -- -D warnings  # compile + lint each config
+cargo hack --feature-powerset test --test config_tests                   # run each config's smoke tests
+```
+
+CI runs both of these (see the `features` job in [`.github/workflows/ci.yml`](.github/workflows/ci.yml)).
 
 Coverage prerequisites (one-time):
 
