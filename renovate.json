@@ -1,0 +1,29 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    ":dependencyDashboard",
+    ":semanticCommits"
+  ],
+  "timezone": "Europe/Berlin",
+  "schedule": ["before 6am on monday"],
+  "labels": ["dependencies"],
+  "packageRules": [
+    {
+      "description": "Group all GitHub Actions bumps into one PR.",
+      "matchManagers": ["github-actions"],
+      "groupName": "github-actions"
+    },
+    {
+      "description": "Group the Cargo dev-dependencies (libc, serde_json); the no_std library itself is dependency-free. No Cargo.lock is committed, so lockFileMaintenance is not enabled.",
+      "matchManagers": ["cargo"],
+      "matchDepTypes": ["dev-dependencies"],
+      "groupName": "cargo dev-dependencies"
+    },
+    {
+      "description": "Devcontainer base image (.devcontainer/Dockerfile -> ubuntu).",
+      "matchManagers": ["dockerfile"],
+      "groupName": "devcontainer image"
+    }
+  ]
+}
