@@ -16,8 +16,8 @@ pub const ID_MAX: Id = i32::MAX as u32;
 /// Unsigned value type used by the scalar API.
 ///
 /// The reference C library uses a 64-bit value type by default; this port
-/// follows that so the wire format and varint lengths match exactly. Enabling
-/// disabling the (default-on) `value64` feature narrows it to 32 bits, which
+/// follows that so the wire format and varint lengths match exactly. Disabling
+/// the (default-on) `value64` feature narrows it to 32 bits, which
 /// removes all double-width arithmetic on 32-bit MCUs (the single largest
 /// footprint item) at the cost of not being able to represent / decode values
 /// above 2³²−1 (mirrors a 32-bit `sofab_value_t` build of the C library).
