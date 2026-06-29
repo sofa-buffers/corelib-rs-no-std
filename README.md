@@ -294,3 +294,32 @@ process CPU time, for encode and decode of each workload:
 ```bash
 cargo bench --bench bench
 ```
+
+### `no_std` vs `std`: how the two Rust ports compare
+
+`corelib-rs-no-std` (this crate, `#![no_std]`) and the
+[`corelib-rs`](https://github.com/sofa-buffers/corelib-rs) `std` build implement
+the **same SofaBuffers API** and run the **identical** `perf` and `bench` tools,
+so every difference below comes purely from the two encode/decode
+implementations — not from the benchmark.
+
+One run on a single 6-core x86-64 host (stable `rustc`, default
+`[profile.bench]`, no `target-cpu=native`). Numbers are machine-specific;
+`cycles/op` is the more host-independent figure (lower is better), MB/s is this
+machine's throughput (higher is better).
+
+| Workload | `no_std` cycles/op | `std` cycles/op | `no_std` MB/s | `std` MB/s |
+| --- | ---: | ---: | ---: | ---: |
+| serialize — typical message (170 B)   |  3,249 |  3,126 | 146.2 | 152.0 |
+| deserialize — typical message (170 B) |  4,583 |  3,604 | 103.7 | 131.8 |
+| encode — `u64` array ×1000 (9,491 B)  | 44,544 | 38,590 | 595.5 | 687.5 |
+| decode — `u64` array ×1000 (9,491 B)  | 92,822 | 31,175 | 285.8 | 852.2 |
+
+**In plain terms:** this `no_std` crate is close to the `std` build on small
+messages — within a few percent on the typical 170-byte message — but slower on
+the bulk `u64` array, most noticeably on **decode**, where `std` is roughly
+**3×** faster (≈850 vs ≈290 MB/s). The trade-off is deliberate: `no_std` runs in
+freestanding / embedded targets that have no allocator or operating system,
+where the `std` crate cannot build at all. For small mixed messages the gap is
+negligible; if you need maximum high-volume array-decode throughput **and** have
+`std` available, reach for [`corelib-rs`](https://github.com/sofa-buffers/corelib-rs).
