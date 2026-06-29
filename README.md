@@ -87,30 +87,96 @@ os.flush();                                   // push the tail
 
 ## API summary
 
-**Encoder — [`OStream`]** (writes into a caller buffer; never allocates):
+### Write operations — [`OStream`]
 
-| Operation | Purpose |
-|-----------|---------|
-| `new` / `with_offset` / `with_flush` | construct over a buffer; reserve a header offset; attach a flush sink |
-| `write_unsigned` / `write_signed` / `write_boolean` | scalar integers (varint / zig-zag) and booleans |
-| `write_fp32` / `write_fp64` / `write_str` / `write_blob` / `write_fixlen` | fixed-length values (LE floats, UTF-8 text, raw bytes) |
-| `write_array_unsigned` / `write_array_signed` / `write_array_fp32` / `write_array_fp64` | arrays with a single shared descriptor |
-| `write_sequence_begin` / `write_sequence_end` | open / close a nested sequence |
-| `flush` / `buffer_set` / `bytes_used` | drain pending bytes; swap the output buffer mid-stream; bytes written |
+Writes Sofab fields into a caller-owned buffer; **never allocates**. Every writer
+returns `Result<()>` and emits `Error::BufferFull` when the buffer is full and no
+[`Flush`] sink is attached.
 
-**Decoder — [`IStream`] + [`Visitor`]** (push-feed; suspends/resumes at any byte boundary):
+| Operation | Signature (`id: Id`, …) | Purpose |
+|-----------|-------------------------|---------|
+| `new` / `with_offset` / `with_flush` | `(&mut [u8])` / `(&mut [u8], offset)` / `(&mut [u8], offset, sink)` | construct over a caller buffer; reserve a header offset; attach a flush sink |
+| `write_unsigned` / `write_signed` / `write_boolean` | `(id, Unsigned)` / `(id, Signed)` / `(id, bool)` | scalar integers (varint / zig-zag) and booleans |
+| `write_fp32` / `write_fp64` | `(id, f32)` / `(id, f64)` | little-endian IEEE-754 floats (`fp64` feature for `f64`) |
+| `write_str` / `write_blob` | `(id, &str)` / `(id, &[u8])` | UTF-8 text (no NUL on the wire) / raw bytes (`fixlen`) |
+| `write_fixlen` | `(id, &[u8], FixlenType)` | raw fixed-length field with an explicit subtype (`fixlen`) |
+| `write_array_unsigned` / `write_array_signed` | `(id, &[T])` | varint arrays; `T` is an integer-width element type (see below) (`array`) |
+| `write_array_fp32` / `write_array_fp64` | `(id, &[f32])` / `(id, &[f64])` | float arrays with one shared element descriptor (`array` + `fixlen`/`fp64`) |
+| `write_sequence_begin` / `write_sequence_end` | `(id)` / `()` | open / close a nested sequence (`sequence`) |
+| `flush` / `buffer_set` / `bytes_used` | `()` / `(&mut [u8], offset)` / `()` | drain pending bytes to the sink; swap the output buffer mid-stream; bytes written so far |
 
-| Operation | Purpose |
-|-----------|---------|
-| `IStream::new` | construct a fresh decoder |
-| `feed(bytes, visitor)` | feed an arbitrarily small chunk; decoded fields are pushed to the visitor |
-| `Visitor::unsigned` / `signed` / `fp32` / `fp64` | scalar fields and array elements |
-| `Visitor::string` / `blob` | fixed-length payloads, delivered in chunks (`total` / `offset` / `chunk`) |
-| `Visitor::array_begin` | start of an array (`kind`, `count`); elements follow via the scalar/float callbacks |
-| `Visitor::sequence_begin` / `sequence_end` | nested-sequence framing |
+### Read operations — [`IStream`] + [`Visitor`]
 
-A `Visitor` method left at its default (empty) implementation transparently skips
-that field — the equivalent of the C decoder's auto-skip.
+[`IStream`] is a byte-at-a-time **push** decoder: feed it arbitrarily small chunks
+and it pushes each recovered value to your [`Visitor`]. It suspends and resumes at
+any byte boundary, keeping all parse state inside the (fixed-size) `IStream`
+struct — it **never allocates** and binds no caller destinations up front.
+
+| Operation | Signature | Hands the caller |
+|-----------|-----------|------------------|
+| `IStream::new` | `() -> IStream` | a fresh decoder (also `Default`); `const fn` |
+| `feed` | `(&[u8], &mut V) -> Result<()>` | drives decoding of one chunk; pushes fields to the visitor |
+| `Visitor::unsigned` / `signed` | `(id: Id, value: Unsigned)` / `(id, Signed)` | a scalar integer **by value**, or one unsigned/signed array element |
+| `Visitor::fp32` / `fp64` | `(id, f32)` / `(id, f64)` | a float **by value**, or one float array element (`fixlen` / `fp64`) |
+| `Visitor::string` / `blob` | `(id, total: usize, offset: usize, chunk: &[u8])` | one **chunk** of a string/blob: `total` field length, `offset` of this chunk, and a `chunk` slice **borrowed from the fed input** (`fixlen`) |
+| `Visitor::array_begin` | `(id, kind: ArrayKind, count: usize)` | the start of an array; the `count` elements then arrive through the scalar/float callbacks with the same `id` (`array`) |
+| `Visitor::sequence_begin` / `sequence_end` | `(id)` / `()` | nested-sequence framing (`sequence`) |
+
+There is **no read-scalar / read-string / skip method to call** and no
+descend-into-sequence call: decoding is driven entirely by `feed`, and the
+decoder *pushes* to the visitor. A `Visitor` method left at its default (empty)
+implementation transparently **skips** that field — the equivalent of the C
+decoder's auto-skip — at zero cost and with no buffer required. An empty
+string/blob is reported once with `total == 0` and an empty `chunk`.
+
+### Allowed types
+
+The wire/template types accepted by the typed APIs:
+
+| Category | Encoder | Decoder callback | Concrete types |
+|----------|---------|------------------|----------------|
+| Unsigned scalar | `write_unsigned` | `Visitor::unsigned` | `Unsigned` = `u64` (or `u32` with `value64` off) |
+| Signed scalar | `write_signed` | `Visitor::signed` | `Signed` = `i64` (or `i32` with `value64` off) |
+| Boolean | `write_boolean` | `Visitor::unsigned` (`0`/`1`) | `bool` |
+| Float | `write_fp32` / `write_fp64` | `fp32` / `fp64` | `f32`, `f64` (`f64` needs `fp64`) |
+| String / blob | `write_str` / `write_blob` | `string` / `blob` | `&str` / `&[u8]` |
+| Unsigned array | `write_array_unsigned<T>` | `unsigned` per element | `T: UnsignedElem` — `u8`, `u16`, `u32` (and `u64` with `value64`) |
+| Signed array | `write_array_signed<T>` | `signed` per element | `T: SignedElem` — `i8`, `i16`, `i32` (and `i64` with `value64`) |
+| Float array | `write_array_fp32` / `write_array_fp64` | `fp32` / `fp64` per element | `[f32]` / `[f64]` |
+
+The element width of an array is fixed by `T` at compile time (via the
+[`UnsignedElem`] / [`SignedElem`] marker traits), so the C API's "invalid element
+size" runtime error is impossible here. **Disallowed:** strings and blobs are not
+valid as fixed-length-array elements — the encoder offers no such call and the
+decoder rejects that wire shape with `Error::InvalidMsg`; arrays must be non-empty
+(an empty slice returns `Error::Argument`); and with `value64` off, a varint that
+would exceed `2³²−1` is rejected as `Error::InvalidMsg`.
+
+### Memory handling
+
+This is the defining property of the `no_std` port: **all storage is supplied by
+the caller and nothing is ever boxed.** Both directions are allocation-free.
+
+| Concern | Encoder ([`OStream`]) | Decoder ([`IStream`] + [`Visitor`]) |
+|---------|-----------------------|-------------------------------------|
+| Who owns the buffer | the caller — a `&mut [u8]` you hand to `new` / `with_offset` / `with_flush` | the caller — the `&[u8]` you pass to `feed`, plus whatever your `Visitor` stores into |
+| Allocation | none, ever | none, ever (state lives in the fixed `IStream` struct) |
+| When data moves | each `write_*` copies into the buffer immediately | values are **copied by value** into the `Visitor` callback the instant they decode — there is **no lazy "bind a destination" step** as in the C decoder |
+| String / blob payload | copied from your `&str`/`&[u8]` into the buffer as it is written | delivered as a borrowed `chunk: &[u8]` that **points into the bytes you fed**; valid only for the duration of the callback — copy out anything you need to keep |
+| Array payload | read straight from your `&[T]` slice | streamed element-by-element through the scalar/float callbacks; no element buffer is held internally |
+| Internal scratch | none beyond the output buffer | one 8-byte accumulator to reassemble a single `fp32`/`fp64` split across `feed` boundaries — nothing else is buffered |
+| Full / overflow | buffer full → `Error::BufferFull`; or, with a [`Flush`] sink, the bytes are drained and writing resumes at the buffer start | the decoder imposes no capacity; **your `Visitor` decides where string/blob/array data lands and how to handle overflow** (e.g. copy into a fixed array, truncate, or raise your own error) |
+| Mid-stream buffer swap | `buffer_set` installs a fresh buffer (typically from inside a flush sink); `with_offset` reserves header room up front | n/a — chunks are consumed in place |
+
+Because the decoder pushes values *by value* (no up-front binding), destinations
+do **not** need to be address-stable, and a field you don't handle costs nothing.
+The only caller obligation is to copy string/blob `chunk` slices out of the
+transient `feed` input before the callback returns if the bytes must outlive it.
+
+Contrast with [`corelib-rs`](https://github.com/sofa-buffers/corelib-rs) (the
+`std` port): it allocates freely — recovered strings/blobs land in owned `String`
+/ `Vec<u8>`, arrays in `Vec<…>`, and a one-shot `decode()` builds an owned result
+— so the caller is freed from buffer management at the cost of a heap.
 
 ## Differences from `corelib-rs` (the high-speed `std` port)
 
