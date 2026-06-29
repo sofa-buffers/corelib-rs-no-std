@@ -203,15 +203,6 @@ tools/footprint.sh thumbv7em-none-eabihf      # Cortex-M4F
 tools/footprint.sh riscv32imc-unknown-none-elf # RISC-V 32 (RV32IMC)
 ```
 
-## Layering vs. the C library
-
-| C file | Rust module | Status |
-|--------|-------------|--------|
-| `sofab.h` (types/constants) | `types`, `error` | ported |
-| `ostream.c` | `ostream` ([`OStream`]) | ported |
-| `istream.c` | `istream` ([`IStream`] + [`Visitor`]) | ported (push/visitor model instead of bind-target callbacks) |
-| `object.c` (descriptor transcoder) | — | not ported. The idiomatic Rust equivalent is a `#[derive(Sofab)]` proc-macro generating `Visitor`/encode glue; the streaming core above already covers serialize/deserialize. |
-
 ## Build & test
 
 ```bash
