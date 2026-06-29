@@ -112,6 +112,19 @@ os.flush();                                   // push the tail
 A `Visitor` method left at its default (empty) implementation transparently skips
 that field — the equivalent of the C decoder's auto-skip.
 
+## Differences from `corelib-rs` (the high-speed `std` port)
+
+Same wire format and same encoder API as
+[`corelib-rs`](https://github.com/sofa-buffers/corelib-rs); only the items below
+differ.
+
+| Only in this crate (`no_std`) | Only in `corelib-rs` (`std`) |
+|-------------------------------|------------------------------|
+| `config` module + [`require!`] macro | `decode()` one-shot helper |
+| Cargo feature flags (`fixlen`/`array`/`sequence`/`fp64`/`value64`) | `IStream::finish()` (detect a truncated message) |
+| 32-bit value width option (`value64` off → `u32`/`i32`) | `IStream::reset()` (reuse without reallocating) |
+| — | `Error: Display + std::error::Error` |
+
 ## Feature flags
 
 Every capability is **on by default** (mirroring the C library's full build);
