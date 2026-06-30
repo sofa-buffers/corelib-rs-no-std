@@ -1,11 +1,11 @@
 [package]
-name = "sofab"
+name = "SofaBuffers"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.70"
 license = "MIT"
 description = "SofaBuffers (Sofab) — compact, streaming, no_std/no-heap serialization core for any platform, from microcontrollers to servers. Rust port of the C corelib (istream/ostream)."
-repository = "https://github.com/sofa-buffers/corelib-rs"
+repository = "https://github.com/sofa-buffers/corelib-rs-no-std"
 keywords = ["serialization", "embedded", "no_std", "varint", "streaming"]
 categories = ["embedded", "encoding", "no-std"]
 
