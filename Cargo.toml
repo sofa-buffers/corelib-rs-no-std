@@ -1,11 +1,11 @@
 [package]
-name = "sofab"
+name = "SofaBuffers"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.70"
 license = "MIT"
 description = "SofaBuffers (Sofab) — compact, streaming, no_std/no-heap serialization core for any platform, from microcontrollers to servers. Rust port of the C corelib (istream/ostream)."
-repository = "https://github.com/sofa-buffers/corelib-rs"
+repository = "https://github.com/sofa-buffers/corelib-rs-no-std"
 keywords = ["serialization", "embedded", "no_std", "varint", "streaming"]
 categories = ["embedded", "encoding", "no-std"]
 
@@ -19,8 +19,12 @@ libc = "0.2"
 
 # Parse the shared `assets/test_vectors.json` (the cross-language source of
 # truth) in the conformance test suite. Test-only; not pulled into the no_std
-# library build.
-serde_json = "1"
+# library build. Capped below 1.0.148, which pulls in `zmij` (its float
+# formatter) whose own MSRV is 1.71 — that would break the 1.70 MSRV job.
+# 1.0.147 still uses `ryu`, keeping the whole tree 1.70-clean. The committed
+# Cargo.lock pins the exact versions; this cap is belt-and-suspenders for
+# anyone who regenerates it.
+serde_json = ">=1, <1.0.148"
 
 # Per-op cost: cycles/op (hardware cycle counter) + throughput MB/s, over a
 # ~1s CPU-time loop. Mirrors bench/c/perf.c and bench/cpp/perf.cpp.

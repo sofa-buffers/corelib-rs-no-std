@@ -84,6 +84,32 @@ fn arrays_roundtrip() {
 }
 
 #[test]
+fn empty_arrays_roundtrip() {
+    // Zero-count arrays (§4.7/§4.8) round-trip to a lone array_begin(.., 0),
+    // surrounded here by scalars to prove the decoder resumes cleanly.
+    let empty_u: [u32; 0] = [];
+    let empty_i: [i32; 0] = [];
+    let empty_f: [f64; 0] = [];
+    let ev = roundtrip(|os| {
+        os.write_unsigned(0, 7).unwrap();
+        os.write_array_unsigned(1, &empty_u).unwrap();
+        os.write_array_signed(2, &empty_i).unwrap();
+        os.write_array_fp64(3, &empty_f).unwrap();
+        os.write_unsigned(4, 9).unwrap();
+    });
+    assert_eq!(
+        ev,
+        [
+            Event::Unsigned(0, 7),
+            Event::ArrayBegin(1, ArrayKind::Unsigned, 0),
+            Event::ArrayBegin(2, ArrayKind::Signed, 0),
+            Event::ArrayBegin(3, ArrayKind::Fixlen, 0),
+            Event::Unsigned(4, 9),
+        ]
+    );
+}
+
+#[test]
 fn deep_nested_sequences_roundtrip() {
     let ev = roundtrip(|os| {
         os.write_unsigned(0, 1).unwrap();

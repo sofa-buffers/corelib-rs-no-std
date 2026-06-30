@@ -300,12 +300,58 @@ fn buffer_full_without_sink() {
     assert_eq!(os.write_unsigned(0, u64::MAX), Err(Error::BufferFull));
 }
 
+// --- zero-count arrays (§4.7/§4.8) ------------------------------------------
+
 #[test]
-fn empty_array_is_argument_error() {
-    let mut buf = [0u8; 16];
-    let mut os = OStream::new(&mut buf);
+fn empty_unsigned_array_encodes_header_and_zero_count() {
+    // §4.7: a zero-count array is exactly `[ header ][ count = 0 ]`.
     let empty: [u32; 0] = [];
-    assert_eq!(os.write_array_unsigned(0, &empty), Err(Error::Argument));
+    assert_eq!(
+        encode(|os| os.write_array_unsigned(7, &empty).unwrap()),
+        [0x3B, 0x00] // id 7, type 0b011 (unsigned array) -> 0x3B; count 0
+    );
+}
+
+#[test]
+fn empty_signed_array_encodes_header_and_zero_count() {
+    let empty: [i32; 0] = [];
+    assert_eq!(
+        encode(|os| os.write_array_signed(7, &empty).unwrap()),
+        [0x3C, 0x00] // id 7, type 0b100 (signed array) -> 0x3C; count 0
+    );
+}
+
+#[test]
+fn empty_fp32_array_omits_fixlen_word() {
+    // §4.8: a zero-count fixlen array carries no `fixlen_word` and no payload.
+    let empty: [f32; 0] = [];
+    assert_eq!(
+        encode(|os| os.write_array_fp32(7, &empty).unwrap()),
+        [0x3D, 0x00] // id 7, type 0b101 (fixlen array) -> 0x3D; count 0, nothing after
+    );
+}
+
+#[test]
+fn empty_fp64_array_omits_fixlen_word() {
+    let empty: [f64; 0] = [];
+    assert_eq!(
+        encode(|os| os.write_array_fp64(7, &empty).unwrap()),
+        [0x3D, 0x00] // id 7, type 0b101 (fixlen array) -> 0x3D; count 0, nothing after
+    );
+}
+
+// --- nesting depth (§4.9/§6.2, MAX_DEPTH = 255) -----------------------------
+
+#[test]
+fn sequence_depth_over_max_is_argument_error() {
+    let mut buf = [0u8; 512];
+    let mut os = OStream::new(&mut buf);
+    // Opening MAX_DEPTH (255) nested sequences is fine.
+    for _ in 0..255 {
+        os.write_sequence_begin(0).unwrap();
+    }
+    // The 256th must be rejected without writing anything.
+    assert_eq!(os.write_sequence_begin(0), Err(Error::Argument));
 }
 
 // --- streaming flush sink ---------------------------------------------------

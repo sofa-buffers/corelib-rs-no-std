@@ -13,6 +13,15 @@ pub type Id = u32;
 /// Largest valid field id (`INT32_MAX`), matching `SOFAB_ID_MAX` in C.
 pub const ID_MAX: Id = i32::MAX as u32;
 
+/// Maximum nested-sequence depth (`MAX_DEPTH`, §4.9/§6.2), matching
+/// `SOFAB_MAX_DEPTH` in C.
+///
+/// An encoder must not open more than this many nested sequences, and a decoder
+/// rejects a message that nests deeper with [`crate::Error::InvalidMsg`] rather
+/// than risk unbounded recursion / stack growth.
+#[cfg(feature = "sequence")]
+pub const MAX_DEPTH: u32 = 255;
+
 /// Unsigned value type used by the scalar API.
 ///
 /// The reference C library uses a 64-bit value type by default; this port

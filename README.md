@@ -7,23 +7,24 @@
 
 [Would you like to know more?](https://github.com/sofa-buffers)
 
-## SofaBuffers Rust library
+## SofaBuffers Rust library (`no_std`)
 
-[![CI](https://github.com/sofa-buffers/corelib-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/sofa-buffers/corelib-rs/actions/workflows/ci.yml)
-[![Coverage](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fsofa-buffers%2Fcorelib-rs%2Fbadges%2Fcoverage.json)](https://github.com/sofa-buffers/corelib-rs/actions/workflows/ci.yml)
-[![Docs](https://img.shields.io/badge/docs-GitHub%20Pages-1f7feb)](https://sofa-buffers.github.io/corelib-rs/)
+[![CI](https://github.com/sofa-buffers/corelib-rs-no-std/actions/workflows/ci.yml/badge.svg)](https://github.com/sofa-buffers/corelib-rs-no-std/actions/workflows/ci.yml)
+[![Coverage](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fsofa-buffers%2Fcorelib-rs-no-std%2Fbadges%2Fcoverage.json)](https://github.com/sofa-buffers/corelib-rs-no-std/actions/workflows/ci.yml)
+[![Docs](https://img.shields.io/badge/docs-GitHub%20Pages-1f7feb)](https://sofa-buffers.github.io/corelib-rs-no-std/)
 
-[GitHub repository](https://github.com/sofa-buffers/corelib-rs)
+[GitHub repository](https://github.com/sofa-buffers/corelib-rs-no-std)
 
 A `#![no_std]`, **heap-free**, **streaming** Rust implementation of the
 SofaBuffers (*Sofab*) serialization format. It is a port of the C `corelib`
 (`istream.c` / `ostream.c`) and runs on any platform, from tiny
 microcontrollers to desktops and servers.
 
-**Minimum Rust version:** 1.70. **Install:**
+**Minimum Rust version:** 1.70. **Install** (the package is `SofaBuffers`; the
+crate is imported as `sofab`):
 
 ```bash
-cargo add sofab
+cargo add SofaBuffers
 ```
 
 The wire format is specified, language-neutrally, in the
@@ -148,9 +149,11 @@ The element width of an array is fixed by `T` at compile time (via the
 [`UnsignedElem`] / [`SignedElem`] marker traits), so the C API's "invalid element
 size" runtime error is impossible here. **Disallowed:** strings and blobs are not
 valid as fixed-length-array elements — the encoder offers no such call and the
-decoder rejects that wire shape with `Error::InvalidMsg`; arrays must be non-empty
-(an empty slice returns `Error::Argument`); and with `value64` off, a varint that
-would exceed `2³²−1` is rejected as `Error::InvalidMsg`.
+decoder rejects that wire shape with `Error::InvalidMsg`; and with `value64` off,
+a varint that would exceed `2³²−1` is rejected as `Error::InvalidMsg`. A
+**zero-count array is valid** (§4.7/§4.8): it encodes as `[ header ][ count = 0 ]`
+— a fixlen array carries no element descriptor when empty — and decodes to a
+single `array_begin(.., 0)`.
 
 ### Memory handling
 
@@ -246,8 +249,8 @@ Accepted capabilities: `fixlen`, `array`, `sequence`, `fp64`, `value32`,
 [`sofab::config`] (`FIXLEN`, `ARRAY`, `SEQUENCE`, `FP64`, `VALUE_BITS`) for use
 in your own `const` assertions or logging.
 
-[`require!`]: https://sofa-buffers.github.io/corelib-rs/sofab/macro.require.html
-[`sofab::config`]: https://sofa-buffers.github.io/corelib-rs/sofab/config/index.html
+[`require!`]: https://sofa-buffers.github.io/corelib-rs-no-std/sofab/macro.require.html
+[`sofab::config`]: https://sofa-buffers.github.io/corelib-rs-no-std/sofab/config/index.html
 
 ## Footprint
 

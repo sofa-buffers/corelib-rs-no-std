@@ -45,6 +45,9 @@ pub struct OStream<'a, F: Flush = NoFlush> {
     offset: usize,
     /// `None` means "no sink": a full buffer is an error rather than a flush.
     flush: Option<F>,
+    /// Currently-open nested-sequence depth, capped at [`MAX_DEPTH`].
+    #[cfg(feature = "sequence")]
+    depth: u32,
 }
 
 impl<'a> OStream<'a, NoFlush> {
@@ -65,6 +68,8 @@ impl<'a> OStream<'a, NoFlush> {
             end,
             offset,
             flush: None,
+            #[cfg(feature = "sequence")]
+            depth: 0,
         }
     }
 }
@@ -81,6 +86,8 @@ impl<'a, F: Flush> OStream<'a, F> {
             end,
             offset,
             flush: Some(sink),
+            #[cfg(feature = "sequence")]
+            depth: 0,
         }
     }
 
@@ -225,9 +232,6 @@ impl<'a, F: Flush> OStream<'a, F> {
     /// element-size error from the C API is impossible here.
     #[cfg(feature = "array")]
     pub fn write_array_unsigned<T: UnsignedElem>(&mut self, id: Id, data: &[T]) -> Result<()> {
-        if data.is_empty() {
-            return Err(Error::Argument);
-        }
         self.write_id_type(id, T_VARINTARRAY_UNSIGNED)?;
         self.write_varint(data.len() as Unsigned)?;
         for e in data {
@@ -239,9 +243,6 @@ impl<'a, F: Flush> OStream<'a, F> {
     /// Write an array of signed integers (`i8`/`i16`/`i32`/`i64` elements).
     #[cfg(feature = "array")]
     pub fn write_array_signed<T: SignedElem>(&mut self, id: Id, data: &[T]) -> Result<()> {
-        if data.is_empty() {
-            return Err(Error::Argument);
-        }
         self.write_id_type(id, T_VARINTARRAY_SIGNED)?;
         self.write_varint(data.len() as Unsigned)?;
         for e in data {
@@ -251,13 +252,16 @@ impl<'a, F: Flush> OStream<'a, F> {
     }
 
     /// Write an array of 32-bit floats.
+    ///
+    /// A zero-count array carries **no** `fixlen_word` and no payload (§4.8):
+    /// the field is exactly `[ header ][ count = 0 ]`.
     #[cfg(all(feature = "array", feature = "fixlen"))]
     pub fn write_array_fp32(&mut self, id: Id, data: &[f32]) -> Result<()> {
-        if data.is_empty() {
-            return Err(Error::Argument);
-        }
         self.write_id_type(id, T_FIXLENARRAY)?;
         self.write_varint(data.len() as Unsigned)?;
+        if data.is_empty() {
+            return Ok(());
+        }
         self.write_varint((4 << 3) | FixlenType::Fp32 as Unsigned)?;
         for &e in data {
             self.push_raw(&e.to_le_bytes())?;
@@ -266,13 +270,16 @@ impl<'a, F: Flush> OStream<'a, F> {
     }
 
     /// Write an array of 64-bit floats.
+    ///
+    /// A zero-count array carries **no** `fixlen_word` and no payload (§4.8):
+    /// the field is exactly `[ header ][ count = 0 ]`.
     #[cfg(all(feature = "array", feature = "fp64"))]
     pub fn write_array_fp64(&mut self, id: Id, data: &[f64]) -> Result<()> {
-        if data.is_empty() {
-            return Err(Error::Argument);
-        }
         self.write_id_type(id, T_FIXLENARRAY)?;
         self.write_varint(data.len() as Unsigned)?;
+        if data.is_empty() {
+            return Ok(());
+        }
         self.write_varint((8 << 3) | FixlenType::Fp64 as Unsigned)?;
         for &e in data {
             self.push_raw(&e.to_le_bytes())?;
@@ -283,17 +290,27 @@ impl<'a, F: Flush> OStream<'a, F> {
     // --- sequence writers ---------------------------------------------------
 
     /// Open a nested sequence with the given field `id`.
+    ///
+    /// Returns [`Error::Argument`] if opening it would exceed the normative
+    /// maximum nesting depth ([`MAX_DEPTH`] = 255, §4.9/§6.2).
     #[cfg(feature = "sequence")]
     #[inline]
     pub fn write_sequence_begin(&mut self, id: Id) -> Result<()> {
-        self.write_id_type(id, T_SEQUENCE_START)
+        if self.depth >= MAX_DEPTH {
+            return Err(Error::Argument);
+        }
+        self.write_id_type(id, T_SEQUENCE_START)?;
+        self.depth += 1;
+        Ok(())
     }
 
     /// Close the most recently opened nested sequence.
     #[cfg(feature = "sequence")]
     #[inline]
     pub fn write_sequence_end(&mut self) -> Result<()> {
-        self.write_id_type(0, T_SEQUENCE_END)
+        self.write_id_type(0, T_SEQUENCE_END)?;
+        self.depth = self.depth.saturating_sub(1);
+        Ok(())
     }
 }
 
