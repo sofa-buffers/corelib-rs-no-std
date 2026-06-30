@@ -54,19 +54,24 @@ jobs:
       - name: Cache cargo registry & build
         uses: Swatinem/rust-cache@v2
 
+      # `--locked` enforces the committed Cargo.lock so the MSRV (1.70) job
+      # tests the exact pinned dependency tree. Without it the resolver pulls
+      # the newest semver-compatible versions, and serde_json's transitive deps
+      # (zmij, syn, quote, …) keep bumping their own MSRV past 1.70 in patch
+      # releases — silently breaking this job.
       - name: Build (all features, debug)
-        run: cargo build --all-features --verbose
+        run: cargo build --locked --all-features --verbose
 
       # The size-optimized release profile is the shipping config for this
       # crate, so it must build (and stay MSRV-clean) too (§12.1 step 4).
       - name: Build (all features, release)
-        run: cargo build --all-features --release --verbose
+        run: cargo build --locked --all-features --release --verbose
 
       - name: Test (all features)
-        run: cargo test --all-features --verbose
+        run: cargo test --locked --all-features --verbose
 
       - name: Test (default features)
-        run: cargo test --verbose
+        run: cargo test --locked --verbose
 
   vectors:
     name: Shared vectors across feature configs

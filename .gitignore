@@ -1,6 +1,5 @@
 /target
 /lcov.info
-Cargo.lock
 
 # Local secrets — never commit these.
 .env
