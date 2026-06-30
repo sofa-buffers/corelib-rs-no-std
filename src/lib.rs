@@ -72,6 +72,9 @@ pub use types::FixlenType;
 #[cfg(feature = "array")]
 pub use types::ArrayKind;
 
+#[cfg(feature = "sequence")]
+pub use types::MAX_DEPTH;
+
 #[cfg(feature = "array")]
 pub use ostream::{SignedElem, UnsignedElem};
 

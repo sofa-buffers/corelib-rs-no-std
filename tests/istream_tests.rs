@@ -183,11 +183,56 @@ fn streaming_chunked_feed_matches_oneshot() {
 
 // --- error cases ------------------------------------------------------------
 
+// --- zero-count arrays (§4.7/§4.8) ------------------------------------------
+
 #[test]
-fn array_count_zero_is_invalid() {
+fn decode_empty_unsigned_array() {
+    // §4.7: `[ header ][ count = 0 ]` decodes to a single array_begin(.., 0).
+    assert_eq!(
+        decode(&[0x03, 0x00]),
+        [Event::ArrayBegin(0, ArrayKind::Unsigned, 0)]
+    );
+}
+
+#[test]
+fn decode_empty_signed_array() {
+    assert_eq!(
+        decode(&[0x04, 0x00]),
+        [Event::ArrayBegin(0, ArrayKind::Signed, 0)]
+    );
+}
+
+#[test]
+fn decode_empty_fixlen_array_has_no_word() {
+    // §4.8: a zero-count fixlen array carries no `fixlen_word`; the decoder must
+    // not read one and must resume cleanly on the next field (here `id0 = 42`).
+    assert_eq!(
+        decode(&[0x05, 0x00, 0x00, 0x2A]),
+        [
+            Event::ArrayBegin(0, ArrayKind::Fixlen, 0),
+            Event::Unsigned(0, 42),
+        ]
+    );
+}
+
+// --- nesting depth (§4.9/§6.2, MAX_DEPTH = 255) -----------------------------
+
+#[test]
+fn nesting_at_max_depth_is_accepted() {
+    // 255 sequence-start markers (id 0 -> byte 0x06): exactly MAX_DEPTH levels.
+    let starts = [0x06u8; 255];
     let mut rec = Recorder::new();
     let mut is = IStream::new();
-    assert_eq!(is.feed(&[0x03, 0x00], &mut rec), Err(Error::InvalidMsg));
+    assert_eq!(is.feed(&starts, &mut rec), Ok(()));
+}
+
+#[test]
+fn nesting_past_max_depth_is_invalid() {
+    // One level deeper than MAX_DEPTH must be rejected.
+    let starts = [0x06u8; 256];
+    let mut rec = Recorder::new();
+    let mut is = IStream::new();
+    assert_eq!(is.feed(&starts, &mut rec), Err(Error::InvalidMsg));
 }
 
 #[test]

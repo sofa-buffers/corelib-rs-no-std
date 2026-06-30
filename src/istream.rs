@@ -239,7 +239,8 @@ impl IStream {
 
             #[cfg(feature = "sequence")]
             T_SEQUENCE_START => {
-                if self.depth == u32::MAX {
+                // Reject nesting beyond the normative MAX_DEPTH (§4.9/§6.2).
+                if self.depth >= MAX_DEPTH {
                     return Err(Error::InvalidMsg);
                 }
                 self.depth += 1;
@@ -389,14 +390,23 @@ impl IStream {
             None => return Ok(()),
         };
 
-        if count == 0 || count > ARRAY_MAX {
+        if count > ARRAY_MAX {
             return Err(Error::InvalidMsg);
         }
         let count = count as usize;
-        self.array_remaining = count;
-        self.in_array = true;
         visitor.array_begin(self.id, self.array_kind, count);
 
+        // A zero-count array is exactly `[ header ][ count = 0 ]` (§4.7/§4.8):
+        // no elements follow, and a fixlen array carries no `fixlen_word`. Do
+        // not descend — resume at the next field.
+        if count == 0 {
+            self.in_array = false;
+            self.state = State::Idle;
+            return Ok(());
+        }
+
+        self.array_remaining = count;
+        self.in_array = true;
         self.state = match self.array_kind {
             ArrayKind::Unsigned => State::VarintUnsigned,
             ArrayKind::Signed => State::VarintSigned,
