@@ -20,11 +20,11 @@ SofaBuffers (*Sofab*) serialization format. It is a port of the C `corelib`
 (`istream.c` / `ostream.c`) and runs on any platform, from tiny
 microcontrollers to desktops and servers.
 
-**Minimum Rust version:** 1.70. **Install** (the package is `SofaBuffers`; the
-crate is imported as `sofab`):
+**Minimum Rust version:** 1.70. **Install** (the crates.io package is
+`sofa-buffers-corelib-no-std`; you still `use sofab::…` in code):
 
 ```bash
-cargo add SofaBuffers
+cargo add sofa-buffers-corelib-no-std
 ```
 
 The wire format is specified, language-neutrally, in the
@@ -213,7 +213,8 @@ Example minimal build (integers only, 32-bit values — smallest possible). With
 `value64`) is off:
 
 ```toml
-sofab = { version = "0.1", default-features = false }
+# crates.io package name; the imported crate is still `sofab`
+sofa-buffers-corelib-no-std = { version = "0.1", default-features = false }
 ```
 
 > **Note on value width:** like the C default configuration, the scalar value

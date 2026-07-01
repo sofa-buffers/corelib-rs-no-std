@@ -3,7 +3,7 @@
 version = 3
 
 [[package]]
-name = "SofaBuffers"
+name = "sofa-buffers-corelib-no-std"
 version = "0.1.0"
 dependencies = [
  "libc",
