@@ -253,15 +253,14 @@ impl<'a, F: Flush> OStream<'a, F> {
 
     /// Write an array of 32-bit floats.
     ///
-    /// A zero-count array carries **no** `fixlen_word` and no payload (§4.8):
-    /// the field is exactly `[ header ][ count = 0 ]`.
+    /// The `fixlen_word` is **always** present — even for a zero-count array —
+    /// so an empty `fp32` array stays distinguishable from an empty `fp64` one
+    /// (§4.8): the field is `[ header ][ count ][ fixlen_word ][ payload… ]`,
+    /// where an empty array simply has no payload.
     #[cfg(all(feature = "array", feature = "fixlen"))]
     pub fn write_array_fp32(&mut self, id: Id, data: &[f32]) -> Result<()> {
         self.write_id_type(id, T_FIXLENARRAY)?;
         self.write_varint(data.len() as Unsigned)?;
-        if data.is_empty() {
-            return Ok(());
-        }
         self.write_varint((4 << 3) | FixlenType::Fp32 as Unsigned)?;
         for &e in data {
             self.push_raw(&e.to_le_bytes())?;
@@ -271,15 +270,14 @@ impl<'a, F: Flush> OStream<'a, F> {
 
     /// Write an array of 64-bit floats.
     ///
-    /// A zero-count array carries **no** `fixlen_word` and no payload (§4.8):
-    /// the field is exactly `[ header ][ count = 0 ]`.
+    /// The `fixlen_word` is **always** present — even for a zero-count array —
+    /// so an empty `fp64` array stays distinguishable from an empty `fp32` one
+    /// (§4.8): the field is `[ header ][ count ][ fixlen_word ][ payload… ]`,
+    /// where an empty array simply has no payload.
     #[cfg(all(feature = "array", feature = "fp64"))]
     pub fn write_array_fp64(&mut self, id: Id, data: &[f64]) -> Result<()> {
         self.write_id_type(id, T_FIXLENARRAY)?;
         self.write_varint(data.len() as Unsigned)?;
-        if data.is_empty() {
-            return Ok(());
-        }
         self.write_varint((8 << 3) | FixlenType::Fp64 as Unsigned)?;
         for &e in data {
             self.push_raw(&e.to_le_bytes())?;

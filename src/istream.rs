@@ -311,6 +311,22 @@ impl IStream {
         self.fixlen_remaining = length;
         self.acc_len = 0;
 
+        // An empty fixlen array (§4.8) still carries its `fixlen_word`, but no
+        // payload follows: validate the element subtype/width, capture it, and
+        // resume at the next field without descending into `FixlenVal`.
+        #[cfg(feature = "array")]
+        if self.in_array && self.array_remaining == 0 {
+            match subtype {
+                FixlenType::Fp32 if length == 4 => {}
+                #[cfg(feature = "fp64")]
+                FixlenType::Fp64 if length == 8 => {}
+                _ => return Err(Error::InvalidMsg),
+            }
+            self.in_array = false;
+            self.state = State::Idle;
+            return Ok(());
+        }
+
         match subtype {
             FixlenType::Fp32 => {
                 if length != 4 {
@@ -396,10 +412,19 @@ impl IStream {
         let count = count as usize;
         visitor.array_begin(self.id, self.array_kind, count);
 
-        // A zero-count array is exactly `[ header ][ count = 0 ]` (§4.7/§4.8):
-        // no elements follow, and a fixlen array carries no `fixlen_word`. Do
-        // not descend — resume at the next field.
+        // A zero-count array has no elements. An integer array is then exactly
+        // `[ header ][ count = 0 ]` and resumes at the next field (§4.7). A
+        // fixlen array still carries its `fixlen_word` (§4.8) so an empty fp32
+        // stays distinct from an empty fp64 — read the word (subtype only, no
+        // payload) via `FixlenLen`, which finishes cleanly for a zero remainder.
         if count == 0 {
+            #[cfg(feature = "fixlen")]
+            if self.array_kind == ArrayKind::Fixlen {
+                self.array_remaining = 0;
+                self.in_array = true;
+                self.state = State::FixlenLen;
+                return Ok(());
+            }
             self.in_array = false;
             self.state = State::Idle;
             return Ok(());
