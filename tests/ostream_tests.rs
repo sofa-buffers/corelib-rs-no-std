@@ -322,21 +322,22 @@ fn empty_signed_array_encodes_header_and_zero_count() {
 }
 
 #[test]
-fn empty_fp32_array_omits_fixlen_word() {
-    // §4.8: a zero-count fixlen array carries no `fixlen_word` and no payload.
+fn empty_fp32_array_carries_fixlen_word() {
+    // §4.8: a zero-count fixlen array still carries its `fixlen_word` (but no
+    // payload) so an empty fp32 array stays distinct from an empty fp64 one.
     let empty: [f32; 0] = [];
     assert_eq!(
         encode(|os| os.write_array_fp32(7, &empty).unwrap()),
-        [0x3D, 0x00] // id 7, type 0b101 (fixlen array) -> 0x3D; count 0, nothing after
+        [0x3D, 0x00, 0x20] // id 7, fixlen array -> 0x3D; count 0; fixlen_word (4<<3)|fp32
     );
 }
 
 #[test]
-fn empty_fp64_array_omits_fixlen_word() {
+fn empty_fp64_array_carries_fixlen_word() {
     let empty: [f64; 0] = [];
     assert_eq!(
         encode(|os| os.write_array_fp64(7, &empty).unwrap()),
-        [0x3D, 0x00] // id 7, type 0b101 (fixlen array) -> 0x3D; count 0, nothing after
+        [0x3D, 0x00, 0x41] // id 7, fixlen array -> 0x3D; count 0; fixlen_word (8<<3)|fp64
     );
 }
 
