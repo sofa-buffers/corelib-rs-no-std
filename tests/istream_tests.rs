@@ -203,11 +203,12 @@ fn decode_empty_signed_array() {
 }
 
 #[test]
-fn decode_empty_fixlen_array_has_no_word() {
-    // §4.8: a zero-count fixlen array carries no `fixlen_word`; the decoder must
-    // not read one and must resume cleanly on the next field (here `id0 = 42`).
+fn decode_empty_fixlen_array_reads_word() {
+    // §4.8: a zero-count fixlen array still carries its `fixlen_word` (here 0x20
+    // = fp32); the decoder must consume it (no payload) and resume cleanly on
+    // the next field (here `id0 = 42`).
     assert_eq!(
-        decode(&[0x05, 0x00, 0x00, 0x2A]),
+        decode(&[0x05, 0x00, 0x20, 0x00, 0x2A]),
         [
             Event::ArrayBegin(0, ArrayKind::Fixlen, 0),
             Event::Unsigned(0, 42),
