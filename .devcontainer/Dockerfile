@@ -26,7 +26,7 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
     && rustup component add rustfmt clippy rust-src llvm-tools-preview \
     && rustup target add thumbv7em-none-eabihf thumbv6m-none-eabi riscv32imc-unknown-none-elf
 
-# cargo-llvm-cov: coverage tooling used by coverage.sh and the CI coverage job.
+# cargo-llvm-cov: coverage tooling used by the CI coverage job.
 RUN cargo install cargo-llvm-cov --locked
 
 # Node.js (LTS) for Claude Code

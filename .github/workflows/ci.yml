@@ -180,15 +180,19 @@ jobs:
           git push -f "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" badges
 
   no_std:
-    name: no_std bare-metal build
+    name: no_std bare-metal build & footprint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust toolchain (thumbv7em target)
+      - name: Install Rust toolchain (bare-metal targets)
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: thumbv7em-none-eabihf
+          # Cortex-M0 / Cortex-M4F / RISC-V 32 — the targets measured by
+          # tools/footprint.sh. llvm-tools-preview provides llvm-size and
+          # rust-lld, which footprint.sh links and reads the .text size with.
+          targets: thumbv7em-none-eabihf, thumbv6m-none-eabi, riscv32imc-unknown-none-elf
+          components: llvm-tools-preview
 
       - name: Cache cargo registry & build
         uses: Swatinem/rust-cache@v2
@@ -202,3 +206,15 @@ jobs:
       # compile for bare metal.
       - name: Build for thumbv7em-none-eabihf (32-bit value width)
         run: cargo build --lib --no-default-features --features fixlen,array,sequence,fp64 --target thumbv7em-none-eabihf
+
+      # Report the library .text footprint across feature configurations for
+      # Cortex-M and RISC-V, so size changes surface in the CI log (single
+      # source of truth for the numbers documented in the README).
+      - name: Library .text footprint (Cortex-M0)
+        run: tools/footprint.sh thumbv6m-none-eabi
+
+      - name: Library .text footprint (Cortex-M4F)
+        run: tools/footprint.sh thumbv7em-none-eabihf
+
+      - name: Library .text footprint (RISC-V 32)
+        run: tools/footprint.sh riscv32imc-unknown-none-elf

@@ -305,10 +305,6 @@ cargo build --lib --all-features --target thumbv7em-none-eabihf
 
 These are exactly the steps run in CI (see [`.github/workflows/ci.yml`](.github/workflows/ci.yml)).
 
-```bash
-tools/coverage.sh                # llvm-cov: terminal summary + HTML + lcov.info
-```
-
 Tests live in `tests/` as separate integration files:
 
 - `vectors_tests.rs` — replays the shared `assets/test_vectors.json` (encode,
