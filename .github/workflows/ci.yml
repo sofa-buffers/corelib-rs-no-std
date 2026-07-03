@@ -11,7 +11,7 @@ env:
 
 jobs:
   lint:
-    name: Format & clippy
+    name: lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -33,7 +33,7 @@ jobs:
         run: cargo clippy --all-features --all-targets -- -D warnings
 
   test:
-    name: Build & test
+    name: test (${{ matrix.toolchain }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -74,7 +74,7 @@ jobs:
         run: cargo test --locked --verbose
 
   vectors:
-    name: Shared vectors across feature configs
+    name: vectors (${{ matrix.cfg }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -82,13 +82,13 @@ jobs:
         # The conformance suite is `requires`-aware: it runs the shared vectors a
         # given build can represent and skips the rest, so the same file validates
         # every feature configuration (incl. the 32-bit value width = no value64).
-        features:
-          - "--all-features"                                                # full, 64-bit
-          - "--no-default-features"                                         # integers only, 32-bit
-          - "--no-default-features --features fixlen,array,sequence,fp64"   # full wire, 32-bit width
-          - "--no-default-features --features value64"                      # integers only, 64-bit
-          - "--no-default-features --features fixlen,fp64,value64"          # scalars + floats only
-          - "--no-default-features --features array,sequence,value64"       # no fixlen
+        include:
+          - { cfg: full-64,   features: "--all-features" }                                              # full, 64-bit
+          - { cfg: int-32,    features: "--no-default-features" }                                        # integers only, 32-bit
+          - { cfg: wire-32,   features: "--no-default-features --features fixlen,array,sequence,fp64" }  # full wire, 32-bit width
+          - { cfg: int-64,    features: "--no-default-features --features value64" }                     # integers only, 64-bit
+          - { cfg: scalars,   features: "--no-default-features --features fixlen,fp64,value64" }         # scalars + floats only
+          - { cfg: no-fixlen, features: "--no-default-features --features array,sequence,value64" }      # no fixlen
     steps:
       - uses: actions/checkout@v4
 
@@ -102,7 +102,7 @@ jobs:
         run: cargo test --test vectors_tests ${{ matrix.features }} --verbose
 
   features:
-    name: Feature powerset
+    name: powerset
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -131,7 +131,7 @@ jobs:
         run: cargo hack --feature-powerset test --test config_tests
 
   coverage:
-    name: Coverage
+    name: coverage
     runs-on: ubuntu-latest
     permissions:
       contents: write   # to push the badge JSON to the `badges` branch
@@ -180,7 +180,7 @@ jobs:
           git push -f "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" badges
 
   no_std:
-    name: no_std bare-metal build & footprint
+    name: no_std + footprint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
