@@ -35,7 +35,7 @@ edition = "2021"
 [lib]
 crate-type = ["staticlib"]
 [dependencies]
-sofab = { path = "$REPO", default-features = false }
+sofab = { path = "$REPO", default-features = false, package = "sofa-buffers-corelib-no-std" }
 [profile.release]
 opt-level = "z"
 lto = true
