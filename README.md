@@ -267,13 +267,13 @@ three representative bare-metal targets:
 | `+ sequence` (64-bit) | 1 002 B | 1 028 B | 1 522 B |
 | `+ array` (64-bit) | 1 258 B | 1 238 B | 1 820 B |
 | `+ fixlen` (fp32 / str / blob, 64-bit) | 1 501 B | 1 587 B | 2 109 B |
-| all wire types, 32-bit (`fixlen,array,sequence,fp64`) | 1 825 B | 1 857 B | 3 001 B |
-| **MAX** — all wire types, 64-bit (default / `--all-features`) | **2 257 B** | **2 265 B** | **3 321 B** |
+| all wire types, 32-bit (`fixlen,array,sequence,fp64`) | 1 893 B | 1 921 B | 3 061 B |
+| **MAX** — all wire types, 64-bit (default / `--all-features`) | **2 353 B** | **2 325 B** | **3 373 B** |
 
 Cortex-M0/M4F are `thumbv6m-none-eabi` / `thumbv7em-none-eabihf`; RISC-V 32 is
 `riscv32imc-unknown-none-elf` — the denser Thumb-2 encoding keeps the Cortex-M
 builds smaller. On Cortex-M0 the codec spans **≈0.7 KiB** (integer-only, 32-bit
-values) to **≈2.2 KiB** (every wire type, 64-bit values) of flash; disabling
+values) to **≈2.3 KiB** (every wire type, 64-bit values) of flash; disabling
 `value64` removes ~20 % of the code — chiefly by deleting the 64-bit
 shift/`memclr` helpers (`__aeabi_llsl`, `__aeabi_memclr8`) and halving the width
 of every varint operation.
