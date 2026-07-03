@@ -85,30 +85,34 @@ jobs:
       - name: Cache cargo registry & build
         uses: Swatinem/rust-cache@v2
 
-      # Replay the shared conformance vectors under each feature config. A single
-      # job loops over the configs so the toolchain and cargo cache are set up
-      # once instead of once per matrix leg. The suite is `requires`-aware: each
-      # config runs the vectors it can represent and skips the rest. All configs
-      # run even if one fails (old `fail-fast: false` behaviour); the job fails if
-      # any did.
-      - name: Run shared vectors (all feature configs)
-        run: |
-          set -u
-          configs=(
-            "--all-features"                                               # full, 64-bit
-            "--no-default-features"                                        # integers only, 32-bit
-            "--no-default-features --features fixlen,array,sequence,fp64"  # full wire, 32-bit width
-            "--no-default-features --features value64"                     # integers only, 64-bit
-            "--no-default-features --features fixlen,fp64,value64"         # scalars + floats only
-            "--no-default-features --features array,sequence,value64"      # no fixlen
-          )
-          rc=0
-          for cfg in "${configs[@]}"; do
-            echo "::group::vectors ${cfg}"
-            cargo test --test vectors_tests ${cfg} --verbose || rc=1
-            echo "::endgroup::"
-          done
-          exit $rc
+      # Replay the shared conformance vectors under each feature config as its own
+      # step, so the step list shows at a glance which config passed or failed —
+      # all in one job, so the toolchain and cargo cache are still set up only
+      # once. The suite is `requires`-aware: each config runs the vectors it can
+      # represent and skips the rest. `if: ${{ !cancelled() }}` on the later steps
+      # keeps every config running even after one fails (old `fail-fast: false`).
+      - name: vectors — full, 64-bit
+        run: cargo test --test vectors_tests --all-features --verbose
+
+      - name: vectors — integers only, 32-bit
+        if: ${{ !cancelled() }}
+        run: cargo test --test vectors_tests --no-default-features --verbose
+
+      - name: vectors — full wire, 32-bit width
+        if: ${{ !cancelled() }}
+        run: cargo test --test vectors_tests --no-default-features --features fixlen,array,sequence,fp64 --verbose
+
+      - name: vectors — integers only, 64-bit
+        if: ${{ !cancelled() }}
+        run: cargo test --test vectors_tests --no-default-features --features value64 --verbose
+
+      - name: vectors — scalars + floats only
+        if: ${{ !cancelled() }}
+        run: cargo test --test vectors_tests --no-default-features --features fixlen,fp64,value64 --verbose
+
+      - name: vectors — no fixlen
+        if: ${{ !cancelled() }}
+        run: cargo test --test vectors_tests --no-default-features --features array,sequence,value64 --verbose
 
   features:
     name: powerset
