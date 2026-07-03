@@ -264,11 +264,11 @@ three representative bare-metal targets:
 |---------------|------------------:|-------------------:|------------------:|
 | **MIN** — integers only, 32-bit (`default-features = false`) | **724 B** | **740 B** | **1 140 B** |
 | integers only, 64-bit (`value64`) | 902 B | 936 B | 1 374 B |
-| `+ sequence` (64-bit) | 982 B | 1 008 B | 1 480 B |
-| `+ array` (64-bit) | 1 250 B | 1 238 B | 1 820 B |
+| `+ sequence` (64-bit) | 1 002 B | 1 028 B | 1 522 B |
+| `+ array` (64-bit) | 1 258 B | 1 238 B | 1 820 B |
 | `+ fixlen` (fp32 / str / blob, 64-bit) | 1 501 B | 1 587 B | 2 109 B |
-| all wire types, 32-bit (`fixlen,array,sequence,fp64`) | 1 797 B | 1 825 B | 2 977 B |
-| **MAX** — all wire types, 64-bit (default / `--all-features`) | **2 229 B** | **2 245 B** | **3 321 B** |
+| all wire types, 32-bit (`fixlen,array,sequence,fp64`) | 1 825 B | 1 857 B | 3 001 B |
+| **MAX** — all wire types, 64-bit (default / `--all-features`) | **2 257 B** | **2 265 B** | **3 321 B** |
 
 Cortex-M0/M4F are `thumbv6m-none-eabi` / `thumbv7em-none-eabihf`; RISC-V 32 is
 `riscv32imc-unknown-none-elf` — the denser Thumb-2 encoding keeps the Cortex-M

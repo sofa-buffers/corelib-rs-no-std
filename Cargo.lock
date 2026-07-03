@@ -3,14 +3,6 @@
 version = 3
 
 [[package]]
-name = "sofa-buffers-corelib-no-std"
-version = "0.1.0"
-dependencies = [
- "libc",
- "serde_json",
-]
-
-[[package]]
 name = "itoa"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -86,6 +78,14 @@ dependencies = [
  "serde",
  "serde_core",
  "zmij",
+]
+
+[[package]]
+name = "sofa-buffers-corelib-no-std"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "serde_json",
 ]
 
 [[package]]

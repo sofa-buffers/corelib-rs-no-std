@@ -18,10 +18,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 ARG RUST_VERSION=stable
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
     | sh -s -- -y --default-toolchain $RUST_VERSION --profile minimal \
-    # rustfmt/clippy/rust-src for dev; llvm-tools-preview backs cargo-llvm-cov;
-    # thumbv7em-none-eabihf is the bare-metal no_std build target used in CI.
+    # rustfmt/clippy/rust-src for dev; llvm-tools-preview backs cargo-llvm-cov
+    # and provides llvm-size/rust-lld used by tools/footprint.sh.
+    # Bare-metal no_std targets: thumbv7em-none-eabihf (CI build), plus
+    # thumbv6m-none-eabi (Cortex-M0, footprint.sh default) and
+    # riscv32imc-unknown-none-elf (RISC-V 32) for footprint measurements.
     && rustup component add rustfmt clippy rust-src llvm-tools-preview \
-    && rustup target add thumbv7em-none-eabihf
+    && rustup target add thumbv7em-none-eabihf thumbv6m-none-eabi riscv32imc-unknown-none-elf
 
 # cargo-llvm-cov: coverage tooling used by coverage.sh and the CI coverage job.
 RUN cargo install cargo-llvm-cov --locked
