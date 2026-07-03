@@ -74,21 +74,8 @@ jobs:
         run: cargo test --locked --verbose
 
   vectors:
-    name: vectors (${{ matrix.cfg }})
+    name: vectors
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        # The conformance suite is `requires`-aware: it runs the shared vectors a
-        # given build can represent and skips the rest, so the same file validates
-        # every feature configuration (incl. the 32-bit value width = no value64).
-        include:
-          - { cfg: full-64,   features: "--all-features" }                                              # full, 64-bit
-          - { cfg: int-32,    features: "--no-default-features" }                                        # integers only, 32-bit
-          - { cfg: wire-32,   features: "--no-default-features --features fixlen,array,sequence,fp64" }  # full wire, 32-bit width
-          - { cfg: int-64,    features: "--no-default-features --features value64" }                     # integers only, 64-bit
-          - { cfg: scalars,   features: "--no-default-features --features fixlen,fp64,value64" }         # scalars + floats only
-          - { cfg: no-fixlen, features: "--no-default-features --features array,sequence,value64" }      # no fixlen
     steps:
       - uses: actions/checkout@v4
 
@@ -98,8 +85,30 @@ jobs:
       - name: Cache cargo registry & build
         uses: Swatinem/rust-cache@v2
 
-      - name: Run shared vectors
-        run: cargo test --test vectors_tests ${{ matrix.features }} --verbose
+      # Replay the shared conformance vectors under each feature config. A single
+      # job loops over the configs so the toolchain and cargo cache are set up
+      # once instead of once per matrix leg. The suite is `requires`-aware: each
+      # config runs the vectors it can represent and skips the rest. All configs
+      # run even if one fails (old `fail-fast: false` behaviour); the job fails if
+      # any did.
+      - name: Run shared vectors (all feature configs)
+        run: |
+          set -u
+          configs=(
+            "--all-features"                                               # full, 64-bit
+            "--no-default-features"                                        # integers only, 32-bit
+            "--no-default-features --features fixlen,array,sequence,fp64"  # full wire, 32-bit width
+            "--no-default-features --features value64"                     # integers only, 64-bit
+            "--no-default-features --features fixlen,fp64,value64"         # scalars + floats only
+            "--no-default-features --features array,sequence,value64"      # no fixlen
+          )
+          rc=0
+          for cfg in "${configs[@]}"; do
+            echo "::group::vectors ${cfg}"
+            cargo test --test vectors_tests ${cfg} --verbose || rc=1
+            echo "::endgroup::"
+          done
+          exit $rc
 
   features:
     name: powerset
