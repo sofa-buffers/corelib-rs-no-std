@@ -16,32 +16,26 @@
 [GitHub repository](https://github.com/sofa-buffers/corelib-rs-no-std)
 
 A `#![no_std]`, **heap-free**, **streaming** Rust implementation of the
-SofaBuffers (*Sofab*) serialization format. It is a port of the C `corelib`
-(`istream.c` / `ostream.c`) and runs on any platform, from tiny
-microcontrollers to desktops and servers. The whole crate is
-`#![forbid(unsafe_code)]`, allocates nothing, and keeps every byte of state in
-caller-provided buffers and structs — so it links into firmware where an
-allocator (and the `std`-based [`corelib-rs`](https://github.com/sofa-buffers/corelib-rs))
-cannot go.
+SofaBuffers (*Sofab*) serialization format. It runs on any platform, from tiny
+microcontrollers to servers: `#![forbid(unsafe_code)]`, allocates nothing, and
+keeps every byte of state in caller-provided buffers and structs — so it links
+into firmware where an allocator (and the `std`-based
+[`corelib-rs`](https://github.com/sofa-buffers/corelib-rs)) cannot go.
 
-This library implements SofaBuffers **API version 1** (exposed as
-`sofab::API_VERSION`). The wire format is specified, language-neutrally, in the
-[SofaBuffers documentation](https://github.com/sofa-buffers/documentation); the
-test suite replays the **shared** cross-language vectors
-([`assets/test_vectors.json`](assets/test_vectors.json), copied verbatim from
-the documentation repo) to guarantee byte-for-byte interoperability with every
-other language port.
+### Requirements
 
-**Requirements:** Rust **1.70+** (the crate's MSRV), edition 2021, stable
-toolchain. Builds on any target, including bare-metal `thumbv6m` / `thumbv7em` /
-`riscv32imc` with no host `std`.
+Rust **1.70+** (MSRV), edition 2021, stable. Builds on any target, including
+bare-metal `thumbv6m` / `thumbv7em` / `riscv32imc`.
 
-**Dependencies:** none. The library pulls in **zero runtime crates** — only
-`core` (no `alloc`). `libc` and `serde_json` appear solely as
-`dev-dependencies` for the benchmarks and the conformance test suite.
+### Dependencies
 
-**Package name:** the crates.io package is `sofa-buffers-corelib-no-std`; the
-compiled crate (what you `use`) is `sofab`.
+None at runtime — only `core` (no `alloc`). `libc` and `serde_json` are
+`dev-dependencies` for benchmarks and the test suite.
+
+### Packaging
+
+The crates.io package is `sofa-buffers-corelib-no-std`; the compiled crate you
+`use` is `sofab`.
 
 ```bash
 cargo add sofa-buffers-corelib-no-std
@@ -51,16 +45,14 @@ cargo add sofa-buffers-corelib-no-std
 
 | Goal | How |
 |------|-----|
-| No allocator | All state lives in caller-provided buffers/structs. Nothing is ever boxed. |
-| No `unsafe` | The crate is `#![forbid(unsafe_code)]`. Endianness is handled with `to_le_bytes`/`from_le_bytes`. |
-| Streaming **out** | [`OStream`] writes into a small caller buffer and calls a [`Flush`] sink whenever it fills, so a message can exceed RAM. |
-| Streaming **in** | [`IStream`] is a byte-at-a-time state machine fed arbitrary chunks; large string/blob payloads are delivered in pieces. |
-| Reserve-offset | `OStream::with_offset` leaves room at the front of the buffer for a lower-layer protocol header (saves a copy). |
-| Small footprint | Cargo features drop whole code paths; size-optimized release profile (`opt-level="z"`, LTO, `panic="abort"`). |
+| No allocator | All state lives in caller buffers/structs; nothing is boxed. |
+| No `unsafe` | `#![forbid(unsafe_code)]`; endianness via `to_le_bytes`/`from_le_bytes`. |
+| Streaming **out** | [`OStream`] writes a small caller buffer and calls a [`Flush`] sink when it fills. |
+| Streaming **in** | [`IStream`] is a byte-at-a-time state machine; large payloads arrive in pieces. |
+| Reserve-offset | `OStream::with_offset` leaves room for a lower-layer header (saves a copy). |
+| Small footprint | Cargo features drop whole code paths; `opt-level="z"`, LTO, `panic="abort"`. |
 
 ## Usage
-
-Every example below compiles against the real API and needs no allocator.
 
 ### Simple encode
 
@@ -73,16 +65,16 @@ let used = {
     os.write_unsigned(1, 42).unwrap();
     os.write_signed(2, -7).unwrap();
     os.write_str(3, "hi").unwrap();
-    os.bytes_used()                      // bytes written so far
+    os.bytes_used()
 };
 let wire = &buf[..used];
 ```
 
 ### Simple decode
 
-Decoding is **push-based**: you implement [`Visitor`] and the decoder calls back
-the methods for the field kinds you care about. Any method you leave at its
-default (empty) body transparently **skips** that field.
+Decoding is **push-based**: implement [`Visitor`] and the decoder calls back the
+methods for the field kinds you care about. Any method left at its default
+(empty) body transparently **skips** that field.
 
 ```rust
 use sofab::{IStream, Visitor, Id, Unsigned, Signed};
@@ -99,12 +91,11 @@ let mut sink = My::default();
 IStream::new().feed(wire, &mut sink).unwrap();
 ```
 
-### Streaming a message larger than the buffer — the `OStream` output primitive
+### Streaming larger than the buffer
 
-[`OStream`] is the streaming *output* primitive. Give it a **tiny** window and a
-[`Flush`] sink (any `FnMut(&[u8])`, or a manual `impl Flush` on bare metal); when
-the window fills it drains to the sink and keeps going, so the produced message
-can be far larger than RAM.
+Give [`OStream`] a **tiny** window and a [`Flush`] sink (any `FnMut(&[u8])`, or a
+manual `impl Flush` on bare metal); when the window fills it drains to the sink,
+so the produced message can be far larger than RAM.
 
 ```rust
 use sofab::OStream;
@@ -122,15 +113,15 @@ let mut out = Vec::new();                     // or a UART / socket / flash page
 }
 ```
 
-`OStream::with_offset` reserves header bytes at the front of the buffer, and
+`OStream::with_offset` reserves header bytes at the front of the buffer;
 `OStream::buffer_set` swaps in a fresh buffer mid-stream (typically from inside
 the flush sink).
 
-### The `IStream` input primitive — chunked feeding
+### Chunked feeding
 
-[`IStream`] is the streaming *input* primitive: a byte-at-a-time state machine
-that resumes at any boundary, so you can feed it arbitrarily small chunks as they
-arrive off the wire. String/blob payloads are delivered to the visitor in pieces.
+[`IStream`] resumes at any byte boundary, so you can feed arbitrarily small
+chunks as they arrive off the wire; string/blob payloads reach the visitor in
+pieces.
 
 ```rust
 use sofab::{IStream, Visitor, Id};
@@ -140,8 +131,7 @@ struct Len { total: usize }
 impl Visitor for Len {
     fn blob(&mut self, _id: Id, total: usize, _offset: usize, chunk: &[u8]) {
         self.total = total;                   // `chunk` borrows the fed bytes
-        // copy `chunk` out here if you need it after this call returns
-        let _ = chunk;
+        let _ = chunk;                        // copy it out here if you need it later
     }
 }
 
@@ -154,10 +144,9 @@ for piece in wire.chunks(4) {                 // one packet at a time
 
 ### Driving generated object code
 
-The most common real use case is a schema compiled by **`sofabgen`** into typed
+The common real use case is a schema compiled by **`sofabgen`** into typed
 structs whose `encode` / `decode` methods drive this runtime. This crate ships
-the *runtime*; generated code calls it exactly like the pattern below (fixed
-buffers, no heap):
+the *runtime*; generated code calls it exactly like the pattern below.
 
 ```rust
 use sofab::{OStream, IStream, Visitor, Id, Unsigned, Signed, Result};
@@ -200,76 +189,35 @@ impl Visitor for Telemetry {
 ```
 
 The recording `Visitor` in [`tests/common/mod.rs`](tests/common/mod.rs) and the
-per-type round-trips in [`tests/config_tests.rs`](tests/config_tests.rs) are
-worked examples of this same encode/decode-into-fixed-storage pattern.
+round-trips in [`tests/config_tests.rs`](tests/config_tests.rs) are worked
+examples of this encode/decode-into-fixed-storage pattern.
 
-## API summary
+## Memory handling
 
-### Encoding
+The defining property of the `no_std` port: **all storage is caller-supplied and
+nothing is ever boxed — no allocation in either direction.**
 
-[`OStream`] writes Sofab fields into a caller-owned `&mut [u8]` and **never
-allocates**. Every writer returns `Result<()>`, returning `Error::BufferFull`
-when the buffer fills and no [`Flush`] sink is attached (with a sink, it drains
-and resumes instead). The surface is a set of typed writers:
+- **Encode ([`OStream`])** — writes into the caller's `&mut [u8]`, borrowed for
+  the stream's lifetime; each `write_*` copies into it immediately. Buffer full
+  → `Error::BufferFull`, or drained via the [`Flush`] sink.
+- **Decode ([`IStream`] + [`Visitor`])** — reads the caller's `&[u8]`, borrowed
+  only for the `feed` call; values are delivered **by value** the instant they
+  decode (so destinations need not be address-stable). A string/blob
+  `chunk: &[u8]` **borrows the bytes you fed** and is valid only for that
+  callback — copy out anything you must keep. Your `Visitor` decides where data
+  lands and how to handle overflow. State lives in the fixed `IStream` struct
+  (one 8-byte fp accumulator), never allocating.
 
-- **scalars** — `write_unsigned`, `write_signed` (ZigZag), `write_boolean`;
-- **fixed-length** (needs `fixlen`) — `write_fp32`, `write_fp64` (`fp64`),
-  `write_str` (UTF-8, no NUL on the wire), `write_blob`, and the low-level
-  `write_fixlen(id, &[u8], FixlenType)`;
-- **arrays** (needs `array`) — `write_array_unsigned::<T>` / `write_array_signed::<T>`
-  where the element width is fixed by `T` at compile time (`u8`/`u16`/`u32`, plus
-  `u64`/`i64` with `value64`), and `write_array_fp32` / `write_array_fp64`;
-- **nested sequences** (needs `sequence`) — `write_sequence_begin` /
-  `write_sequence_end`, depth-checked against [`MAX_DEPTH`] (255).
-
-Because the array element width is a compile-time type parameter, the C API's
-"invalid element size" runtime error is simply impossible here.
-
-### Decoding
-
-[`IStream`] is a byte-at-a-time **push** decoder. You `feed` it arbitrarily small
-chunks and it pushes each recovered value to your [`Visitor`]; it suspends and
-resumes at any byte boundary, keeping all parse state inside the fixed-size
-`IStream` struct, and **never allocates**. There is no read-scalar / read-string
-call and no explicit skip or descend step — decoding is driven entirely by
-`feed`. A `Visitor` method left at its default empty body **skips** that field at
-zero cost. String/blob payloads arrive as one or more `(total, offset, chunk)`
-callbacks; an empty string/blob is reported once with `total == 0`. Array
-elements arrive after an `array_begin(id, kind, count)` via the scalar/float
-callbacks carrying the same `id`.
-
-### Memory handling
-
-This is the defining property of the `no_std` port: **all storage is supplied by
-the caller and nothing is ever boxed** — in both directions.
-
-| Concern | Encoder ([`OStream`]) | Decoder ([`IStream`] + [`Visitor`]) |
-|---------|-----------------------|-------------------------------------|
-| Output / input buffer | the caller's `&mut [u8]`, borrowed for the stream's lifetime | the caller's `&[u8]`, borrowed only for the `feed` call |
-| Message object | you build fields imperatively; no message struct is required | your `Visitor` — a caller struct with fixed-capacity fields |
-| Allocation | none, ever | none, ever (state lives in the fixed `IStream` struct) |
-| When data moves | each `write_*` copies into the buffer immediately | values are delivered **by value** into the callback the instant they decode |
-| String / blob | copied from your `&str`/`&[u8]` into the buffer as written | delivered as a borrowed `chunk: &[u8]` that **points into the bytes you fed** — valid only for that callback; copy out anything you must keep |
-| Overflow | buffer full → `Error::BufferFull`, or drained via the [`Flush`] sink | the decoder imposes no capacity; **your `Visitor` decides** where data lands and how to handle overflow (fixed array, truncate, or your own error) |
-| Internal scratch | none beyond the output buffer | one 8-byte accumulator, only to reassemble an `fp32`/`fp64` split across `feed` boundaries |
-
-Because the decoder pushes values *by value*, destinations need not be
-address-stable and an unhandled field costs nothing. The only caller obligation
-is to copy a string/blob `chunk` out of the transient `feed` input before the
-callback returns if the bytes must outlive it.
-
-Contrast with the `std` [`corelib-rs`](https://github.com/sofa-buffers/corelib-rs):
-it allocates freely — strings/blobs land in owned `String`/`Vec<u8>`, arrays in
-`Vec<…>`, and a one-shot `decode()` builds an owned result — trading a heap for
-freedom from buffer management. See
-[Choosing between the two Rust corelibs](#choosing-between-the-two-rust-corelibs).
+| | Encoder ([`OStream`]) | Decoder ([`IStream`] + [`Visitor`]) |
+|---|---|---|
+| Buffer | caller's `&mut [u8]`, borrowed for the stream's lifetime | caller's `&[u8]`, borrowed only for the `feed` call |
+| Allocation | none, ever | none, ever (state in the fixed `IStream` struct) |
 
 ## Feature flags
 
-Every capability is **on by default** (mirroring the C library's full build).
-The features positively *enable* wire types; turn them **off** (via
-`default-features = false`, then re-enable what you need) to mirror the C
-`SOFAB_DISABLE_*` switches and shrink the binary on tiny targets.
+Every capability is **on by default**. The features positively *enable* wire
+types; turn them **off** (`default-features = false`, then re-enable what you
+need) to shrink the binary on tiny targets.
 
 | Feature | Default | Enables |
 |---------|:------:|---------|
@@ -284,14 +232,23 @@ The features positively *enable* wire types; turn them **off** (via
 sofa-buffers-corelib-no-std = { version = "0.1", default-features = false }
 ```
 
-The wire-type flags are **additive**, but `value64` **controls a public type**
-(`sofab::Unsigned`/`Signed`) and is therefore *not* additive: disabling it
-narrows the scalar type to `u32`/`i32`, removing all double-width arithmetic and
-the 64-bit libgcc/compiler helpers it drags in on a 32-bit MCU (the single
-largest footprint item), at the cost that values above `2³²−1` can no longer be
-represented or decoded (the decoder rejects an over-wide varint with
-`Error::InvalidMsg`, mirroring a 32-bit `sofab_value_t` build of the C
-reference).
+
+> **`value64` — change only if you know what you are doing.**
+> It shrinks 64-bit varint math (smaller/faster on 32-bit MCUs) but has wire-
+> and API-level side effects:
+> - **Wire compatibility:** the format is width-agnostic, so messages whose values
+>   all fit in 32 bits stay byte-identical and interoperable. A value beyond the
+>   32-bit range from a 64-bit peer is **rejected** as malformed (`Error::InvalidMsg`) —
+>   never silently truncated.
+> - **ABI:** the value types appear in public signatures, so 32-bit and 64-bit
+>   builds are **not** ABI-compatible — don't mix them.
+> - **Field ids:** the effective field-id range shrinks, since the field header is a
+>   varint of `(id << 3) | type`.
+> - **Conformance:** the shipped test vectors include 64-bit values and won't
+>   decode in this mode.
+
+(Array element widths are compile-time type parameters, so an invalid element
+size is unrepresentable.)
 
 ### Verifying the build configuration
 
@@ -305,9 +262,9 @@ sofab::require!(fp64, array, value64);
 ```
 
 Accepted capabilities: `fixlen`, `array`, `sequence`, `fp64`, `value32`,
-`value64`. The same information is available as plain constants in
-[`sofab::config`] (`FIXLEN`, `ARRAY`, `SEQUENCE`, `FP64`, `VALUE_BITS`) for your
-own `const` assertions or logging.
+`value64`. The same information is available as constants in [`sofab::config`]
+(`FIXLEN`, `ARRAY`, `SEQUENCE`, `FP64`, `VALUE_BITS`) for `const` assertions or
+logging.
 
 [`require!`]: https://sofa-buffers.github.io/corelib-rs-no-std/sofab/macro.require.html
 [`sofab::config`]: https://sofa-buffers.github.io/corelib-rs-no-std/sofab/config/index.html
@@ -315,60 +272,48 @@ own `const` assertions or logging.
 ## Build & test
 
 ```bash
-cargo build --all-features       # build with every feature enabled
-cargo build                      # default features
+cargo build --all-features       # every feature enabled
 cargo test --all-features        # unit + integration + doctests
-cargo test                       # tests with default features
 ```
 
-Prove the crate is genuinely `no_std` / heap-free by building the library for a
-bare-metal target with no host `std`:
+Prove the crate is genuinely `no_std` / heap-free by building for a bare-metal
+target with no host `std`:
 
 ```bash
 rustup target add thumbv7em-none-eabihf
 cargo build --lib --all-features --target thumbv7em-none-eabihf
 ```
 
-Tests live in `tests/` as separate integration files: `vectors_tests.rs`
-(replays the shared `assets/test_vectors.json` — encode, chunked encode through
-1/3/7-byte flush buffers, decode, chunked decode, and auto-skip; it is
-`requires`-aware, so it runs under any feature subset), `ostream_tests.rs`,
-`istream_tests.rs`, `roundtrip_tests.rs`, `api_tests.rs` (offset reserve, buffer
-swap, large chunked streaming, API version), and `config_tests.rs`
-(`#[cfg]`-gated per-configuration smoke tests). Line coverage is ~93%
-(`cargo llvm-cov --all-features`); CI publishes the live number to the coverage
-badge above.
-
-To exercise the whole **feature powerset** — every on/off combination of
-`fixlen` / `array` / `sequence` / `fp64` / `value64` — use
-[`cargo-hack`](https://github.com/taiki-e/cargo-hack):
+Integration tests live in `tests/`: `vectors_tests.rs` (replays the shared
+`assets/test_vectors.json`, feature-aware), `ostream_tests.rs`,
+`istream_tests.rs`, `roundtrip_tests.rs`, `api_tests.rs`, and `config_tests.rs`.
+Line coverage is ~93% (`cargo llvm-cov --all-features`). To exercise the whole
+feature powerset, use [`cargo-hack`](https://github.com/taiki-e/cargo-hack):
 
 ```bash
-cargo hack --feature-powerset --no-dev-deps clippy --lib -- -D warnings  # compile + lint each config
-cargo hack --feature-powerset test --test config_tests                   # run each config's smoke tests
+cargo hack --feature-powerset --no-dev-deps clippy --lib -- -D warnings
+cargo hack --feature-powerset test --test config_tests
 ```
 
-All of the above are exactly the steps run in CI (see
-[`.github/workflows/ci.yml`](.github/workflows/ci.yml)).
+All of the above are the exact steps run in CI
+([`.github/workflows/ci.yml`](.github/workflows/ci.yml)).
 
 ## Benchmarks
 
-Two tools mirror the C/C++ benchmark suite and run the **same** reference
-workloads (a 1000-element integer array and a typical composite message), so
-results are comparable across language ports:
+Two tools run the **same** reference workloads (a 1000-element integer array and
+a typical composite message), so results are comparable across language ports:
 
 ```bash
-cargo bench --bench perf    # per-op cost: HW cycles/op (x86 TSC / AArch64 counter) + MB/s
-cargo bench --bench bench   # practical throughput in MB/s (MB = 1,000,000 bytes)
+cargo bench --bench perf    # per-op cost: HW cycles/op + MB/s
+cargo bench --bench bench   # throughput in MB/s (MB = 1,000,000 bytes)
 ```
 
 ### Footprint
 
-`tools/footprint.sh` measures the library `.text` size by linking a `no_std`
-staticlib that exercises the full encode + decode API with the shipping release
-profile (`opt-level="z"`, fat LTO, `panic="abort"`) and `--gc-sections`, then
-reading the linked ELF with `llvm-size`. CI runs it on every push (the single
-source of truth for these numbers):
+`tools/footprint.sh` measures library `.text` size by linking a `no_std`
+staticlib that exercises the full encode + decode API with the release profile
+(`opt-level="z"`, fat LTO, `panic="abort"`) and `--gc-sections`. CI runs it on
+every push:
 
 ```bash
 tools/footprint.sh                             # Cortex-M0  (thumbv6m-none-eabi, default)
@@ -388,9 +333,9 @@ tools/footprint.sh riscv32imc-unknown-none-elf # RISC-V 32 (RV32IMC)
 
 The codec spans **≈0.7 KiB** (integer-only, 32-bit) to **≈2.3 KiB** (every wire
 type, 64-bit) of flash on Cortex-M0; disabling `value64` removes ~20% of the code
-by deleting the 64-bit shift/`memclr` helpers (`__aeabi_llsl`, `__aeabi_memclr8`)
-and halving every varint operation. The denser Thumb-2 encoding keeps the
-Cortex-M builds smaller than RISC-V.
+by deleting the 64-bit shift/`memclr` helpers and halving every varint
+operation. The denser Thumb-2 encoding keeps the Cortex-M builds smaller than
+RISC-V.
 
 ## Choosing between the two Rust corelibs
 
@@ -399,15 +344,13 @@ encoder/decoder API, tuned for opposite ends of the spectrum:
 
 - **`corelib-rs-no-std`** (this crate) — `#![no_std]`, no allocator, fixed
   caller buffers, size-optimized profile. For **microcontrollers and
-  footprint-constrained firmware**, where every KB of flash matters and there is
-  no heap. In the multi-language benchmark arena it runs at roughly **1.13×
-  micropb** throughput while fitting a bare-metal Cortex-M image of about
-  **6.0 KB flash versus micropb's ~8.5 KB** (approximate, best-of-5; comparable
-  only within the embedded-Rust group).
+  footprint-constrained firmware**. In the multi-language arena it runs at
+  roughly **1.13× micropb** throughput while fitting a bare-metal Cortex-M image
+  of about **6.0 KB flash versus micropb's ~8.5 KB**.
 - **[`corelib-rs`](https://github.com/sofa-buffers/corelib-rs)** — the `std`
   port, `opt-level = 3`, allocates freely (owned `String`/`Vec`, one-shot
-  `decode()`). For **servers and desktops** that want maximum throughput and
-  ergonomic ownership. In the arena it runs at roughly **1.4× prost** throughput.
+  `decode()`). For **servers and desktops** wanting maximum throughput and
+  ergonomic ownership; roughly **1.4× prost** throughput.
 
 | | `corelib-rs-no-std` (this crate) | `corelib-rs` (`std`) |
 |---|---|---|
@@ -419,11 +362,9 @@ encoder/decoder API, tuned for opposite ends of the spectrum:
 | Optimized for | small `.text` + zero heap | raw throughput |
 | Arena result | ~1.13× micropb throughput; ~6.0 KB Cortex-M flash | ~1.4× prost throughput |
 
-Both crates run the **identical** `perf` and `bench` tools, so a head-to-head is
-just a matter of building each the way it ships — **size-optimized vs
-speed-optimized, by design**. On one 6-core x86-64 host (median of 15 runs;
-reproduce with the commands above) the size-tuned `no_std` build trails the
-speed-tuned `std` build, and the gap widens with payload size:
+Both crates run the **identical** `perf` and `bench` tools. On one 6-core x86-64
+host (median of 15 runs) the size-tuned `no_std` build trails the speed-tuned
+`std` build, and the gap widens with payload size:
 
 | Workload | `no_std` MB/s | `std` MB/s | `std` faster |
 | --- | ---: | ---: | ---: |
