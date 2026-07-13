@@ -146,10 +146,26 @@ impl IStream {
         }
     }
 
-    /// Feed a chunk of encoded bytes, pushing decoded fields to `visitor`.
+    /// Feed a chunk of encoded bytes, pushing decoded fields to `visitor`, and
+    /// report the three-valued decode outcome of everything consumed *so far*
+    /// (`MESSAGE_SPEC.md` §7). The same status holds for a one-shot `feed` of a
+    /// whole message and for each `feed` of a streamed chunk sequence:
     ///
-    /// Returns [`Error::InvalidMsg`] on malformed input. Decoding can continue
-    /// across many `feed` calls; the decoder keeps all state internally.
+    /// * `Ok(())` — **`COMPLETE`**: the consumed bytes end **exactly** at a
+    ///   field boundary; a valid message may end here (more fields may follow).
+    /// * [`Err(Error::Incomplete)`](Error::Incomplete) — **`INCOMPLETE`**: the
+    ///   bytes end **inside** a field (an unterminated varint, a fixlen / string
+    ///   / blob payload short of its declared length) or with a sequence still
+    ///   open. Not an error — the partial tail is retained and feeding more
+    ///   bytes may complete it. End-of-input is the caller's decision, so there
+    ///   is no `finish`/`finalize` step.
+    /// * [`Err(Error::InvalidMsg)`](Error::InvalidMsg) — **`INVALID`**: the
+    ///   bytes are malformed regardless of what follows (varint overflow, bad
+    ///   type tag, oversized length/count, nesting past `MAX_DEPTH`, dangling
+    ///   sequence end). Terminal.
+    ///
+    /// Decoding can continue across many `feed` calls; the decoder keeps all
+    /// state internally.
     pub fn feed<V: Visitor>(&mut self, data: &[u8], visitor: &mut V) -> Result<()> {
         let mut i = 0;
         while i < data.len() {
@@ -176,7 +192,37 @@ impl IStream {
             self.step(data[i], visitor)?;
             i += 1;
         }
-        Ok(())
+
+        // §7: the outcome is a property of the bytes consumed so far, read
+        // straight off the decoder's own state — no separate finalization gate.
+        // Malformed input already returned `Err(Error::InvalidMsg)` above via
+        // `?`; reaching here means the bytes are well-formed, so they are either
+        // `COMPLETE` (at a field boundary) or `INCOMPLETE` (mid-field / open
+        // sequence). We surface `INCOMPLETE` distinctly instead of silently
+        // accepting a partial tail as a finished message.
+        if self.at_field_boundary() {
+            Ok(())
+        } else {
+            Err(Error::Incomplete)
+        }
+    }
+
+    /// True when the decoder sits **exactly** at a top-level field boundary: no
+    /// half-read header/value varint, no fixlen / string / blob / array payload
+    /// in progress, and no sequence left open. This is the only state from which
+    /// the consumed bytes form a `COMPLETE` message (§7); any other state means
+    /// the bytes end mid-field or with an open sequence and is `INCOMPLETE`.
+    fn at_field_boundary(&self) -> bool {
+        if self.state != State::Idle || self.varint.is_pending() {
+            // Mid-value, mid-payload, or a partial header varint pending.
+            return false;
+        }
+        #[cfg(feature = "sequence")]
+        if self.depth != 0 {
+            // A sequence-start with no matching sequence-end yet.
+            return false;
+        }
+        true
     }
 
     fn step<V: Visitor>(&mut self, byte: u8, visitor: &mut V) -> Result<()> {

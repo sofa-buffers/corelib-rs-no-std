@@ -125,10 +125,18 @@ IStream::new().feed(wire, &mut sink).unwrap();
 
 `IStream` resumes at any byte boundary, so feed it arbitrarily small chunks as they
 arrive off the wire — from any source; string/blob payloads reach the visitor in
-pieces, each `chunk` borrowing the bytes you fed:
+pieces, each `chunk` borrowing the bytes you fed.
+
+Every `feed` returns the three-valued decode outcome of the bytes seen *so far*
+(`MESSAGE_SPEC.md` §7): `Ok(())` means the stream is at a **field boundary**
+(`COMPLETE`); `Err(Error::Incomplete)` means it stopped **mid-field** — a
+first-class "feed me the next chunk" signal, *not* an error; `Err(Error::InvalidMsg)`
+means the bytes are malformed regardless of what follows. There is no
+`finish`/`finalize` step — end-of-input is the caller's own framing decision, so a
+whole-message caller simply requires the final outcome to be `Ok(())`.
 
 ```rust
-use sofab::{IStream, Visitor, Id};
+use sofab::{IStream, Visitor, Id, Error};
 
 #[derive(Default)]
 struct Len { total: usize }
@@ -142,7 +150,10 @@ impl Visitor for Len {
 let mut sink = Len::default();
 let mut is = IStream::new();
 for piece in wire.chunks(4) {                 // one packet at a time, from any source
-    is.feed(piece, &mut sink).unwrap();
+    match is.feed(piece, &mut sink) {
+        Ok(()) | Err(Error::Incomplete) => {} // at a boundary, or mid-field: keep feeding
+        Err(e) => panic!("malformed: {e:?}"), // INVALID: terminal
+    }
 }
 ```
 
