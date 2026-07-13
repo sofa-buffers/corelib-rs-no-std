@@ -33,7 +33,7 @@ use common::{Event, Recorder};
 use serde_json::Value;
 #[cfg(feature = "array")]
 use sofab::ArrayKind;
-use sofab::{Flush, IStream, Id, OStream, Signed, Unsigned, Visitor};
+use sofab::{Error, Flush, IStream, Id, OStream, Signed, Unsigned, Visitor};
 
 /// The shared vectors, embedded from the verbatim asset copy.
 const VECTORS_JSON: &str = include_str!("../assets/test_vectors.json");
@@ -355,7 +355,12 @@ fn decode_one_byte_at_a_time(bytes: &[u8]) -> Vec<Event> {
     let mut rec = Recorder::new();
     let mut is = IStream::new();
     for &b in bytes {
-        is.feed(&[b], &mut rec).expect("chunked decode");
+        // Chunks that end mid-field report INCOMPLETE (§7) — expected while
+        // streaming byte-by-byte; only a genuine INVALID is a failure here.
+        match is.feed(&[b], &mut rec) {
+            Ok(()) | Err(Error::Incomplete) => {}
+            Err(e) => panic!("chunked decode: {e:?}"),
+        }
     }
     rec.events
 }
@@ -500,7 +505,10 @@ fn decode_with_skip_chunked(bytes: &[u8], skip: &[Id]) -> Vec<Event> {
     let mut rec = SkipRecorder::new(skip);
     let mut is = IStream::new();
     for &b in bytes {
-        is.feed(&[b], &mut rec).expect("skip chunked decode");
+        match is.feed(&[b], &mut rec) {
+            Ok(()) | Err(Error::Incomplete) => {}
+            Err(e) => panic!("skip chunked decode: {e:?}"),
+        }
     }
     rec.events
 }

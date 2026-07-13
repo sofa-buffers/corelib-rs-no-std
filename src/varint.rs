@@ -50,6 +50,16 @@ impl VarintDecoder {
 
         Ok(None)
     }
+
+    /// True while a varint is mid-decode: at least one continuation byte has
+    /// been absorbed but the terminating byte (high bit clear) has not arrived
+    /// yet. At a clean field boundary this is `false` (the decoder auto-resets
+    /// to `shift == 0` after every complete value). Used to distinguish an
+    /// unterminated-varint tail (`INCOMPLETE`) from a clean boundary.
+    #[inline]
+    pub(crate) fn is_pending(&self) -> bool {
+        self.shift != 0
+    }
 }
 
 /// ZigZag encode a signed value to its unsigned varint representation.

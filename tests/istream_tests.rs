@@ -164,20 +164,28 @@ fn streaming_chunked_feed_matches_oneshot() {
     ];
     let oneshot = decode(&msg);
 
-    // Feed one byte at a time.
+    // Feed one byte at a time. A chunk that ends mid-field reports INCOMPLETE
+    // (§7) — that is the streaming "feed me more" signal, not an error — and the
+    // final byte (completing the string) returns COMPLETE.
     let mut rec = Recorder::new();
     let mut is = IStream::new();
+    let mut last = Ok(());
     for b in msg {
-        is.feed(&[b], &mut rec).unwrap();
+        last = is.feed(&[b], &mut rec);
+        assert!(matches!(last, Ok(()) | Err(Error::Incomplete)));
     }
+    assert_eq!(last, Ok(()));
     assert_eq!(rec.events, oneshot);
 
     // Feed in awkward 3-byte chunks.
     let mut rec2 = Recorder::new();
     let mut is2 = IStream::new();
+    let mut last2 = Ok(());
     for chunk in msg.chunks(3) {
-        is2.feed(chunk, &mut rec2).unwrap();
+        last2 = is2.feed(chunk, &mut rec2);
+        assert!(matches!(last2, Ok(()) | Err(Error::Incomplete)));
     }
+    assert_eq!(last2, Ok(()));
     assert_eq!(rec2.events, oneshot);
 }
 
@@ -221,10 +229,14 @@ fn decode_empty_fixlen_array_reads_word() {
 #[test]
 fn nesting_at_max_depth_is_accepted() {
     // 255 sequence-start markers (id 0 -> byte 0x06): exactly MAX_DEPTH levels.
+    // These are valid — *not* rejected as InvalidMsg — but the 255 sequences are
+    // still open, so the outcome is INCOMPLETE, not COMPLETE (§7). The contrast
+    // with `nesting_past_max_depth_is_invalid` is the point: at MAX_DEPTH the
+    // input is a well-formed prefix; one deeper is malformed.
     let starts = [0x06u8; 255];
     let mut rec = Recorder::new();
     let mut is = IStream::new();
-    assert_eq!(is.feed(&starts, &mut rec), Ok(()));
+    assert_eq!(is.feed(&starts, &mut rec), Err(Error::Incomplete));
 }
 
 #[test]
@@ -273,4 +285,90 @@ fn fp32_with_wrong_length_is_invalid() {
     let mut rec = Recorder::new();
     let mut is = IStream::new();
     assert_eq!(is.feed(&bytes, &mut rec), Err(Error::InvalidMsg));
+}
+
+// --- three-valued decode outcome (§7): COMPLETE / INCOMPLETE / INVALID -------
+//
+// INCOMPLETE (bytes end inside a field, or with an open sequence) is a distinct,
+// first-class outcome — never silently folded into COMPLETE (`Ok`) nor promoted
+// to INVALID. `outcome` returns the raw status of a one-shot feed.
+
+/// Feed `bytes` in one shot and return the raw three-valued decode outcome.
+fn outcome(bytes: &[u8]) -> Result<(), Error> {
+    let mut rec = Recorder::new();
+    let mut is = IStream::new();
+    is.feed(bytes, &mut rec)
+}
+
+#[test]
+fn lone_continuation_byte_is_incomplete() {
+    // A lone 0x80 is a well-formed *prefix* of a varint (continuation bit set,
+    // no terminator): the caller may still complete it. INCOMPLETE, not INVALID
+    // (§7, called out by name in the spec).
+    assert_eq!(outcome(&[0x80]), Err(Error::Incomplete));
+}
+
+#[test]
+fn oversized_varint_is_invalid_not_incomplete() {
+    // 11 continuation bytes overflow the 64-bit value type: malformed
+    // regardless of what follows, so INVALID — must NOT be reported as
+    // INCOMPLETE even though it, too, "ends mid-varint".
+    let bytes = [
+        0x00, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80,
+    ];
+    assert_eq!(outcome(&bytes), Err(Error::InvalidMsg));
+}
+
+#[test]
+fn complete_message_is_ok() {
+    // Header + full value, ending exactly at a field boundary: COMPLETE.
+    assert_eq!(outcome(&[0x00, 0x80, 0x01]), Ok(())); // unsigned id0 = 128
+}
+
+#[test]
+fn header_without_value_is_incomplete() {
+    // Header announces an unsigned value but no value byte arrives: mid-field.
+    assert_eq!(outcome(&[0x00]), Err(Error::Incomplete));
+}
+
+#[test]
+fn truncated_varint_value_is_incomplete() {
+    // Header + a partial multi-byte value (continuation set, no terminator).
+    assert_eq!(outcome(&[0x00, 0x80]), Err(Error::Incomplete));
+}
+
+#[test]
+fn truncated_fixlen_payload_is_incomplete() {
+    // fp32 header declares a 4-byte payload; only 2 bytes arrive.
+    assert_eq!(outcome(&[0x02, 0x20, 0x00, 0x00]), Err(Error::Incomplete));
+}
+
+#[test]
+fn truncated_string_payload_is_incomplete() {
+    // string id0 len 12; only 2 of the 12 payload bytes are delivered.
+    assert_eq!(
+        outcome(&[0x02, 0x62, 0x48, 0x65]),
+        Err(Error::Incomplete)
+    );
+}
+
+#[test]
+fn open_sequence_is_incomplete() {
+    // A sequence-start with no matching sequence-end: valid so far, not closed.
+    assert_eq!(outcome(&[0x06]), Err(Error::Incomplete));
+}
+
+#[test]
+fn truncated_array_element_is_incomplete() {
+    // Array of 2 unsigned; header + count + first element, second missing.
+    assert_eq!(
+        outcome(&[0x03, 0x02, 0x01]),
+        Err(Error::Incomplete)
+    );
+}
+
+#[test]
+fn empty_input_is_complete() {
+    // Zero bytes end (trivially) exactly at a field boundary.
+    assert_eq!(outcome(&[]), Ok(()));
 }
