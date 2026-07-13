@@ -346,10 +346,7 @@ fn truncated_fixlen_payload_is_incomplete() {
 #[test]
 fn truncated_string_payload_is_incomplete() {
     // string id0 len 12; only 2 of the 12 payload bytes are delivered.
-    assert_eq!(
-        outcome(&[0x02, 0x62, 0x48, 0x65]),
-        Err(Error::Incomplete)
-    );
+    assert_eq!(outcome(&[0x02, 0x62, 0x48, 0x65]), Err(Error::Incomplete));
 }
 
 #[test]
@@ -361,10 +358,7 @@ fn open_sequence_is_incomplete() {
 #[test]
 fn truncated_array_element_is_incomplete() {
     // Array of 2 unsigned; header + count + first element, second missing.
-    assert_eq!(
-        outcome(&[0x03, 0x02, 0x01]),
-        Err(Error::Incomplete)
-    );
+    assert_eq!(outcome(&[0x03, 0x02, 0x01]), Err(Error::Incomplete));
 }
 
 #[test]
