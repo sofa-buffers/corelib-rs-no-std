@@ -287,6 +287,40 @@ fn fp32_with_wrong_length_is_invalid() {
     assert_eq!(is.feed(&bytes, &mut rec), Err(Error::InvalidMsg));
 }
 
+#[test]
+fn reserved_fixlen_subtype_is_invalid() {
+    // §7 malformed(reserved subtype). FIXLEN header (0x02), then a fixlen word
+    // whose low 3 bits are a reserved subtype tag 0x4 (len 0). `FixlenType::from_raw`
+    // rejects tags 0x4–0x7, so the decode is InvalidMsg (not a truncation).
+    let bytes = [0x02, 0x04]; // fixlen word: subtype 0x4 (reserved), length 0
+    let mut rec = Recorder::new();
+    let mut is = IStream::new();
+    assert_eq!(is.feed(&bytes, &mut rec), Err(Error::InvalidMsg));
+}
+
+#[test]
+fn oversized_array_count_is_invalid() {
+    // §7 malformed(oversized count). VARINTARRAY_UNSIGNED header (0x03), then a
+    // count varint of 2^31 — one past ARRAY_MAX (2^31 − 1). Rejected as InvalidMsg.
+    let mut bytes = vec![0x03];
+    push_varint(&mut bytes, 1u64 << 31); // count = 2^31 > ARRAY_MAX
+    let mut rec = Recorder::new();
+    let mut is = IStream::new();
+    assert_eq!(is.feed(&bytes, &mut rec), Err(Error::InvalidMsg));
+}
+
+#[test]
+fn oversized_fixlen_length_is_invalid() {
+    // §7 malformed(oversized length). FIXLEN header (0x02), then a fixlen word
+    // encoding length 2^31 (one past ARRAY_MAX) with subtype FP32 (tag 0):
+    // word = (2^31 << 3) | 0. Rejected as InvalidMsg.
+    let mut bytes = vec![0x02];
+    push_varint(&mut bytes, (1u64 << 31) << 3); // length 2^31, subtype 0
+    let mut rec = Recorder::new();
+    let mut is = IStream::new();
+    assert_eq!(is.feed(&bytes, &mut rec), Err(Error::InvalidMsg));
+}
+
 // --- three-valued decode outcome (§7): COMPLETE / INCOMPLETE / INVALID -------
 //
 // INCOMPLETE (bytes end inside a field, or with an open sequence) is a distinct,
