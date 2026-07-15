@@ -325,19 +325,20 @@ tools/footprint.sh riscv32imc-unknown-none-elf # RISC-V 32 (RV32IMC)
 
 | Configuration | Cortex-M0 `.text` | Cortex-M4F `.text` | RISC-V 32 `.text` |
 |---------------|------------------:|-------------------:|------------------:|
-| **MIN** — integers only, 32-bit (`default-features = false`) | **724 B** | **740 B** | **1 140 B** |
-| integers only, 64-bit (`value64`) | 902 B | 936 B | 1 374 B |
-| `+ sequence` (64-bit) | 1 002 B | 1 028 B | 1 522 B |
-| `+ array` (64-bit) | 1 258 B | 1 238 B | 1 820 B |
-| `+ fixlen` (fp32 / str / blob, 64-bit) | 1 501 B | 1 587 B | 2 109 B |
-| all wire types, 32-bit | 1 893 B | 1 921 B | 3 061 B |
-| **MAX** — all wire types, 64-bit (default) | **2 353 B** | **2 325 B** | **3 373 B** |
+| **MIN** — integers only, 32-bit (`default-features = false`) | **566 B** | **562 B** | **616 B** |
+| integers only, 64-bit (`value64`) | 732 B | 742 B | 814 B |
+| `+ sequence` (64-bit) | 876 B | 858 B | 946 B |
+| `+ array` (64-bit) | 1 112 B | 1 056 B | 1 216 B |
+| `+ fixlen` (fp32 / str / blob, 64-bit) | 1 247 B | 1 321 B | 1 311 B |
+| all wire types, 32-bit | 1 779 B | 1 871 B | 2 157 B |
+| **MAX** — all wire types, 64-bit (default) | **2 195 B** | **2 231 B** | **2 529 B** |
 
-The codec spans **≈0.7 KiB** (integer-only, 32-bit) to **≈2.3 KiB** (every wire
+The codec spans **≈0.55 KiB** (integer-only, 32-bit) to **≈2.1 KiB** (every wire
 type, 64-bit) of flash on Cortex-M0; disabling `value64` removes ~20% of the code
 by deleting the 64-bit shift/`memclr` helpers and halving every varint
-operation. The denser Thumb-2 encoding keeps the Cortex-M builds smaller than
-RISC-V.
+operation. The decoder carries no panic paths (all bounds are proven in-bounds),
+so the whole codec links without `core::panicking` — which is what keeps the
+RISC-V builds, lacking Thumb-2's density, close behind Cortex-M.
 
 ## Choosing between the two Rust corelibs
 
