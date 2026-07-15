@@ -1,13 +1,24 @@
 #!/usr/bin/env bash
-# Measure the `.text` footprint of the sofab library on a bare-metal target
+# Measure the flash + RAM footprint of the sofab library on a bare-metal target
 # (default: Cortex-M0, thumbv6m-none-eabi) across feature configurations.
+#
+# Three numbers are reported per configuration:
+#   * flash  — `.text + .data` of the linked image: code, read-only constants and
+#              any initialised statics that occupy flash. (`.text` alone matches
+#              the README table; the library defines no statics, so flash = .text.)
+#   * RAM    — `size_of::<IStream>() + size_of::<OStream>()`: the decoder + encoder
+#              state the caller must provide. The library has **no** static RAM
+#              (`.bss`/`.data` = 0) and no heap, so this is the whole RAM cost.
 #
 # How it works: we generate a throwaway `no_std` staticlib that calls the whole
 # encode + decode API, build it with the size-optimized release profile, then
 # LINK it with `rust-lld --gc-sections` so unreachable code is stripped, and read
-# the real `.text` size from the linked ELF with `llvm-size`. A bare staticlib
+# the real section sizes from the linked ELF with `llvm-size`. A bare staticlib
 # archive is NOT dead-stripped, so measuring it directly massively over-counts;
-# the link step is what makes the numbers meaningful.
+# the link step is what makes the code numbers meaningful. The struct sizes come
+# from two zero-cost probe symbols read out of the archive with `llvm-nm
+# --print-size`; they are unreferenced, so `--gc-sections` drops them from the
+# linked image (they never touch the flash/RAM figures above).
 #
 # Prereqs (one-time):
 #   rustup target add thumbv6m-none-eabi
@@ -21,6 +32,7 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 SR="$(rustc --print sysroot)"
 BIN="$SR/lib/rustlib/$(rustc -vV | sed -n 's/host: //p')/bin"
 SIZE="$BIN/llvm-size"
+NM="$BIN/llvm-nm"
 LLD="$BIN/rust-lld"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -52,9 +64,15 @@ EOF
 
 cat > "$WORK/src/lib.rs" <<'EOF'
 #![no_std]
+use core::mem::size_of;
 use core::panic::PanicInfo;
-use sofab::{IStream, OStream, Visitor};
+use sofab::{IStream, NoFlush, OStream, Visitor};
 #[panic_handler] fn ph(_: &PanicInfo) -> ! { loop {} }
+// Probe symbols whose byte SIZE equals the decoder/encoder state a caller must
+// provide (read from the archive with `llvm-nm --print-size`). They are never
+// referenced, so `--gc-sections` strips them from the linked image.
+#[no_mangle] pub static SOFAB_ISTREAM_RAM: [u8; size_of::<IStream>()] = [0; size_of::<IStream>()];
+#[no_mangle] pub static SOFAB_OSTREAM_RAM: [u8; size_of::<OStream<'static, NoFlush>>()] = [0; size_of::<OStream<'static, NoFlush>>()];
 struct Sink { u: u64, i: i64 }
 impl Visitor for Sink {
     fn unsigned(&mut self, _i: sofab::Id, v: sofab::Unsigned) { self.u = self.u.wrapping_add(v as u64); }
@@ -110,6 +128,8 @@ SECTIONS {
 }
 EOF
 
+ARCHIVE="$WORK/target/$TARGET/release/libsofab_footprint.a"
+
 measure() { # label  feature-list (empty = integers only)
   local label="$1" feats="$2"
   ( cd "$WORK"
@@ -122,13 +142,26 @@ measure() { # label  feature-list (empty = integers only)
     "$LLD" -flavor gnu -T link.x --gc-sections -o out.elf --whole-archive \
       "target/$TARGET/release/libsofab_footprint.a"
   )
-  local text; text=$("$SIZE" "$WORK/out.elf" | awk 'NR==2{print $1}')
-  printf "  %-40s %6d B  (%5.2f KiB)\n" "$label" "$text" "$(awk "BEGIN{print $text/1024}")"
+  # Berkeley `size`: columns are text / data / bss. Flash = text + data; the
+  # library carries no statics, so bss is 0 and flash == .text.
+  local text data bss
+  read -r text data bss < <("$SIZE" "$WORK/out.elf" | awk 'NR==2{print $1, $2, $3}')
+  local flash=$((text + data))
+  # Caller-provided state RAM, read as the probe symbols' sizes. `--radix=d`
+  # zero-pads, so force base-10 (`10#`) to avoid octal misparsing.
+  local is os ram nm_out
+  nm_out=$("$NM" --print-size --radix=d "$ARCHIVE" 2>/dev/null)
+  is=$((10#$(awk '$NF=="SOFAB_ISTREAM_RAM"{print $2; exit}' <<<"$nm_out")))
+  os=$((10#$(awk '$NF=="SOFAB_OSTREAM_RAM"{print $2; exit}' <<<"$nm_out")))
+  ram=$((is + os))
+  printf "  %-38s %6d B   %5d B  (IStream %2d + OStream %2d)\n" \
+    "$label" "$flash" "$ram" "$is" "$os"
 }
 
 # Builds are --no-default-features, so a config is exactly the features listed.
 # Omitting `value64` selects the 32-bit value width.
-echo "sofab .text footprint on $TARGET (opt-z, LTO, panic=abort, gc-sections)"
+echo "sofab footprint on $TARGET (opt-z, LTO, panic=abort, gc-sections)"
+printf "  %-38s %8s   %7s\n" "configuration" "flash" "RAM"
 measure "MIN: integers only, 32-bit"        ""
 measure "integers only, 64-bit"             "value64"
 measure "+ sequence (64-bit)"               "value64,sequence"

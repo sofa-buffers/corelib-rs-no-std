@@ -312,10 +312,10 @@ cargo bench --bench bench   # throughput in MB/s (MB = 1,000,000 bytes)
 
 ### Footprint
 
-`tools/footprint.sh` measures library `.text` size by linking a `no_std`
-staticlib that exercises the full encode + decode API with the release profile
-(`opt-level="z"`, fat LTO, `panic="abort"`) and `--gc-sections`. CI runs it on
-every push:
+`tools/footprint.sh` measures the library's **flash** and **RAM** footprint by
+linking a `no_std` staticlib that exercises the full encode + decode API with the
+release profile (`opt-level="z"`, fat LTO, `panic="abort"`) and `--gc-sections`.
+CI runs it on every push:
 
 ```bash
 tools/footprint.sh                             # Cortex-M0  (thumbv6m-none-eabi, default)
@@ -323,8 +323,11 @@ tools/footprint.sh thumbv7em-none-eabihf       # Cortex-M4F
 tools/footprint.sh riscv32imc-unknown-none-elf # RISC-V 32 (RV32IMC)
 ```
 
-| Configuration | Cortex-M0 `.text` | Cortex-M4F `.text` | RISC-V 32 `.text` |
-|---------------|------------------:|-------------------:|------------------:|
+**Flash** (`.text + .data`). The library defines no statics, so `.data`/`.bss`
+are zero and flash equals `.text`:
+
+| Configuration | Cortex-M0 | Cortex-M4F | RISC-V 32 |
+|---------------|----------:|-----------:|----------:|
 | **MIN** — integers only, 32-bit (`default-features = false`) | **566 B** | **562 B** | **616 B** |
 | integers only, 64-bit (`value64`) | 732 B | 742 B | 814 B |
 | `+ sequence` (64-bit) | 876 B | 858 B | 946 B |
@@ -339,6 +342,20 @@ by deleting the 64-bit shift/`memclr` helpers and halving every varint
 operation. The decoder carries no panic paths (all bounds are proven in-bounds),
 so the whole codec links without `core::panicking` — which is what keeps the
 RISC-V builds, lacking Thumb-2's density, close behind Cortex-M.
+
+**RAM.** There is no heap and no static RAM — the only runtime state is the
+caller-provided `IStream` (decoder) and `OStream` (encoder), usually stack
+allocated. Sizes are identical across these 32-bit targets:
+
+| Configuration | `IStream` | `OStream` | total |
+|---------------|----------:|----------:|------:|
+| **MIN** — integers only, 32-bit | 16 B | 16 B | **32 B** |
+| integers only, 64-bit | 24 B | 16 B | 40 B |
+| `+ sequence` (64-bit) | 32 B | 20 B | 52 B |
+| `+ array` (64-bit) | 32 B | 16 B | 48 B |
+| `+ fixlen` (64-bit) | 40 B | 16 B | 56 B |
+| all wire types, 32-bit | 40 B | 20 B | 60 B |
+| **MAX** — all wire types, 64-bit (default) | 48 B | 20 B | **68 B** |
 
 ## Choosing between the two Rust corelibs
 
