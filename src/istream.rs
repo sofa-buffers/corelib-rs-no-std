@@ -226,29 +226,47 @@ impl IStream {
     }
 
     fn step<V: Visitor>(&mut self, byte: u8, visitor: &mut V) -> Result<()> {
-        match self.state {
-            State::Idle => self.step_idle(byte, visitor),
-            State::VarintUnsigned => self.step_varint_unsigned(byte, visitor),
-            State::VarintSigned => self.step_varint_signed(byte, visitor),
-            #[cfg(feature = "fixlen")]
-            State::FixlenLen => self.step_fixlen_len(byte, visitor),
-            #[cfg(feature = "fixlen")]
-            State::FixlenVal => self.step_fixlen_val(byte, visitor),
-            // FixlenRaw is fully handled in `feed`'s bulk path.
-            #[cfg(feature = "fixlen")]
-            State::FixlenRaw => Ok(()),
-            #[cfg(feature = "array")]
-            State::ArrayCount => self.step_array_count(byte, visitor),
+        // `FixlenVal` is the only byte-oriented state (it copies raw payload
+        // bytes); `FixlenRaw` is drained by `feed`'s bulk path and never reaches
+        // here. Every remaining state is introduced by a leading varint, so the
+        // push-a-byte / "need more" dance is decoded **once** here and the
+        // completed value dispatched below — rather than repeated per state.
+        #[cfg(feature = "fixlen")]
+        if self.state == State::FixlenVal {
+            return self.step_fixlen_val(byte, visitor);
         }
-    }
 
-    #[cfg_attr(not(feature = "sequence"), allow(unused_variables))]
-    fn step_idle<V: Visitor>(&mut self, byte: u8, visitor: &mut V) -> Result<()> {
-        let header = match self.varint.push(byte)? {
+        let value = match self.varint.push(byte)? {
             Some(v) => v,
             None => return Ok(()),
         };
 
+        match self.state {
+            State::Idle => self.on_header(value, visitor),
+            State::VarintUnsigned => {
+                visitor.unsigned(self.id, value);
+                self.advance_after_element();
+                Ok(())
+            }
+            State::VarintSigned => {
+                visitor.signed(self.id, zigzag_decode(value));
+                self.advance_after_element();
+                Ok(())
+            }
+            #[cfg(feature = "fixlen")]
+            State::FixlenLen => self.on_fixlen_len(value, visitor),
+            #[cfg(feature = "array")]
+            State::ArrayCount => self.on_array_count(value, visitor),
+            // Handled before the varint decode (`FixlenVal`) or in `feed`
+            // (`FixlenRaw`); these arms just keep the match exhaustive without a
+            // panicking `unreachable!`.
+            #[cfg(feature = "fixlen")]
+            State::FixlenVal | State::FixlenRaw => Ok(()),
+        }
+    }
+
+    #[cfg_attr(not(feature = "sequence"), allow(unused_variables))]
+    fn on_header<V: Visitor>(&mut self, header: Unsigned, visitor: &mut V) -> Result<()> {
         let wire_type = (header & 0x07) as u8;
         let id = header >> 3;
         if id > ID_MAX as Unsigned {
@@ -308,22 +326,6 @@ impl IStream {
         Ok(())
     }
 
-    fn step_varint_unsigned<V: Visitor>(&mut self, byte: u8, visitor: &mut V) -> Result<()> {
-        if let Some(value) = self.varint.push(byte)? {
-            visitor.unsigned(self.id, value);
-            self.advance_after_element();
-        }
-        Ok(())
-    }
-
-    fn step_varint_signed<V: Visitor>(&mut self, byte: u8, visitor: &mut V) -> Result<()> {
-        if let Some(zz) = self.varint.push(byte)? {
-            visitor.signed(self.id, zigzag_decode(zz));
-            self.advance_after_element();
-        }
-        Ok(())
-    }
-
     /// Shared "next element or back to idle" logic for varint scalars/arrays.
     #[inline]
     fn advance_after_element(&mut self) {
@@ -339,12 +341,7 @@ impl IStream {
     }
 
     #[cfg(feature = "fixlen")]
-    fn step_fixlen_len<V: Visitor>(&mut self, byte: u8, _visitor: &mut V) -> Result<()> {
-        let header = match self.varint.push(byte)? {
-            Some(v) => v,
-            None => return Ok(()),
-        };
-
+    fn on_fixlen_len<V: Visitor>(&mut self, header: Unsigned, _visitor: &mut V) -> Result<()> {
         let subtype = FixlenType::from_raw((header & 0x07) as u8)?;
         let length = (header >> 3) as usize;
         // Reject implausibly large fixlen lengths (matches SOFAB_FIXLEN_MAX).
@@ -445,12 +442,7 @@ impl IStream {
     }
 
     #[cfg(feature = "array")]
-    fn step_array_count<V: Visitor>(&mut self, byte: u8, visitor: &mut V) -> Result<()> {
-        let count = match self.varint.push(byte)? {
-            Some(v) => v,
-            None => return Ok(()),
-        };
-
+    fn on_array_count<V: Visitor>(&mut self, count: Unsigned, visitor: &mut V) -> Result<()> {
         if count > ARRAY_MAX {
             return Err(Error::InvalidMsg);
         }
