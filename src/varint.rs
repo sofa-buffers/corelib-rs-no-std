@@ -28,6 +28,14 @@ impl VarintDecoder {
     /// * `Ok(Some(v))` — a complete value was decoded (state auto-resets).
     /// * `Ok(None)` — more bytes are needed.
     /// * `Err(InvalidMsg)` — the varint is longer than the value type allows.
+    ///
+    /// `inline(never)`: this is the per-byte prologue of every decoder state,
+    /// reached from the monomorphized `IStream::step<V>`. Left to LTO it gets
+    /// inlined into each visitor instantiation's state machine, costing ~1 KB
+    /// of flash in a generated-code decoder for a ~50 B saving in the
+    /// synthetic probe. Keeping it outlined shares one copy across all states
+    /// and visitors.
+    #[inline(never)]
     pub(crate) fn push(&mut self, byte: u8) -> Result<Option<Unsigned>> {
         // OR in the 7 payload bits at the current position. Bits shifted beyond
         // the value width are discarded (matches the C reference).

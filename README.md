@@ -328,20 +328,28 @@ are zero and flash equals `.text`:
 
 | Configuration | Cortex-M0 | Cortex-M4F | RISC-V 32 |
 |---------------|----------:|-----------:|----------:|
-| **MIN** — integers only, 32-bit (`default-features = false`) | **566 B** | **562 B** | **616 B** |
-| integers only, 64-bit (`value64`) | 732 B | 742 B | 814 B |
-| `+ sequence` (64-bit) | 876 B | 858 B | 946 B |
-| `+ array` (64-bit) | 1 112 B | 1 056 B | 1 216 B |
-| `+ fixlen` (fp32 / str / blob, 64-bit) | 1 247 B | 1 321 B | 1 311 B |
-| all wire types, 32-bit | 1 779 B | 1 871 B | 2 157 B |
-| **MAX** — all wire types, 64-bit (default) | **2 195 B** | **2 231 B** | **2 529 B** |
+| **MIN** — integers only, 32-bit (`default-features = false`) | **626 B** | **658 B** | **744 B** |
+| integers only, 64-bit (`value64`) | 798 B | 850 B | 928 B |
+| `+ sequence` (64-bit) | 898 B | 942 B | 1 064 B |
+| `+ array` (64-bit) | 1 098 B | 1 136 B | 1 292 B |
+| `+ fixlen` (fp32 / str / blob, 64-bit) | 1 305 B | 1 389 B | 1 429 B |
+| all wire types, 32-bit | 1 711 B | 1 691 B | 2 153 B |
+| **MAX** — all wire types, 64-bit (default) | **2 109 B** | **2 091 B** | **2 457 B** |
+| generated-shape visitor (MAX) | 4 045 B | 3 969 B | 4 849 B |
 
-The codec spans **≈0.55 KiB** (integer-only, 32-bit) to **≈2.1 KiB** (every wire
+The codec spans **≈0.6 KiB** (integer-only, 32-bit) to **≈2.1 KiB** (every wire
 type, 64-bit) of flash on Cortex-M0; disabling `value64` removes ~20% of the code
 by deleting the 64-bit shift/`memclr` helpers and halving every varint
 operation. The decoder carries no panic paths (all bounds are proven in-bounds),
 so the whole codec links without `core::panicking` — which is what keeps the
 RISC-V builds, lacking Thumb-2's density, close behind Cortex-M.
+
+The **generated-shape visitor** row measures the same MAX build against a
+visitor mirroring sofabgen output (location stack, per-`(location, id)`
+dispatch, fixed-array fills, str/blob accumulation) instead of the tiny probe
+sink — the codec-plus-dispatch cost a real firmware actually links. Size
+changes must hold on this row, not just the probe-sink rows: the two can move
+in opposite directions when an inlining boundary shifts.
 
 **RAM.** There is no heap and no static RAM — the only runtime state is the
 caller-provided `IStream` (decoder) and `OStream` (encoder), usually stack
