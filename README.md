@@ -365,8 +365,8 @@ encoder/decoder API, tuned for opposite ends of the spectrum:
 - **`corelib-rs-no-std`** (this crate) — `#![no_std]`, no allocator, fixed
   caller buffers, size-optimized profile. For **microcontrollers and
   footprint-constrained firmware**. In the multi-language arena it runs at
-  roughly **1.13× micropb** throughput while fitting a bare-metal Cortex-M image
-  of about **6.0 KB flash versus micropb's ~8.5 KB**.
+  roughly **1.3× micropb** throughput while fitting a bare-metal Cortex-M image
+  of about **7.0 KB flash versus micropb's ~8.5 KB**.
 - **[`corelib-rs`](https://github.com/sofa-buffers/corelib-rs)** — the `std`
   port, `opt-level = 3`, allocates freely (owned `String`/`Vec`, one-shot
   `decode()`). For **servers and desktops** wanting maximum throughput and
@@ -380,7 +380,7 @@ encoder/decoder API, tuned for opposite ends of the spectrum:
 | Decode model | push to a `Visitor`, zero-copy `chunk` views | owning one-shot `decode()` |
 | Release profile | `opt-level = "z"`, LTO, `panic = "abort"` | `opt-level = 3`, LTO |
 | Optimized for | small `.text` + zero heap | raw throughput |
-| Arena result | ~1.13× micropb throughput; ~6.0 KB Cortex-M flash | ~1.4× prost throughput |
+| Arena result | ~1.3× micropb throughput; ~7.0 KB Cortex-M flash | ~1.4× prost throughput |
 
 Both crates run the **identical** `perf` and `bench` tools. On one 6-core x86-64
 host (median of 15 runs) the size-tuned `no_std` build trails the speed-tuned
