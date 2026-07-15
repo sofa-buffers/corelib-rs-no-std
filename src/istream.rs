@@ -104,8 +104,6 @@ pub struct IStream {
     fixlen_remaining: usize,
     #[cfg(feature = "fixlen")]
     acc: [u8; 8],
-    #[cfg(feature = "fixlen")]
-    acc_len: usize,
 
     // sequence nesting depth (for balanced start/end validation)
     #[cfg(feature = "sequence")]
@@ -139,8 +137,6 @@ impl IStream {
             fixlen_remaining: 0,
             #[cfg(feature = "fixlen")]
             acc: [0; 8],
-            #[cfg(feature = "fixlen")]
-            acc_len: 0,
             #[cfg(feature = "sequence")]
             depth: 0,
         }
@@ -173,9 +169,13 @@ impl IStream {
             // one callback per byte.
             #[cfg(feature = "fixlen")]
             if self.state == State::FixlenRaw {
-                let take = (data.len() - i).min(self.fixlen_remaining);
+                // Slice the remaining input first, then cap by `fixlen_remaining`;
+                // `min` makes `take <= rest.len()`, so the chunk slice carries no
+                // panicking bounds check.
+                let rest = &data[i..];
+                let take = rest.len().min(self.fixlen_remaining);
                 let offset = self.fixlen_total - self.fixlen_remaining;
-                let chunk = &data[i..i + take];
+                let chunk = &rest[..take];
                 match self.fixlen_type {
                     FixlenType::Str => visitor.string(self.id, self.fixlen_total, offset, chunk),
                     FixlenType::Blob => visitor.blob(self.id, self.fixlen_total, offset, chunk),
@@ -355,7 +355,6 @@ impl IStream {
         self.fixlen_type = subtype;
         self.fixlen_total = length;
         self.fixlen_remaining = length;
-        self.acc_len = 0;
 
         // An empty fixlen array (§4.8) still carries its `fixlen_word`, but no
         // payload follows: validate the element subtype/width, capture it, and
@@ -410,8 +409,10 @@ impl IStream {
 
     #[cfg(feature = "fixlen")]
     fn step_fixlen_val<V: Visitor>(&mut self, byte: u8, visitor: &mut V) -> Result<()> {
-        self.acc[self.acc_len] = byte;
-        self.acc_len += 1;
+        // Byte position within the value = bytes already accumulated. The `& 7`
+        // is a no-op on the value (`fixlen_total` is 4 or 8 here) but proves the
+        // index in-bounds so no panicking bounds check is emitted.
+        self.acc[(self.fixlen_total - self.fixlen_remaining) & 7] = byte;
         self.fixlen_remaining -= 1;
         if self.fixlen_remaining != 0 {
             return Ok(());
@@ -419,13 +420,12 @@ impl IStream {
 
         match self.fixlen_type {
             FixlenType::Fp32 => {
-                let bytes: [u8; 4] = self.acc[..4].try_into().unwrap();
+                let bytes = [self.acc[0], self.acc[1], self.acc[2], self.acc[3]];
                 visitor.fp32(self.id, f32::from_le_bytes(bytes));
             }
             #[cfg(feature = "fp64")]
             FixlenType::Fp64 => {
-                let bytes: [u8; 8] = self.acc[..8].try_into().unwrap();
-                visitor.fp64(self.id, f64::from_le_bytes(bytes));
+                visitor.fp64(self.id, f64::from_le_bytes(self.acc));
             }
             _ => return Err(Error::InvalidMsg),
         }
@@ -436,7 +436,6 @@ impl IStream {
             self.array_remaining -= 1;
             if self.array_remaining > 0 {
                 self.fixlen_remaining = self.fixlen_total;
-                self.acc_len = 0;
                 return Ok(());
             }
             self.in_array = false;

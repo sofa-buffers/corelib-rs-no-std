@@ -41,7 +41,6 @@ impl Flush for NoFlush {
 /// Streaming Sofab encoder writing into a caller-provided buffer.
 pub struct OStream<'a, F: Flush = NoFlush> {
     buffer: &'a mut [u8],
-    end: usize,
     offset: usize,
     /// `None` means "no sink": a full buffer is an error rather than a flush.
     flush: Option<F>,
@@ -62,10 +61,8 @@ impl<'a> OStream<'a, NoFlush> {
     /// buffer, reserving space for a lower-layer protocol header.
     #[inline]
     pub fn with_offset(buffer: &'a mut [u8], offset: usize) -> Self {
-        let end = buffer.len();
         OStream {
             buffer,
-            end,
             offset,
             flush: None,
             #[cfg(feature = "sequence")]
@@ -80,10 +77,8 @@ impl<'a, F: Flush> OStream<'a, F> {
     /// resumes at the start of the buffer.
     #[inline]
     pub fn with_flush(buffer: &'a mut [u8], offset: usize, sink: F) -> Self {
-        let end = buffer.len();
         OStream {
             buffer,
-            end,
             offset,
             flush: Some(sink),
             #[cfg(feature = "sequence")]
@@ -114,7 +109,6 @@ impl<'a, F: Flush> OStream<'a, F> {
     /// resuming writes at `offset` in the new buffer.
     #[inline]
     pub fn buffer_set(&mut self, buffer: &'a mut [u8], offset: usize) {
-        self.end = buffer.len();
         self.buffer = buffer;
         self.offset = offset;
     }
@@ -122,18 +116,29 @@ impl<'a, F: Flush> OStream<'a, F> {
     // --- primitives ---------------------------------------------------------
 
     fn push_byte(&mut self, b: u8) -> Result<()> {
-        if self.offset >= self.end {
+        if self.offset >= self.buffer.len() {
             match self.flush.as_mut() {
                 Some(sink) => {
-                    sink.flush(&self.buffer[..self.offset]);
+                    // `min` proves the slice end in-bounds (offset == len here in
+                    // normal use), so no panicking bounds check is emitted.
+                    let used = self.offset.min(self.buffer.len());
+                    sink.flush(&self.buffer[..used]);
                     self.offset = 0;
                 }
                 None => return Err(Error::BufferFull),
             }
         }
-        self.buffer[self.offset] = b;
-        self.offset += 1;
-        Ok(())
+        // `get_mut` folds the buffer-full guard and the store into one checked
+        // access: `None` only for a zero-length buffer, reported as `BufferFull`
+        // instead of panicking.
+        match self.buffer.get_mut(self.offset) {
+            Some(slot) => {
+                *slot = b;
+                self.offset += 1;
+                Ok(())
+            }
+            None => Err(Error::BufferFull),
+        }
     }
 
     #[cfg_attr(not(feature = "fixlen"), allow(dead_code))]
