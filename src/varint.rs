@@ -37,8 +37,20 @@ impl VarintDecoder {
     /// and visitors.
     #[inline(never)]
     pub(crate) fn push(&mut self, byte: u8) -> Result<Option<Unsigned>> {
-        // OR in the 7 payload bits at the current position. Bits shifted beyond
-        // the value width are discarded (matches the C reference).
+        // Reject an overlong (>value-width) varint before it silently truncates
+        // (§4.1/§6.3). On the final byte that fills the value, only the low
+        // `room` payload bits fit below the value width; any higher bit is a
+        // >64-bit overflow. This matches corelib-c-cpp (`istream.c`),
+        // corelib-rs (`varint.rs`) and corelib-zig — where this port previously
+        // discarded the spilling bits and returned a corrupted value.
+        let room = VALUE_BITS - self.shift; // payload bits still below the width
+        if room < 7 && (byte & 0x7F) >> room != 0 {
+            self.value = 0;
+            self.shift = 0;
+            return Err(Error::InvalidMsg);
+        }
+
+        // OR in the 7 payload bits at the current position.
         self.value |= ((byte & 0x7F) as Unsigned) << self.shift;
         self.shift += 7;
 
