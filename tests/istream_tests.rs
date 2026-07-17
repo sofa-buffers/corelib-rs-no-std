@@ -260,6 +260,39 @@ fn varint_overflow_is_invalid() {
 }
 
 #[test]
+fn overlong_varint_final_high_bits_is_invalid() {
+    // §4.1/§6.3: a 10-byte varint whose 10th byte sets a bit above bit 63 is a
+    // >64-bit overflow and must be rejected as INVALID, not silently truncated.
+    // Reproducer F-0016: a u64 field (id 6, header 0x30) carrying the overlong
+    // varint. The 65th-bit form (…02) and the bits-64..69 form (…7f) both spill.
+    for terminator in [0x02u8, 0x7f] {
+        let bytes = [
+            0x30, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, terminator,
+        ];
+        let mut rec = Recorder::new();
+        let mut is = IStream::new();
+        assert_eq!(
+            is.feed(&bytes, &mut rec),
+            Err(Error::InvalidMsg),
+            "overlong varint terminator {terminator:#04x} must be INVALID",
+        );
+    }
+}
+
+#[test]
+fn max_u64_varint_is_accepted() {
+    // Control (F-0016): the valid maximum 2^64-1 (…01 in the 10th byte) must
+    // still decode — the overlong-varint guard must not reject it.
+    let bytes = [
+        0x30, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01,
+    ];
+    let mut rec = Recorder::new();
+    let mut is = IStream::new();
+    assert_eq!(is.feed(&bytes, &mut rec), Ok(()));
+    assert_eq!(rec.events, [Event::Unsigned(6, u64::MAX)]);
+}
+
+#[test]
 fn dangling_sequence_end_is_invalid() {
     let mut rec = Recorder::new();
     let mut is = IStream::new();
