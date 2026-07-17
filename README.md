@@ -52,6 +52,29 @@ cargo add sofa-buffers-corelib-no-std
 | Reserve-offset | `OStream::with_offset` leaves room for a lower-layer header (saves a copy). |
 | Small footprint | Cargo features drop whole code paths; `opt-level="z"`, LTO, `panic="abort"`. |
 
+### String validity (strict UTF-8)
+
+A `string` field is UTF-8. Rust's `str`/`String` is a **Unicode string type**,
+so this port is **always strict** — the `SOFAB_STRICT_UTF8` option
+(CORELIB_PLAN §6.4) is a **no-op here, pinned ON**, and there is no primitive to
+expose (only byte-container targets need one):
+
+- **Encode is strict by construction.** `OStream::write_str` takes `&str`, which
+  is already guaranteed valid UTF-8 by the type system, so a `string` field can
+  never carry invalid bytes — no runtime check is possible or needed. Put
+  arbitrary bytes in a `blob` (`write_blob`).
+- **Decode strictness lives in generated code.** The corelib hands a `string`
+  field's **raw bytes** to `Visitor::string` and never builds a `str`/`String`;
+  generated code materializes it with `core::str::from_utf8`, turning invalid
+  bytes into `Error::InvalidMsg` (the `INVALID` decode outcome). Invalid UTF-8 is
+  **rejected, never replaced** with `U+FFFD` or truncated. Embedded `U+0000` is
+  valid UTF-8 and round-trips byte-exact. std (`corelib-rs`) and no_std agree
+  (subsumes generator #80).
+
+The shared `invalid_utf8` negative vectors in `assets/test_vectors.json`
+(tracking corelib-c-cpp#97) are exercised by `tests/utf8_tests.rs` (needs the
+default `fixlen` feature).
+
 ## Usage
 
 The codec has four use cases — serialize a message that fits in one buffer,
