@@ -45,6 +45,13 @@ pub trait Visitor {
     /// A chunk of a string field. `total` is the full field length; `offset` is
     /// the byte position of this `chunk` within the field. For an empty string
     /// this is called once with `total == 0` and an empty `chunk`.
+    ///
+    /// The bytes are delivered **raw**: the corelib does not validate UTF-8 or
+    /// build a `str`/`String`. A strict consumer (generated code) materializes
+    /// the field with `core::str::from_utf8` and reports invalid bytes as
+    /// [`Error::InvalidMsg`] — never replacing them with `U+FFFD` or truncating
+    /// (MESSAGE_SPEC §8, CORELIB_PLAN §6.4). `blob` payloads are opaque and never
+    /// UTF-8-checked.
     #[cfg(feature = "fixlen")]
     fn string(&mut self, id: Id, total: usize, offset: usize, chunk: &[u8]) {}
 

@@ -24,6 +24,28 @@
 //! * **Zero-cost feature gating** — disable `fixlen` / `array` / `sequence` /
 //!   `fp64` to drop whole code paths, mirroring the C `SOFAB_DISABLE_*` macros.
 //!
+//! ## String validity: strict UTF-8 (always on)
+//!
+//! A `string` field is UTF-8 (MESSAGE_SPEC §8). Because Rust's `str`/`String`
+//! is a **Unicode string type**, this port is **always strict** — the
+//! `SOFAB_STRICT_UTF8` option (CORELIB_PLAN §6.4) is a **no-op here, pinned ON**,
+//! and there is no primitive to expose (only byte-container targets need one):
+//!
+//! * **Encode is strict by construction.** [`OStream::write_str`] takes `&str`,
+//!   already guaranteed valid UTF-8 by the type system, so a `string` field can
+//!   never carry invalid bytes — no runtime check is possible or needed.
+//!   Arbitrary bytes go in a `blob` via [`OStream::write_blob`].
+//! * **Decode strictness lives in generated code.** The corelib delivers a
+//!   `string` field's **raw bytes** to [`Visitor::string`] and never builds a
+//!   `str`/`String`. Generated code materializes it with `core::str::from_utf8`;
+//!   an `Err` becomes the sticky `inv` flag → [`Error::InvalidMsg`] (the
+//!   `INVALID` decode outcome). Invalid UTF-8 is **rejected, never replaced**
+//!   with `U+FFFD` or truncated (MESSAGE_SPEC §8). Embedded `U+0000` is valid
+//!   UTF-8 and round-trips byte-exact. std (`corelib-rs`) and no_std agree here
+//!   (generator #80).
+//! * **Skipped fields are never validated** — a skipped `string` is a length
+//!   jump over bytes the visitor never sees, so no `from_utf8` runs (§6.4).
+//!
 //! ## Example
 //!
 //! ```
