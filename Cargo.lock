@@ -82,7 +82,7 @@ dependencies = [
 
 [[package]]
 name = "sofa-buffers-corelib-no-std"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "libc",
  "serde_json",
