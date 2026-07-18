@@ -351,14 +351,14 @@ are zero and flash equals `.text`:
 
 | Configuration | Cortex-M0 | Cortex-M4F | RISC-V 32 |
 |---------------|----------:|-----------:|----------:|
-| **MIN** — integers only, 32-bit (`default-features = false`) | **626 B** | **658 B** | **744 B** |
-| integers only, 64-bit (`value64`) | 798 B | 850 B | 928 B |
-| `+ sequence` (64-bit) | 898 B | 942 B | 1 064 B |
-| `+ array` (64-bit) | 1 098 B | 1 136 B | 1 292 B |
-| `+ fixlen` (fp32 / str / blob, 64-bit) | 1 305 B | 1 389 B | 1 429 B |
-| all wire types, 32-bit | 1 711 B | 1 691 B | 2 153 B |
-| **MAX** — all wire types, 64-bit (default) | **2 109 B** | **2 091 B** | **2 457 B** |
-| generated-shape visitor (MAX) | 4 045 B | 3 969 B | 4 849 B |
+| **MIN** — integers only, 32-bit (`default-features = false`) | **642 B** | **666 B** | **772 B** |
+| integers only, 64-bit (`value64`) | 832 B | 862 B | 950 B |
+| `+ sequence` (64-bit) | 932 B | 954 B | 1 086 B |
+| `+ array` (64-bit) | 1 132 B | 1 148 B | 1 314 B |
+| `+ fixlen` (fp32 / str / blob, 64-bit) | 1 339 B | 1 401 B | 1 449 B |
+| all wire types, 32-bit | 1 727 B | 1 699 B | 2 181 B |
+| **MAX** — all wire types, 64-bit (default) | **2 143 B** | **2 103 B** | **2 481 B** |
+| generated-shape visitor (MAX) | 4 079 B | 3 981 B | 4 869 B |
 
 The codec spans **≈0.6 KiB** (integer-only, 32-bit) to **≈2.1 KiB** (every wire
 type, 64-bit) of flash on Cortex-M0; disabling `value64` removes ~20% of the code
