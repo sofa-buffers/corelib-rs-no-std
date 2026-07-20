@@ -21,7 +21,7 @@ env:
 
 jobs:
   build:
-    name: Build rustdoc
+    name: build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -49,7 +49,7 @@ jobs:
           path: target/doc
 
   deploy:
-    name: Deploy to GitHub Pages
+    name: deploy
     needs: build
     runs-on: ubuntu-latest
     environment:
