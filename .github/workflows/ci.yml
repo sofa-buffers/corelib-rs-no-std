@@ -11,7 +11,7 @@ env:
 
 jobs:
   lint:
-    name: lint
+    name: Lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -37,20 +37,22 @@ jobs:
         run: cargo clippy --all-features --all-targets -- -D warnings
 
   test:
-    name: test (${{ matrix.toolchain }})
+    name: Test (${{ matrix.toolchain }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         # Test across the toolchains that matter for a compiler-versioned
-        # language (§12.1): the current stable release plus the two before it
-        # (the versions users realistically have installed), and the declared
-        # MSRV (Cargo.toml `rust-version = 1.70`) so an accidental MSRV bump
-        # fails CI. Only stable channels — no beta/nightly.
+        # language (§12.1). Only stable channels — no beta/nightly.
         #
-        # The stable versions are pinned rather than `stable` so a green run
-        # stays reproducible; bump this list when a new stable ships.
-        toolchain: ["1.97", "1.96", "1.95", "1.70"]
+        # - `stable`: whatever is current on the day of the run. Floating on
+        #   purpose, so a regression in a fresh release surfaces here instead of
+        #   after the next pin bump.
+        # - 1.97/1.96/1.95: the current stable and its two predecessors, pinned
+        #   so a green run stays reproducible. Bump when a new stable ships.
+        # - 1.70: the declared MSRV (Cargo.toml `rust-version`), so an
+        #   accidental MSRV bump fails CI.
+        toolchain: [stable, "1.97", "1.96", "1.95", "1.70"]
     steps:
       - uses: actions/checkout@v7
 
@@ -82,7 +84,7 @@ jobs:
         run: cargo test --locked --verbose
 
   vectors:
-    name: vectors
+    name: Vectors
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -101,31 +103,31 @@ jobs:
       # once. The suite is `requires`-aware: each config runs the vectors it can
       # represent and skips the rest. `if: ${{ !cancelled() }}` on the later steps
       # keeps every config running even after one fails (old `fail-fast: false`).
-      - name: vectors — full, 64-bit
+      - name: Vectors — full, 64-bit
         run: cargo test --test vectors_tests --all-features --verbose
 
-      - name: vectors — integers only, 32-bit
+      - name: Vectors — integers only, 32-bit
         if: ${{ !cancelled() }}
         run: cargo test --test vectors_tests --no-default-features --verbose
 
-      - name: vectors — full wire, 32-bit width
+      - name: Vectors — full wire, 32-bit width
         if: ${{ !cancelled() }}
         run: cargo test --test vectors_tests --no-default-features --features fixlen,array,sequence,fp64 --verbose
 
-      - name: vectors — integers only, 64-bit
+      - name: Vectors — integers only, 64-bit
         if: ${{ !cancelled() }}
         run: cargo test --test vectors_tests --no-default-features --features value64 --verbose
 
-      - name: vectors — scalars + floats only
+      - name: Vectors — scalars + floats only
         if: ${{ !cancelled() }}
         run: cargo test --test vectors_tests --no-default-features --features fixlen,fp64,value64 --verbose
 
-      - name: vectors — no fixlen
+      - name: Vectors — no fixlen
         if: ${{ !cancelled() }}
         run: cargo test --test vectors_tests --no-default-features --features array,sequence,value64 --verbose
 
   features:
-    name: features
+    name: Features
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -155,7 +157,7 @@ jobs:
         run: cargo hack --feature-powerset test --test config_tests
 
   coverage:
-    name: coverage
+    name: Coverage
     runs-on: ubuntu-latest
     permissions:
       contents: write   # to push the badge JSON to the `badges` branch
@@ -205,7 +207,7 @@ jobs:
           git push -f "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" badges
 
   no-std:
-    name: no-std
+    name: No-std
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7

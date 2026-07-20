@@ -21,7 +21,7 @@ env:
 
 jobs:
   build:
-    name: build
+    name: Build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -49,7 +49,7 @@ jobs:
           path: target/doc
 
   deploy:
-    name: deploy
+    name: Deploy
     needs: build
     runs-on: ubuntu-latest
     environment:
