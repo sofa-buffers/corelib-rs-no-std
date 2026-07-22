@@ -16,6 +16,13 @@ use crate::{Id, Signed, Unsigned};
 /// Any `FnMut(&[u8])` closure implements this trait, so callbacks can be passed
 /// directly. Implement it manually to avoid a closure capture on bare-metal.
 pub trait Flush {
+    /// Whether this sink actually drains the buffer. `true` for a real sink (a
+    /// full buffer flushes and writing resumes); [`NoFlush`] overrides it to
+    /// `false` so a full buffer is [`Error::BufferFull`] instead. It is a
+    /// compile-time constant, so a [`NoFlush`] encoder monomorphizes the
+    /// flush branch out of `push_byte` entirely (no field, no dead code).
+    const SINKS: bool = true;
+
     /// Consume `data` (e.g. push to a transport or storage). Called with the
     /// bytes accumulated since the last flush.
     fn flush(&mut self, data: &[u8]);
@@ -34,6 +41,7 @@ impl<T: FnMut(&[u8])> Flush for T {
 pub struct NoFlush;
 
 impl Flush for NoFlush {
+    const SINKS: bool = false;
     #[inline]
     fn flush(&mut self, _data: &[u8]) {}
 }
@@ -42,8 +50,10 @@ impl Flush for NoFlush {
 pub struct OStream<'a, F: Flush = NoFlush> {
     buffer: &'a mut [u8],
     offset: usize,
-    /// `None` means "no sink": a full buffer is an error rather than a flush.
-    flush: Option<F>,
+    /// The flush sink. Whether it drains a full buffer or errors is decided at
+    /// compile time by [`Flush::SINKS`]; [`NoFlush`] is zero-sized and folds the
+    /// flush branch away, so a no-sink encoder carries no runtime sink state.
+    flush: F,
     /// Currently-open nested-sequence depth, capped at [`MAX_DEPTH`].
     #[cfg(feature = "sequence")]
     depth: u32,
@@ -64,7 +74,7 @@ impl<'a> OStream<'a, NoFlush> {
         OStream {
             buffer,
             offset,
-            flush: None,
+            flush: NoFlush,
             #[cfg(feature = "sequence")]
             depth: 0,
         }
@@ -80,7 +90,7 @@ impl<'a, F: Flush> OStream<'a, F> {
         OStream {
             buffer,
             offset,
-            flush: Some(sink),
+            flush: sink,
             #[cfg(feature = "sequence")]
             depth: 0,
         }
@@ -96,11 +106,11 @@ impl<'a, F: Flush> OStream<'a, F> {
     /// bytes were pending. With no sink the buffer is left intact.
     pub fn flush(&mut self) -> usize {
         let used = self.offset;
-        if used > 0 {
-            if let Some(sink) = self.flush.as_mut() {
-                sink.flush(&self.buffer[..used]);
-                self.offset = 0;
-            }
+        // `F::SINKS` is a compile-time constant: for a `NoFlush` encoder the
+        // whole body folds away and this is just `self.offset`.
+        if used > 0 && F::SINKS {
+            self.flush.flush(&self.buffer[..used]);
+            self.offset = 0;
         }
         used
     }
@@ -117,16 +127,17 @@ impl<'a, F: Flush> OStream<'a, F> {
 
     fn push_byte(&mut self, b: u8) -> Result<()> {
         if self.offset >= self.buffer.len() {
-            match self.flush.as_mut() {
-                Some(sink) => {
-                    // `min` proves the slice end in-bounds (offset == len here in
-                    // normal use), so no panicking bounds check is emitted.
-                    let used = self.offset.min(self.buffer.len());
-                    sink.flush(&self.buffer[..used]);
-                    self.offset = 0;
-                }
-                None => return Err(Error::BufferFull),
+            // `F::SINKS` is a compile-time constant. A `NoFlush` encoder folds
+            // this to an unconditional `BufferFull` (no flush field access, no
+            // dead sink call); a real sink keeps the flush-and-resume path.
+            if !F::SINKS {
+                return Err(Error::BufferFull);
             }
+            // `min` proves the slice end in-bounds (offset == len here in
+            // normal use), so no panicking bounds check is emitted.
+            let used = self.offset.min(self.buffer.len());
+            self.flush.flush(&self.buffer[..used]);
+            self.offset = 0;
         }
         // `get_mut` folds the buffer-full guard and the store into one checked
         // access: `None` only for a zero-length buffer, reported as `BufferFull`
