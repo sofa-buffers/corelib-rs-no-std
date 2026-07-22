@@ -351,14 +351,14 @@ are zero and flash equals `.text`:
 
 | Configuration | Cortex-M0 | Cortex-M4F | RISC-V 32 |
 |---------------|----------:|-----------:|----------:|
-| **MIN** — integers only, 32-bit (`default-features = false`) | **644 B** | **664 B** | **772 B** |
-| integers only, 64-bit (`value64`) | 830 B | 860 B | 950 B |
-| `+ sequence` (64-bit) | 934 B | 952 B | 1 086 B |
-| `+ array` (64-bit) | 1 146 B | 1 146 B | 1 316 B |
-| `+ fixlen` (fp32 / str / blob, 64-bit) | 1 345 B | 1 403 B | 1 445 B |
-| all wire types, 32-bit | 1 733 B | 1 689 B | 2 185 B |
-| **MAX** — all wire types, 64-bit (default) | **2 145 B** | **2 093 B** | **2 481 B** |
-| generated-shape visitor (MAX) | 4 089 B | 3 983 B | 4 885 B |
+| **MIN** — integers only, 32-bit (`default-features = false`) | **620 B** | **640 B** | **770 B** |
+| integers only, 64-bit (`value64`) | 802 B | 832 B | 944 B |
+| `+ sequence` (64-bit) | 902 B | 928 B | 1 080 B |
+| `+ array` (64-bit) | 1 118 B | 1 126 B | 1 310 B |
+| `+ fixlen` (fp32 / str / blob, 64-bit) | 1 325 B | 1 371 B | 1 425 B |
+| all wire types, 32-bit | 1 705 B | 1 645 B | 2 165 B |
+| **MAX** — all wire types, 64-bit (default) | **2 117 B** | **2 053 B** | **2 461 B** |
+| generated-shape visitor (MAX) | 4 061 B | 3 943 B | 4 865 B |
 
 The codec spans **≈0.6 KiB** (integer-only, 32-bit) to **≈2.1 KiB** (every wire
 type, 64-bit) of flash on Cortex-M0; disabling `value64` removes ~20% of the code
@@ -380,13 +380,13 @@ allocated. Sizes are identical across these 32-bit targets:
 
 | Configuration | `IStream` | `OStream` | total |
 |---------------|----------:|----------:|------:|
-| **MIN** — integers only, 32-bit | 16 B | 16 B | **32 B** |
-| integers only, 64-bit | 24 B | 16 B | 40 B |
-| `+ sequence` (64-bit) | 32 B | 20 B | 52 B |
-| `+ array` (64-bit) | 32 B | 16 B | 48 B |
-| `+ fixlen` (64-bit) | 40 B | 16 B | 56 B |
-| all wire types, 32-bit | 40 B | 20 B | 60 B |
-| **MAX** — all wire types, 64-bit (default) | 48 B | 20 B | **68 B** |
+| **MIN** — integers only, 32-bit | 16 B | 12 B | **28 B** |
+| integers only, 64-bit | 24 B | 12 B | 36 B |
+| `+ sequence` (64-bit) | 32 B | 16 B | 48 B |
+| `+ array` (64-bit) | 32 B | 12 B | 44 B |
+| `+ fixlen` (64-bit) | 40 B | 12 B | 52 B |
+| all wire types, 32-bit | 40 B | 16 B | 56 B |
+| **MAX** — all wire types, 64-bit (default) | 48 B | 16 B | **64 B** |
 
 ## Choosing between the two Rust corelibs
 
