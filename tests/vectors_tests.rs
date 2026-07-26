@@ -117,6 +117,10 @@ fn array_kind(element_type: &str) -> ArrayKind {
 /// Write a vector's `fields[]` into any stream (buffered or flushing). Feature-
 /// gated per op; vectors needing a disabled op are filtered out by `requires`.
 fn write_fields<F: Flush>(os: &mut OStream<F>, fields: &[Value]) {
+    // A vector's `serialized` form is the primitive-layer ground truth and always
+    // carries the frame, so every sequence closes with `end_keep`: identical bytes
+    // once the sequence has content, and the empty-sequence vectors keep their
+    // `begin`+`end` pair instead of vanishing.
     for f in fields {
         let op = f["op"].as_str().expect("op");
         let id = f.get("id").and_then(Value::as_u64).unwrap_or(0) as Id;
@@ -141,9 +145,9 @@ fn write_fields<F: Flush>(os: &mut OStream<F>, fields: &[Value]) {
             #[cfg(feature = "array")]
             "array" => encode_array(os, id, f),
             #[cfg(feature = "sequence")]
-            "sequence_begin" => os.write_sequence_begin(id).unwrap(),
+            "sequence_begin" => os.write_sequence_begin_lazy(id).unwrap(),
             #[cfg(feature = "sequence")]
-            "sequence_end" => os.write_sequence_end().unwrap(),
+            "sequence_end" => os.write_sequence_end_keep().unwrap(),
             other => panic!("unsupported op {other:?} (vector should be `requires`-skipped)"),
         }
     }

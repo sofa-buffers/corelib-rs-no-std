@@ -97,6 +97,8 @@ pub use types::FixlenType;
 pub use types::ArrayKind;
 
 #[cfg(feature = "sequence")]
+pub use ostream::LAZY_SEQ_DEPTH;
+#[cfg(feature = "sequence")]
 pub use types::MAX_DEPTH;
 
 #[cfg(feature = "array")]
