@@ -12,15 +12,6 @@ pub enum Error {
     /// Corresponds to `SOFAB_RET_E_ARGUMENT`.
     Argument,
 
-    /// Invalid API usage (e.g. a decoded value does not fit the requested type).
-    ///
-    /// Corresponds to `SOFAB_RET_E_USAGE`. Reserved for §6.3 baseline parity
-    /// with the other ports: the push-by-value [`Visitor`](crate::Visitor)
-    /// decode model has no read-type-mismatch path, so this port never
-    /// constructs it today, but it is kept so the error set matches the
-    /// cross-language baseline.
-    Usage,
-
     /// The output buffer is full and no [`crate::Flush`] sink is available.
     ///
     /// Corresponds to `SOFAB_RET_E_BUFFER_FULL`.
