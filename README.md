@@ -351,14 +351,14 @@ are zero and flash equals `.text`:
 
 | Configuration | Cortex-M0 | Cortex-M4F | RISC-V 32 |
 |---------------|----------:|-----------:|----------:|
-| **MIN** — integers only, 32-bit (`default-features = false`) | **642 B** | **666 B** | **772 B** |
-| integers only, 64-bit (`value64`) | 832 B | 862 B | 950 B |
-| `+ sequence` (64-bit) | 932 B | 954 B | 1 086 B |
-| `+ array` (64-bit) | 1 132 B | 1 148 B | 1 314 B |
-| `+ fixlen` (fp32 / str / blob, 64-bit) | 1 339 B | 1 401 B | 1 449 B |
-| all wire types, 32-bit | 1 727 B | 1 699 B | 2 181 B |
-| **MAX** — all wire types, 64-bit (default) | **2 143 B** | **2 103 B** | **2 481 B** |
-| generated-shape visitor (MAX) | 4 079 B | 3 981 B | 4 869 B |
+| **MIN** — integers only, 32-bit (`default-features = false`) | **644 B** | **664 B** | **772 B** |
+| integers only, 64-bit (`value64`) | 830 B | 860 B | 950 B |
+| `+ sequence` (64-bit) | 934 B | 952 B | 1 086 B |
+| `+ array` (64-bit) | 1 146 B | 1 146 B | 1 316 B |
+| `+ fixlen` (fp32 / str / blob, 64-bit) | 1 345 B | 1 403 B | 1 445 B |
+| all wire types, 32-bit | 1 733 B | 1 689 B | 2 185 B |
+| **MAX** — all wire types, 64-bit (default) | **2 145 B** | **2 093 B** | **2 481 B** |
+| generated-shape visitor (MAX) | 4 089 B | 3 983 B | 4 885 B |
 
 The codec spans **≈0.6 KiB** (integer-only, 32-bit) to **≈2.1 KiB** (every wire
 type, 64-bit) of flash on Cortex-M0; disabling `value64` removes ~20% of the code
@@ -396,12 +396,12 @@ encoder/decoder API, tuned for opposite ends of the spectrum:
 - **`corelib-rs-no-std`** (this crate) — `#![no_std]`, no allocator, fixed
   caller buffers, size-optimized profile. For **microcontrollers and
   footprint-constrained firmware**. In the multi-language arena it runs at
-  roughly **1.3× micropb** throughput while fitting a bare-metal Cortex-M image
-  of about **7.0 KB flash versus micropb's ~8.5 KB**.
+  roughly **1.4× micropb** per-message throughput while fitting a bare-metal
+  Cortex-M image of about **6.8 KB flash versus micropb's ~8.5 KB**.
 - **[`corelib-rs`](https://github.com/sofa-buffers/corelib-rs)** — the `std`
   port, `opt-level = 3`, allocates freely (owned `String`/`Vec`, one-shot
   `decode()`). For **servers and desktops** wanting maximum throughput and
-  ergonomic ownership; roughly **1.4× prost** throughput.
+  ergonomic ownership; roughly **1.5× prost** per-message throughput.
 
 | | `corelib-rs-no-std` (this crate) | `corelib-rs` (`std`) |
 |---|---|---|
@@ -411,18 +411,16 @@ encoder/decoder API, tuned for opposite ends of the spectrum:
 | Decode model | push to a `Visitor`, zero-copy `chunk` views | owning one-shot `decode()` |
 | Release profile | `opt-level = "z"`, LTO, `panic = "abort"` | `opt-level = 3`, LTO |
 | Optimized for | small `.text` + zero heap | raw throughput |
-| Arena result | ~1.3× micropb throughput; ~7.0 KB Cortex-M flash | ~1.4× prost throughput |
+| Arena result | ~1.4× micropb throughput; ~6.8 KB Cortex-M flash | ~1.5× prost throughput |
 
-Both crates run the **identical** `perf` and `bench` tools. On one 6-core x86-64
-host (median of 15 runs) the size-tuned `no_std` build trails the speed-tuned
-`std` build, and the gap widens with payload size:
+Both crates run the **identical** `perf` and `bench` tools. In the multi-language
+[arena](https://github.com/sofa-buffers/arena) (best-of-5, encode+decode roundtrip
+of the same 434 B message) the size-tuned `no_std` build trails the speed-tuned
+`std` build by roughly 2×:
 
 | Workload | `no_std` MB/s | `std` MB/s | `std` faster |
 | --- | ---: | ---: | ---: |
-| serialize — typical message (170 B)   |  98.3 | 149.5 | 1.5× |
-| deserialize — typical message (170 B) |  84.3 | 132.2 | 1.6× |
-| encode — `u64` array ×1000 (9,491 B)  | 290.6 | 670.7 | 2.3× |
-| decode — `u64` array ×1000 (9,491 B)  | 148.7 | 825.1 | 5.5× |
+| typical message — encode + decode roundtrip (434 B) | 158.6 | 341.1 | 2.15× |
 
 That is the deliberate trade-off: pick this crate for embedded and footprint —
 where the `std` crate cannot build at all — and pick `corelib-rs` for servers
