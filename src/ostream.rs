@@ -52,7 +52,10 @@ impl Flush for NoFlush {
 /// deeper keeps its empty frame, which a decoder accepts and normalizes away
 /// (MESSAGE_SPEC §2). Deliberately far below the format's [`MAX_DEPTH`] ceiling:
 /// the array costs `4 * LAZY_SEQ_DEPTH` bytes of encoder state, and a heap-free
-/// target pays that in RAM.
+/// target pays that in RAM — measured on Cortex-M0, the `OStream` grows from
+/// 16 B to 52 B at the default of 8. This is the dial for a target that cannot
+/// spare it: a schema nesting deeper than the window still encodes correctly,
+/// it just keeps the empty frame of the sequences beyond it.
 #[cfg(feature = "sequence")]
 pub const LAZY_SEQ_DEPTH: usize = 8;
 
