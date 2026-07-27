@@ -775,6 +775,39 @@ fn closing_a_sequence_returns_the_depth_budget() {
             os.write_sequence_end().unwrap();
         }
     }
+
+    // The other direction. The loop above cannot see a closer that gives back
+    // *two* levels: closing a full nest MAX times then saturates at zero, which
+    // looks exactly like giving back one. So close a *single* sequence out of two
+    // open ones and measure the remaining budget exactly — one level is still
+    // open, so MAX - 1 further opens must fit and the next must be refused. A
+    // double decrement leaves the budget at MAX here and the last open succeeds.
+    //
+    // All three decrement sites are covered: the drop path of `end` (header still
+    // held back), its emit path (a field write committed the run first), and
+    // `end_keep`.
+    for site in 0..3 {
+        let mut buf = [0u8; 1024];
+        let mut os = OStream::new(&mut buf);
+        os.write_sequence_begin_lazy(1).unwrap();
+        os.write_sequence_begin_lazy(2).unwrap();
+        match site {
+            0 => os.write_sequence_end().unwrap(),
+            1 => {
+                os.write_unsigned(3, 7).unwrap(); // commits the run
+                os.write_sequence_end().unwrap();
+            }
+            _ => os.write_sequence_end_keep().unwrap(),
+        }
+        for _ in 0..(MAX - 1) {
+            os.write_sequence_begin_lazy(1).unwrap();
+        }
+        assert_eq!(
+            os.write_sequence_begin_lazy(1),
+            Err(Error::Argument),
+            "closer {site} handed back more than one depth level"
+        );
+    }
 }
 
 /// The drop path on its own: repeatedly opening and closing a contentless

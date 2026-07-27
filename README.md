@@ -236,10 +236,16 @@ about *bytes*, not about validity:
 The window is the price in RAM, which is why it is 8 and not 255: on Cortex-M0
 the pending array grows `OStream` from **16 B to 52 B** (`4 * LAZY_SEQ_DEPTH`
 plus the count) — see the RAM table under [Footprint](#footprint), where the
-`sequence`-enabled rows carry exactly that cost. A firmware that nests only two
-or three levels deep (i.e. all of them) can shrink `LAZY_SEQ_DEPTH`; a schema
-nesting deeper than the window still encodes **correctly**, it only keeps the
-empty frames beyond it. The constant is public as `sofab::LAZY_SEQ_DEPTH`.
+`sequence`-enabled rows carry exactly that cost. A schema nesting deeper than the
+window still encodes **correctly**, it only keeps the empty frames beyond it.
+
+The value is **not configurable**: `sofab::LAZY_SEQ_DEPTH` is a public constant to
+read and test against, but no Cargo feature, `cfg` or environment variable
+changes it — every build of this crate holds back 8. A firmware that nests only
+two or three levels deep and wants those RAM bytes back has to edit the constant
+in a patched or vendored copy of the crate; that changes which bytes the encoder
+emits, so the window tests in
+[`tests/ostream_tests.rs`](tests/ostream_tests.rs) have to be re-stated with it.
 
 **If the buffer runs out while a run is committing.** Held-back ids are encoder
 state, not buffer content, so no flush can split a run *before* it commits. One
@@ -387,7 +393,7 @@ cargo build --lib --all-features --target thumbv7em-none-eabihf
 Integration tests live in `tests/`: `vectors_tests.rs` (replays the shared
 `assets/test_vectors.json`, feature-aware), `ostream_tests.rs`,
 `istream_tests.rs`, `roundtrip_tests.rs`, `api_tests.rs`, and `config_tests.rs`.
-Line coverage is ~93% (`cargo llvm-cov --all-features`). To exercise the whole
+Line coverage is ~92% (`cargo llvm-cov --all-features`). To exercise the whole
 feature powerset, use [`cargo-hack`](https://github.com/taiki-e/cargo-hack):
 
 ```bash
@@ -406,6 +412,22 @@ a typical composite message), so results are comparable across language ports:
 ```bash
 cargo bench --bench perf    # per-op cost: HW cycles/op + MB/s
 cargo bench --bench bench   # throughput in MB/s (MB = 1,000,000 bytes)
+```
+
+**Instruction counts.** Cycles and MB/s are noisy across machines, so the numbers
+quoted in the [changelog](CHANGELOG.md) are callgrind instruction counts, which
+are deterministic. Two environment variables make `perf` measurable that way, and
+change nothing otherwise: `SOFAB_PERF_ONLY` (`encode` / `decode` / `encode_u64` /
+`decode_u64`) runs a single workload, and `SOFAB_PERF_ITERS=N` replaces the
+adaptive ~1 s loop with exactly N iterations. Run at two N and difference the
+totals — start-up and warm-up cancel:
+
+```bash
+cargo bench --bench perf --all-features --no-run   # prints the binary path
+for n in 20000 120000; do
+  SOFAB_PERF_ONLY=encode SOFAB_PERF_ITERS=$n \
+    valgrind --tool=callgrind --callgrind-out-file=/dev/null <binary>
+done                       # per-op Ir = (Ir(120000) - Ir(20000)) / 100000
 ```
 
 ### Footprint
@@ -428,17 +450,18 @@ are zero and flash equals `.text`:
 |---------------|----------:|-----------:|----------:|
 | **MIN** — integers only, 32-bit (`default-features = false`) | **620 B** | **640 B** | **770 B** |
 | integers only, 64-bit (`value64`) | 802 B | 832 B | 944 B |
-| `+ sequence` (64-bit) | 1 154 B | 1 168 B | 1 448 B |
+| `+ sequence` (64-bit) | 1 130 B | 1 144 B | 1 432 B |
 | `+ array` (64-bit) | 1 118 B | 1 126 B | 1 310 B |
 | `+ fixlen` (fp32 / str / blob, 64-bit) | 1 325 B | 1 371 B | 1 425 B |
-| all wire types, 32-bit | 1 961 B | 1 901 B | 2 513 B |
-| **MAX** — all wire types, 64-bit (default) | **2 349 B** | **2 291 B** | **2 797 B** |
-| generated-shape visitor (MAX) | 4 289 B | 4 165 B | 5 265 B |
+| all wire types, 32-bit | 1 937 B | 1 881 B | 2 497 B |
+| **MAX** — all wire types, 64-bit (default) | **2 325 B** | **2 267 B** | **2 781 B** |
+| generated-shape visitor (MAX) | 4 281 B | 4 161 B | 5 297 B |
 
 The `sequence` rows carry the lazy-framing machinery of MESSAGE_SPEC §2 (the
-hold-back run, [above](#sequence-framing-and-the-hold-back-window)): ~220 B of
-flash on Cortex-M0 over an eager `begin`/`end` pair, plus the pending array's
-RAM in the table below. About 60 B of that is `commit_pending` tracking how much
+hold-back run, [above](#sequence-framing-and-the-hold-back-window)): 228 B of
+flash on Cortex-M0 over an eager `begin`/`end` pair (1 130 B against the 902 B
+the same row measured before lazy framing), plus the pending array's RAM in the
+table below. About 60 B of that is `commit_pending` tracking how much
 of the run reached the buffer so a `BufferFull` in the middle of one keeps the
 ids it did not emit ([above](#sequence-framing-and-the-hold-back-window)) — the
 price of not emitting a `SEQUENCE_END` whose `SEQUENCE_START` was dropped.
@@ -475,7 +498,9 @@ The `sequence` rows are where `OStream` grows from 12/16 B to 52 B: that is the
 `LAZY_SEQ_DEPTH`-slot hold-back array
 ([above](#sequence-framing-and-the-hold-back-window)) — `4 * 8` bytes of ids plus
 the count. It is the only per-stream cost of omitting all-default sequences, and
-the one knob to turn on a target that cannot spare it.
+it is fixed at build time — see
+[the bound](#sequence-framing-and-the-hold-back-window) for what a target that
+cannot spare it has to do.
 
 ## Choosing between the two Rust corelibs
 

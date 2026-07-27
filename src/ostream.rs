@@ -53,9 +53,13 @@ impl Flush for NoFlush {
 /// (MESSAGE_SPEC §2). Deliberately far below the format's [`MAX_DEPTH`] ceiling:
 /// the array costs `4 * LAZY_SEQ_DEPTH` bytes of encoder state, and a heap-free
 /// target pays that in RAM — measured on Cortex-M0, the `OStream` grows from
-/// 16 B to 52 B at the default of 8. This is the dial for a target that cannot
-/// spare it: a schema nesting deeper than the window still encodes correctly,
-/// it just keeps the empty frame of the sequences beyond it.
+/// 16 B to 52 B at 8.
+///
+/// It is **fixed at 8 for every build of this crate**: there is no Cargo feature,
+/// no `cfg` and no environment variable that changes it, so a target that cannot
+/// spare the 36 B has to edit this constant in a patched or vendored copy of the
+/// crate. A schema nesting deeper than the window still encodes correctly either
+/// way; it just keeps the empty frame of the sequences beyond it.
 ///
 /// This bound is the **heap-free profile allowance** of CORELIB_PLAN §6 ("How
 /// deep the hold-back reaches"): an implementation that can allocate MUST hold
@@ -218,8 +222,17 @@ impl<'a, F: Flush> OStream<'a, F> {
         // The single choke point every field write passes through, so also where a
         // held-back sequence run is committed: the field about to be written is
         // content, which means every enclosing sequence must be framed after all.
+        //
+        // Unconditional on purpose — no wire-type exemption. Dropping a sequence
+        // is the one case that must *not* commit, and it is expressed by not
+        // reaching this function at all: `write_sequence_end` returns before the
+        // call, and `write_sequence_begin_lazy` never routes through it. Anything
+        // that does reach here is content, including the `SEQUENCE_END` of a kept
+        // frame (whose run `write_sequence_end_keep` therefore no longer has to
+        // commit itself). Exempting a wire type here would move completeness of
+        // the choke point onto its callers' discipline.
         #[cfg(feature = "sequence")]
-        if self.npending != 0 && wire_type != T_SEQUENCE_START && wire_type != T_SEQUENCE_END {
+        if self.npending != 0 {
             self.commit_pending()?;
         }
         self.write_varint(((id as Unsigned) << 3) | wire_type as Unsigned)
@@ -521,9 +534,8 @@ impl<'a, F: Flush> OStream<'a, F> {
     #[cfg(feature = "sequence")]
     #[inline]
     pub fn write_sequence_end_keep(&mut self) -> Result<()> {
-        if self.npending != 0 {
-            self.commit_pending()?;
-        }
+        // The held-back run is committed by `write_id_type` itself — this closer
+        // is an ordinary write, so it needs no commit of its own.
         self.write_id_type(0, T_SEQUENCE_END)?;
         self.depth = self.depth.saturating_sub(1);
         Ok(())
