@@ -241,6 +241,20 @@ or three levels deep (i.e. all of them) can shrink `LAZY_SEQ_DEPTH`; a schema
 nesting deeper than the window still encodes **correctly**, it only keeps the
 empty frames beyond it. The constant is public as `sofab::LAZY_SEQ_DEPTH`.
 
+**If the buffer runs out while a run is committing.** Held-back ids are encoder
+state, not buffer content, so no flush can split a run *before* it commits. One
+can land in the middle of one, and with a `Flush` sink that is uneventful — the
+bytes go to the sink and the run carries on. Without a sink the same point is
+`Error::BufferFull`, possibly *between* two headers of a single run, and the
+encoder then **keeps the ids it did not emit**, still as the innermost pending
+suffix. Install a bigger buffer with `buffer_set` and retry the failed write: it
+resumes at the cut. That recovery reaches exactly as far as the rest of this
+encoder does and no further — no writer here is atomic on failure, so a cut that
+falls *inside* a multi-byte header (id > 15), or inside any other varint, still
+leaves a partial message behind, exactly as it does for a scalar field. What is
+guaranteed is the structural half: a run never silently drops a `SEQUENCE_START`
+whose `SEQUENCE_END` still gets written.
+
 ### Code generator
 
 The common real use is a schema compiled by **`sofabgen`** into typed structs
@@ -414,17 +428,20 @@ are zero and flash equals `.text`:
 |---------------|----------:|-----------:|----------:|
 | **MIN** — integers only, 32-bit (`default-features = false`) | **620 B** | **640 B** | **770 B** |
 | integers only, 64-bit (`value64`) | 802 B | 832 B | 944 B |
-| `+ sequence` (64-bit) | 1 094 B | 1 120 B | 1 354 B |
+| `+ sequence` (64-bit) | 1 154 B | 1 168 B | 1 448 B |
 | `+ array` (64-bit) | 1 118 B | 1 126 B | 1 310 B |
 | `+ fixlen` (fp32 / str / blob, 64-bit) | 1 325 B | 1 371 B | 1 425 B |
-| all wire types, 32-bit | 1 901 B | 1 853 B | 2 417 B |
-| **MAX** — all wire types, 64-bit (default) | **2 289 B** | **2 243 B** | **2 705 B** |
-| generated-shape visitor (MAX) | 4 225 B | 4 117 B | 5 157 B |
+| all wire types, 32-bit | 1 961 B | 1 901 B | 2 513 B |
+| **MAX** — all wire types, 64-bit (default) | **2 349 B** | **2 291 B** | **2 797 B** |
+| generated-shape visitor (MAX) | 4 289 B | 4 165 B | 5 265 B |
 
 The `sequence` rows carry the lazy-framing machinery of MESSAGE_SPEC §2 (the
-hold-back run, [above](#sequence-framing-and-the-hold-back-window)): ~190 B of
+hold-back run, [above](#sequence-framing-and-the-hold-back-window)): ~220 B of
 flash on Cortex-M0 over an eager `begin`/`end` pair, plus the pending array's
-RAM in the table below.
+RAM in the table below. About 60 B of that is `commit_pending` tracking how much
+of the run reached the buffer so a `BufferFull` in the middle of one keeps the
+ids it did not emit ([above](#sequence-framing-and-the-hold-back-window)) — the
+price of not emitting a `SEQUENCE_END` whose `SEQUENCE_START` was dropped.
 
 The codec spans **≈0.6 KiB** (integer-only, 32-bit) to **≈2.2 KiB** (every wire
 type, 64-bit) of flash on Cortex-M0; disabling `value64` removes ~20% of the code

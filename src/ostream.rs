@@ -228,14 +228,33 @@ impl<'a, F: Flush> OStream<'a, F> {
     /// Write out the held-back sequence headers, outermost first.
     ///
     /// Cold: it runs at most once per non-default sequence, never per field.
+    ///
+    /// Only the headers that actually **reached the buffer** are dropped from the
+    /// run. If the buffer fills mid-run with no sink to drain it, the sequences
+    /// not written yet stay pending — still the innermost contiguous suffix of the
+    /// open sequences, so the type's invariant holds and a caller that installs a
+    /// bigger buffer ([`OStream::buffer_set`]) resumes exactly where the cut fell.
+    /// Clearing the run up front instead would destroy those ids: their
+    /// `SEQUENCE_START` markers would never be emitted while their `SEQUENCE_END`s
+    /// still are, i.e. a structurally broken stream rather than a truncated one.
+    ///
+    /// The recovery this buys is real but **bounded**: it only reconstructs the
+    /// stream when the cut lands on a *header-varint boundary*. No writer in this
+    /// encoder is atomic on failure — a multi-byte header (id > 15) can be cut in
+    /// half by the same buffer end, and its leading bytes are already in the
+    /// buffer while the id is still pending, so resuming re-emits it whole. As
+    /// everywhere else in this encoder, `BufferFull` without a sink leaves a
+    /// partial message behind; what is fixed here is that it no longer leaves an
+    /// *inconsistent* one on the boundary case.
     #[cfg(feature = "sequence")]
     #[cold]
     #[inline(never)]
     fn commit_pending(&mut self) -> Result<()> {
-        let n = core::mem::replace(&mut self.npending, 0);
-        for i in 0..n {
-            // `get` rather than `self.pending[i]`: `n <= LAZY_SEQ_DEPTH` holds by
-            // construction, but the indexing form still emits a
+        let mut written = 0;
+        let mut result = Ok(());
+        for i in 0..self.npending {
+            // `get` rather than `self.pending[i]`: `i < npending <= LAZY_SEQ_DEPTH`
+            // holds by construction, but the indexing form still emits a
             // `core::panicking::panic_bounds_check` path that the linker then
             // keeps in the image. The whole codec is meant to link without
             // `core::panicking` (README "Footprint"), so prove the access
@@ -244,9 +263,40 @@ impl<'a, F: Flush> OStream<'a, F> {
                 Some(&id) => id,
                 None => break,
             };
-            self.write_varint(((id as Unsigned) << 3) | T_SEQUENCE_START as Unsigned)?;
+            if let Err(e) =
+                self.write_varint(((id as Unsigned) << 3) | T_SEQUENCE_START as Unsigned)
+            {
+                result = Err(e);
+                break;
+            }
+            written += 1;
         }
-        Ok(())
+        self.drop_front(written);
+        result
+    }
+
+    /// Drop the outermost `k` entries of the pending run, keeping the rest as the
+    /// innermost suffix. Panic-free by the same rule as [`Self::commit_pending`]:
+    /// `copy_within` carries a range assert, so the shift is spelled out with
+    /// `get`/`get_mut` instead.
+    #[cfg(feature = "sequence")]
+    fn drop_front(&mut self, k: usize) {
+        if k >= self.npending {
+            self.npending = 0;
+            return;
+        }
+        let remaining = self.npending - k;
+        for i in 0..remaining {
+            let id = match self.pending.get(i + k) {
+                Some(&id) => id,
+                None => break,
+            };
+            match self.pending.get_mut(i) {
+                Some(slot) => *slot = id,
+                None => break,
+            }
+        }
+        self.npending = remaining;
     }
 
     // --- scalar writers -----------------------------------------------------
