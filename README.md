@@ -180,6 +180,67 @@ for piece in wire.chunks(4) {                 // one packet at a time, from any 
 }
 ```
 
+### Sequence framing, and the hold-back window
+
+A nested message is a **sequence**: `write_sequence_begin_lazy(id)` opens one and
+a closer ends it. MESSAGE_SPEC §2 **omits a sequence-typed field whose value
+equals its declared default**, and "not one child was written" is exactly that
+condition — but the header has to be on the wire *before* the children that
+decide it. Rather than buffer the sub-message (impossible without a heap), the
+encoder **holds the header back**: the ids of the innermost open sequences form a
+pending run, the first field write emits the whole run outermost-first, and the
+closer decides what an empty one does.
+
+| call | effect |
+|------|--------|
+| `write_sequence_begin_lazy(id)` | open a scope, hold its header back (no bytes, no allocation) |
+| `write_sequence_end()` | got no content → **drop it**, header and end marker both |
+| `write_sequence_end_keep()` | emit the run *and* the end marker, so an empty sequence still reaches the wire as `begin`+`end` |
+
+Which closer to use is a **static** property of the position in the schema, not
+of the value: `end` for a `struct`/`union` field and for an array *wrapper*;
+`end_keep` for a wrapper-array **element**, whose presence is what carries a
+dynamic array's length (§5.1), and for an array field that must encode
+"explicitly empty" against a non-empty declared default. Getting it wrong is not
+symmetric — `end_keep` where `end` would do costs one non-canonical empty frame
+that every decoder normalizes away, while the reverse silently changes an
+array's decoded length. So "always framed" is false for a **field** and still
+true for an **element**.
+
+```rust
+let mut buf = [0u8; 32];
+let mut os = sofab::OStream::new(&mut buf);
+os.write_sequence_begin_lazy(1).unwrap();   // a struct field that stays all-default
+os.write_sequence_end().unwrap();
+assert_eq!(os.bytes_used(), 0);             // omitted entirely: zero bytes
+```
+
+**The bound: `LAZY_SEQ_DEPTH = 8`.** The pending run lives in a fixed array
+inside `OStream` — this port has no heap to grow one. CORELIB_PLAN §6 ("How deep
+the hold-back reaches") lets a **heap-free profile** bound the run and requires
+it to document the bound, because two encoders that disagree about it disagree
+about *bytes*, not about validity:
+
+- Up to **8** nested sequences are held back, and an all-default one at any of
+  those depths is **omitted** — the canonical §2 encoding.
+- Open a 9th while eight are pending and the encoder **commits the run and frames
+  that sequence eagerly**. An all-default sequence beyond the window therefore
+  keeps its empty `begin`+`end` frame: still well-formed, still decodes to the
+  same value (it is the non-canonical form §2 already requires every decoder to
+  accept and normalize) — just not canonical. Ports that can allocate
+  (`corelib-rs` and the rest) hold back to the full `MAX_DEPTH` and are canonical
+  at every depth.
+- `MAX_DEPTH` (255) is unaffected: it still bounds the nesting itself, and
+  exceeding it is `Error::Argument`.
+
+The window is the price in RAM, which is why it is 8 and not 255: on Cortex-M0
+the pending array grows `OStream` from **16 B to 52 B** (`4 * LAZY_SEQ_DEPTH`
+plus the count) — see the RAM table under [Footprint](#footprint), where the
+`sequence`-enabled rows carry exactly that cost. A firmware that nests only two
+or three levels deep (i.e. all of them) can shrink `LAZY_SEQ_DEPTH`; a schema
+nesting deeper than the window still encodes **correctly**, it only keeps the
+empty frames beyond it. The constant is public as `sofab::LAZY_SEQ_DEPTH`.
+
 ### Code generator
 
 The common real use is a schema compiled by **`sofabgen`** into typed structs
@@ -353,14 +414,19 @@ are zero and flash equals `.text`:
 |---------------|----------:|-----------:|----------:|
 | **MIN** — integers only, 32-bit (`default-features = false`) | **620 B** | **640 B** | **770 B** |
 | integers only, 64-bit (`value64`) | 802 B | 832 B | 944 B |
-| `+ sequence` (64-bit) | 902 B | 928 B | 1 080 B |
+| `+ sequence` (64-bit) | 1 094 B | 1 120 B | 1 354 B |
 | `+ array` (64-bit) | 1 118 B | 1 126 B | 1 310 B |
 | `+ fixlen` (fp32 / str / blob, 64-bit) | 1 325 B | 1 371 B | 1 425 B |
-| all wire types, 32-bit | 1 705 B | 1 645 B | 2 165 B |
-| **MAX** — all wire types, 64-bit (default) | **2 117 B** | **2 053 B** | **2 461 B** |
-| generated-shape visitor (MAX) | 4 061 B | 3 943 B | 4 865 B |
+| all wire types, 32-bit | 1 901 B | 1 853 B | 2 417 B |
+| **MAX** — all wire types, 64-bit (default) | **2 289 B** | **2 243 B** | **2 705 B** |
+| generated-shape visitor (MAX) | 4 225 B | 4 117 B | 5 157 B |
 
-The codec spans **≈0.6 KiB** (integer-only, 32-bit) to **≈2.1 KiB** (every wire
+The `sequence` rows carry the lazy-framing machinery of MESSAGE_SPEC §2 (the
+hold-back run, [above](#sequence-framing-and-the-hold-back-window)): ~190 B of
+flash on Cortex-M0 over an eager `begin`/`end` pair, plus the pending array's
+RAM in the table below.
+
+The codec spans **≈0.6 KiB** (integer-only, 32-bit) to **≈2.2 KiB** (every wire
 type, 64-bit) of flash on Cortex-M0; disabling `value64` removes ~20% of the code
 by deleting the 64-bit shift/`memclr` helpers and halving every varint
 operation. The decoder carries no panic paths (all bounds are proven in-bounds),
@@ -382,11 +448,17 @@ allocated. Sizes are identical across these 32-bit targets:
 |---------------|----------:|----------:|------:|
 | **MIN** — integers only, 32-bit | 16 B | 12 B | **28 B** |
 | integers only, 64-bit | 24 B | 12 B | 36 B |
-| `+ sequence` (64-bit) | 32 B | 16 B | 48 B |
+| `+ sequence` (64-bit) | 32 B | 52 B | 84 B |
 | `+ array` (64-bit) | 32 B | 12 B | 44 B |
 | `+ fixlen` (64-bit) | 40 B | 12 B | 52 B |
-| all wire types, 32-bit | 40 B | 16 B | 56 B |
-| **MAX** — all wire types, 64-bit (default) | 48 B | 16 B | **64 B** |
+| all wire types, 32-bit | 40 B | 52 B | 92 B |
+| **MAX** — all wire types, 64-bit (default) | 48 B | 52 B | **100 B** |
+
+The `sequence` rows are where `OStream` grows from 12/16 B to 52 B: that is the
+`LAZY_SEQ_DEPTH`-slot hold-back array
+([above](#sequence-framing-and-the-hold-back-window)) — `4 * 8` bytes of ids plus
+the count. It is the only per-stream cost of omitting all-default sequences, and
+the one knob to turn on a target that cannot spare it.
 
 ## Choosing between the two Rust corelibs
 

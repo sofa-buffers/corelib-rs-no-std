@@ -56,6 +56,14 @@ impl Flush for NoFlush {
 /// 16 B to 52 B at the default of 8. This is the dial for a target that cannot
 /// spare it: a schema nesting deeper than the window still encodes correctly,
 /// it just keeps the empty frame of the sequences beyond it.
+///
+/// This bound is the **heap-free profile allowance** of CORELIB_PLAN §6 ("How
+/// deep the hold-back reaches"): an implementation that can allocate MUST hold
+/// back to the full [`MAX_DEPTH`] and is canonical at every depth; a heap-free
+/// one MAY bound the run, and **MUST document the bound**, because two encoders
+/// that disagree about it disagree about bytes — not about validity. That
+/// documentation, with the measured RAM cost next to it, is the README's
+/// "Sequence framing" section; keep the two in sync when changing this value.
 #[cfg(feature = "sequence")]
 pub const LAZY_SEQ_DEPTH: usize = 8;
 
@@ -226,7 +234,16 @@ impl<'a, F: Flush> OStream<'a, F> {
     fn commit_pending(&mut self) -> Result<()> {
         let n = core::mem::replace(&mut self.npending, 0);
         for i in 0..n {
-            let id = self.pending[i];
+            // `get` rather than `self.pending[i]`: `n <= LAZY_SEQ_DEPTH` holds by
+            // construction, but the indexing form still emits a
+            // `core::panicking::panic_bounds_check` path that the linker then
+            // keeps in the image. The whole codec is meant to link without
+            // `core::panicking` (README "Footprint"), so prove the access
+            // in-bounds instead of asserting it.
+            let id = match self.pending.get(i) {
+                Some(&id) => id,
+                None => break,
+            };
             self.write_varint(((id as Unsigned) << 3) | T_SEQUENCE_START as Unsigned)?;
         }
         Ok(())
@@ -378,7 +395,12 @@ impl<'a, F: Flush> OStream<'a, F> {
     /// [`OStream::write_sequence_end_keep`] forces the frame out.
     ///
     /// Costs no output bytes and no allocation; the held-back ids live in a
-    /// [`LAZY_SEQ_DEPTH`]-slot array inside the encoder.
+    /// [`LAZY_SEQ_DEPTH`]-slot array inside the encoder. That window is the one
+    /// place this heap-free port is not canonical: opening a sequence while the
+    /// window is full commits the pending run and frames this one **eagerly**, so
+    /// an all-default sequence nested deeper than [`LAZY_SEQ_DEPTH`] keeps the
+    /// empty frame §2 would have omitted — well-formed, decodes to the same
+    /// value, documented in the README (CORELIB_PLAN §6).
     #[cfg(feature = "sequence")]
     #[inline]
     pub fn write_sequence_begin_lazy(&mut self, id: Id) -> Result<()> {
@@ -388,13 +410,16 @@ impl<'a, F: Flush> OStream<'a, F> {
         if id > ID_MAX {
             return Err(Error::Argument);
         }
-        if self.npending < LAZY_SEQ_DEPTH {
-            self.pending[self.npending] = id;
+        // `get_mut` is the panic-free spelling of `self.npending < LAZY_SEQ_DEPTH`
+        // followed by an index: `None` *is* the window-full case.
+        if let Some(slot) = self.pending.get_mut(self.npending) {
+            *slot = id;
             self.npending += 1;
         } else {
             // Deeper than the hold-back window: commit the run and frame eagerly,
             // which keeps the suffix invariant above. Valid, just not canonical if
-            // this sequence turns out to be all-default.
+            // this sequence turns out to be all-default (CORELIB_PLAN §6, the
+            // heap-free allowance — see [`LAZY_SEQ_DEPTH`]).
             self.commit_pending()?;
             self.write_varint(((id as Unsigned) << 3) | T_SEQUENCE_START as Unsigned)?;
         }

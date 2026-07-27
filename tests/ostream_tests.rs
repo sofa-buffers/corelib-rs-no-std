@@ -387,22 +387,146 @@ fn lazy_sequence_after_content_is_independent() {
     assert_eq!(bytes, [0x00, 0x01, 0x10, 0x03]);
 }
 
-/// Held-back headers are not in the buffer yet, so a small output buffer sees the
-/// same bytes as a big one: the chunked-encode guarantee is unaffected.
+/// A committed run split across a flush boundary produces exactly the one-shot
+/// bytes: the same writes through a 3-byte flushing window and through a buffer
+/// large enough for the whole message agree byte for byte.
+///
+/// Note what this deliberately does *not* claim to test. A flush cannot land
+/// while a run is still held back — that is unreachable **by construction**, not
+/// merely untested: held-back headers are encoder state (`pending`/`npending`),
+/// they occupy no buffer space, and the buffer only ever fills inside
+/// `push_byte`, which is reached from a write that has already committed the run
+/// in `write_id_type`. So the interesting boundary is the one exercised here:
+/// the run is committed first, and the flush then falls in the middle of the
+/// bytes it produced (here after `0E 00 2A`, before the closing `07`).
 #[test]
-fn lazy_framing_is_buffer_size_independent() {
-    let mut out: Vec<u8> = Vec::new();
-    let mut buf = [0u8; 3];
-    {
-        let mut os = sofab::OStream::with_flush(&mut buf, 0, |d: &[u8]| out.extend_from_slice(d));
+fn a_committed_run_survives_a_flush_boundary() {
+    fn writes<F: sofab::Flush>(os: &mut OStream<F>) {
         os.write_sequence_begin_lazy(1).unwrap();
         os.write_sequence_begin_lazy(2).unwrap();
         os.write_sequence_end().unwrap();
         os.write_unsigned(0, 42).unwrap();
         os.write_sequence_end().unwrap();
+    }
+
+    let mut out: Vec<u8> = Vec::new();
+    let mut buf = [0u8; 3]; // smaller than the message: at least one flush lands
+    {
+        let mut os = sofab::OStream::with_flush(&mut buf, 0, |d: &[u8]| out.extend_from_slice(d));
+        writes(&mut os);
         os.flush();
     }
+
+    // The same writes into a buffer large enough that no flush ever happens.
+    let one_shot = encode(writes);
+
+    assert_eq!(out, one_shot);
     assert_eq!(out, [0x0E, 0x00, 0x2A, 0x07]);
+}
+
+// --- the hold-back window (LAZY_SEQ_DEPTH, CORELIB_PLAN §6) ------------------
+//
+// This is the heap-free profile of CORELIB_PLAN §6 "How deep the hold-back
+// reaches": a port that can allocate must hold back to the full MAX_DEPTH and is
+// canonical at every depth; this one bounds the pending run at `LAZY_SEQ_DEPTH`
+// and frames eagerly beyond it, which is well-formed and decodes to the same
+// value but is *not* canonical. The bound is therefore observable in the bytes,
+// so it is pinned by tests — changing `LAZY_SEQ_DEPTH` must fail here (and be
+// re-documented in the README) rather than silently changing what this encoder
+// puts on the wire.
+
+/// At the window's edge the canonical result still holds: `LAZY_SEQ_DEPTH`
+/// nested sequences, all contentless, vanish completely.
+#[test]
+fn contentless_nesting_within_the_window_emits_nothing() {
+    let bytes = encode(|os| {
+        for _ in 0..sofab::LAZY_SEQ_DEPTH {
+            os.write_sequence_begin_lazy(1).unwrap();
+        }
+        for _ in 0..sofab::LAZY_SEQ_DEPTH {
+            os.write_sequence_end().unwrap();
+        }
+    });
+    assert!(bytes.is_empty(), "got {bytes:02x?}");
+}
+
+/// One level past the window, the documented fallback kicks in: opening the
+/// `LAZY_SEQ_DEPTH + 1`-th sequence commits the whole held-back run and frames
+/// itself eagerly, so all of them keep the empty frame §2 would have omitted.
+/// Non-canonical, but well-formed — and it decodes back to the same (all-default)
+/// value, which is why the profile is allowed to do it.
+#[test]
+fn contentless_nesting_one_past_the_window_keeps_every_frame() {
+    const DEPTH: usize = sofab::LAZY_SEQ_DEPTH + 1;
+    let bytes = encode(|os| {
+        for _ in 0..DEPTH {
+            os.write_sequence_begin_lazy(1).unwrap();
+        }
+        for _ in 0..DEPTH {
+            os.write_sequence_end().unwrap();
+        }
+    });
+    // id 1 -> header (1 << 3) | SEQUENCE_START = 0x0E; end marker = 0x07.
+    let mut expected = vec![0x0E; DEPTH];
+    expected.extend(std::iter::repeat(0x07).take(DEPTH));
+    assert_eq!(bytes, expected);
+}
+
+/// Deep nesting, far past the window: 40 contentless levels. A port that holds
+/// back to MAX_DEPTH emits zero bytes here; this one emits the frames of every
+/// level that was pushed out of the window, and only the innermost partial run
+/// still vanishes.
+///
+/// The count is exact, not approximate. Each fallback cycle consumes
+/// `LAZY_SEQ_DEPTH + 1` levels — eight fill the window, the ninth commits them
+/// and frames itself — so with a window of 8 the commits happen at levels 9, 18,
+/// 27 and 36: levels 1..=36 are framed, while levels 37..=40 are still held back
+/// when they close and disappear.
+#[test]
+fn contentless_nesting_far_past_the_window_frames_all_but_the_last_run() {
+    const DEPTH: usize = 40;
+    let cycle = sofab::LAZY_SEQ_DEPTH + 1;
+    let framed = DEPTH / cycle * cycle; // 36 at the default window of 8
+    let mut buf = [0u8; 256];
+    let used = {
+        let mut os = OStream::new(&mut buf);
+        for _ in 0..DEPTH {
+            os.write_sequence_begin_lazy(1).unwrap();
+        }
+        for _ in 0..DEPTH {
+            os.write_sequence_end().unwrap();
+        }
+        os.bytes_used()
+    };
+    let bytes = buf[..used].to_vec();
+
+    let mut expected = vec![0x0E; framed];
+    expected.extend(std::iter::repeat(0x07).take(framed));
+    assert_eq!(bytes, expected, "framed levels: {framed}");
+}
+
+/// Content deep inside a nest far past the window still comes out in wire order:
+/// the eager fallback commits ancestors in the same outermost-first order as
+/// `commit_pending`, so the frames are properly nested around the leaf.
+#[test]
+fn content_past_the_window_keeps_wire_order() {
+    const DEPTH: usize = 40;
+    let mut buf = [0u8; 256];
+    let used = {
+        let mut os = OStream::new(&mut buf);
+        for _ in 0..DEPTH {
+            os.write_sequence_begin_lazy(1).unwrap();
+        }
+        os.write_unsigned(0, 42).unwrap();
+        for _ in 0..DEPTH {
+            os.write_sequence_end().unwrap();
+        }
+        os.bytes_used()
+    };
+    let mut expected = vec![0x0E; DEPTH];
+    expected.extend([0x00, 0x2A]);
+    expected.extend(std::iter::repeat(0x07).take(DEPTH));
+    assert_eq!(buf[..used], expected[..]);
 }
 
 // --- error / overflow behavior ---------------------------------------------
@@ -467,6 +591,62 @@ fn sequence_depth_over_max_is_argument_error() {
     }
     // The 256th must be rejected without writing anything.
     assert_eq!(os.write_sequence_begin_lazy(0), Err(Error::Argument));
+}
+
+/// Depth bookkeeping, the invariant the `MAX_DEPTH` guard rests on: every closer
+/// must give the budget back. Both closers and both open paths (held back, and
+/// eagerly framed past the window) are exercised — a `depth` that is not
+/// decremented on the drop path would make a long-running encoder refuse
+/// sequences after 255 of them, and one decremented twice would let a message
+/// nest past `MAX_DEPTH`.
+#[test]
+fn closing_a_sequence_returns_the_depth_budget() {
+    const MAX: u32 = sofab::MAX_DEPTH;
+    let mut buf = [0u8; 4096];
+    let mut os = OStream::new(&mut buf);
+
+    for closer in 0..2 {
+        // Fill the budget exactly, then prove it is full.
+        for _ in 0..MAX {
+            os.write_sequence_begin_lazy(1).unwrap();
+        }
+        assert_eq!(os.write_sequence_begin_lazy(1), Err(Error::Argument));
+        // Give it all back — with `end` on the first pass, `end_keep` on the
+        // second, so both closers are shown to decrement exactly once.
+        for _ in 0..MAX {
+            if closer == 0 {
+                os.write_sequence_end().unwrap();
+            } else {
+                os.write_sequence_end_keep().unwrap();
+            }
+        }
+        // Budget restored: the whole nest opens again, and still stops at MAX.
+        for _ in 0..MAX {
+            os.write_sequence_begin_lazy(1).unwrap();
+        }
+        assert_eq!(os.write_sequence_begin_lazy(1), Err(Error::Argument));
+        for _ in 0..MAX {
+            os.write_sequence_end().unwrap();
+        }
+    }
+}
+
+/// The drop path on its own: repeatedly opening and closing a contentless
+/// sequence must neither emit bytes nor consume depth, however often it happens.
+#[test]
+fn dropped_sequences_leak_neither_bytes_nor_depth() {
+    let mut buf = [0u8; 512];
+    let mut os = OStream::new(&mut buf);
+    for _ in 0..(sofab::MAX_DEPTH * 4) {
+        os.write_sequence_begin_lazy(1).unwrap();
+        os.write_sequence_end().unwrap();
+    }
+    assert_eq!(os.bytes_used(), 0);
+    // Depth is back at zero, so a full-depth nest still opens.
+    for _ in 0..sofab::MAX_DEPTH {
+        os.write_sequence_begin_lazy(1).unwrap();
+    }
+    assert_eq!(os.write_sequence_begin_lazy(1), Err(Error::Argument));
 }
 
 // --- streaming flush sink ---------------------------------------------------

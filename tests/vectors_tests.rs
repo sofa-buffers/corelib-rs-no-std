@@ -36,6 +36,21 @@ use sofab::ArrayKind;
 use sofab::{Error, Flush, IStream, Id, OStream, Signed, Unsigned, Visitor};
 
 /// The shared vectors, embedded from the verbatim asset copy.
+///
+/// **Which column this suite asserts.** Every vector carries two encodings:
+/// `serialized` — the dense, primitive-layer ground truth, in which every
+/// sequence is framed — and `serialized_sparse`, the canonical *message-layer*
+/// form where a sequence-typed field equal to its declared default is omitted
+/// (MESSAGE_SPEC §2). This corelib has **no message layer**: it knows nothing
+/// about schemas, declared defaults, or which closer a schema position calls
+/// for, so it cannot produce the sparse form. This suite therefore asserts
+/// `serialized` only, closing every sequence with `end_keep` (see
+/// `write_fields`). `serialized_sparse` is exercised by the **generator's**
+/// conformance drivers (`sofabgen`'s `tests/conformance/<lang>/`), which own the
+/// layer that decides per field between `write_sequence_end` and
+/// `write_sequence_end_keep`. The column is present here only because the asset
+/// file is copied verbatim from the documentation repo; its absence from the
+/// assertions below is deliberate, not a coverage gap.
 const VECTORS_JSON: &str = include_str!("../assets/test_vectors.json");
 
 // --- requires / capability gating -------------------------------------------
