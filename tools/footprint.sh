@@ -96,7 +96,7 @@ impl Visitor for Sink {
     #[cfg(feature = "array")]  { let _ = os.write_array_unsigned(8, &[a as u32, 1, 2]); let _ = os.write_array_signed(9, &[b as i32, -1, 2]); }
     #[cfg(all(feature = "array", feature = "fixlen"))] { let _ = os.write_array_fp32(10, &[f32::from_bits(a as u32), f32::from_bits(1)]); }
     #[cfg(all(feature = "array", feature = "fp64"))]   { let _ = os.write_array_fp64(11, &[f64::from_bits(a), f64::from_bits(1)]); }
-    #[cfg(feature = "sequence")] { let _ = os.write_sequence_begin(12); let _ = os.write_sequence_end(); }
+    #[cfg(feature = "sequence")] { let _ = os.write_sequence_begin_lazy(12); let _ = os.write_sequence_end_keep(); }
     os.bytes_used()
 }
 #[no_mangle] pub extern "C" fn dec(buf: *const u8, len: usize) -> u64 {
@@ -271,11 +271,11 @@ impl Visitor for Gen {
     let _ = os.write_signed(3, b as sofab::Signed);
     let _ = os.write_str(8, "hi");
     let _ = os.write_blob(9, &[1, 2, 3]);
-    let _ = os.write_sequence_begin(10);
+    let _ = os.write_sequence_begin_lazy(10);
     let _ = os.write_fp32(0, f32::from_bits(a as u32));
     let _ = os.write_fp64(1, f64::from_bits(a));
     let _ = os.write_sequence_end();
-    let _ = os.write_sequence_begin(11);
+    let _ = os.write_sequence_begin_lazy(11);
     let _ = os.write_array_unsigned(2, &[a as u16, 1]);
     let _ = os.write_array_signed(5, &[b as i32, -1]);
     let _ = os.write_array_fp64(12, &[f64::from_bits(a)]);

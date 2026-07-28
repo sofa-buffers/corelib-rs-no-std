@@ -263,7 +263,7 @@ fn write_array_of_fp64() {
 fn write_nested_sequence() {
     let bytes = encode(|os| {
         os.write_unsigned(0, 42).unwrap();
-        os.write_sequence_begin(1).unwrap();
+        os.write_sequence_begin_lazy(1).unwrap();
         os.write_unsigned(0, 42).unwrap();
         os.write_signed(2, -42).unwrap();
         os.write_sequence_end().unwrap();
@@ -279,7 +279,7 @@ fn write_nested_sequence() {
 fn write_nested_sequence_with_array() {
     let bytes = encode(|os| {
         os.write_unsigned(0, 42).unwrap();
-        os.write_sequence_begin(3).unwrap();
+        os.write_sequence_begin_lazy(3).unwrap();
         os.write_unsigned(0, 42).unwrap();
         os.write_array_signed(3, &[-42_i32, -43, -44]).unwrap();
         os.write_sequence_end().unwrap();
@@ -289,6 +289,390 @@ fn write_nested_sequence_with_array() {
         bytes,
         [0x00, 0x2A, 0x1E, 0x00, 0x2A, 0x1C, 0x03, 0x53, 0x55, 0x57, 0x07, 0x11, 0x53]
     );
+}
+
+// --- lazy sequence framing (MESSAGE_SPEC §2) --------------------------------
+
+/// An all-default sequence carries no information, so the field is omitted --
+/// where the eager API would have written the two-byte empty frame `0E 07`.
+#[test]
+fn lazy_sequence_without_content_emits_nothing() {
+    let bytes = encode(|os| {
+        os.write_sequence_begin_lazy(1).unwrap();
+        os.write_sequence_end().unwrap();
+    });
+    assert!(bytes.is_empty(), "got {bytes:02x?}");
+}
+
+/// `end_keep` forces a contentless frame onto the wire — the array element and
+/// explicit-empty cases of §2/§5.1.
+#[test]
+fn end_keep_frames_a_contentless_sequence() {
+    let bytes = encode(|os| {
+        os.write_sequence_begin_lazy(1).unwrap();
+        os.write_sequence_end_keep().unwrap();
+    });
+    assert_eq!(bytes, [0x0E, 0x07]);
+}
+
+/// Forcing a frame forces its ancestors too: the outer sequence got content (the
+/// inner frame), so it is framed as well.
+#[test]
+fn end_keep_commits_the_enclosing_run() {
+    let bytes = encode(|os| {
+        os.write_sequence_begin_lazy(1).unwrap();
+        os.write_sequence_begin_lazy(2).unwrap();
+        os.write_sequence_end_keep().unwrap();
+        os.write_sequence_end().unwrap();
+    });
+    assert_eq!(bytes, [0x0E, 0x16, 0x07, 0x07]);
+}
+
+/// With content it makes no difference — the headers are already out.
+#[test]
+fn end_keep_matches_end_once_content_exists() {
+    let with_keep = encode(|os| {
+        os.write_sequence_begin_lazy(1).unwrap();
+        os.write_unsigned(0, 42).unwrap();
+        os.write_sequence_end_keep().unwrap();
+    });
+    let with_end = encode(|os| {
+        os.write_sequence_begin_lazy(1).unwrap();
+        os.write_unsigned(0, 42).unwrap();
+        os.write_sequence_end().unwrap();
+    });
+    assert_eq!(with_keep, [0x0E, 0x00, 0x2A, 0x07]);
+    assert_eq!(with_keep, with_end);
+}
+
+/// One child field commits the whole held-back run, outermost header first, so a
+/// non-default leaf deep inside brings every enclosing frame back in wire order.
+#[test]
+fn lazy_sequence_commits_the_whole_run_on_first_content() {
+    let bytes = encode(|os| {
+        os.write_sequence_begin_lazy(1).unwrap();
+        os.write_sequence_begin_lazy(2).unwrap();
+        os.write_unsigned(0, 42).unwrap();
+        os.write_sequence_end().unwrap();
+        os.write_sequence_end().unwrap();
+    });
+    assert_eq!(bytes, [0x0E, 0x16, 0x00, 0x2A, 0x07, 0x07]);
+}
+
+/// Only the empty inner sequence drops; the outer one has content (the leaf) and
+/// is framed. This is the interleaving the naive "drop the whole run" would get
+/// wrong.
+#[test]
+fn lazy_sequence_drops_only_the_empty_inner_one() {
+    let bytes = encode(|os| {
+        os.write_sequence_begin_lazy(1).unwrap();
+        os.write_sequence_begin_lazy(2).unwrap();
+        os.write_sequence_end().unwrap();
+        os.write_unsigned(0, 42).unwrap();
+        os.write_sequence_end().unwrap();
+    });
+    assert_eq!(bytes, [0x0E, 0x00, 0x2A, 0x07]);
+}
+
+/// A lazily framed sequence *after* content in the same scope, and the sibling
+/// order, stay intact.
+#[test]
+fn lazy_sequence_after_content_is_independent() {
+    let bytes = encode(|os| {
+        os.write_unsigned(0, 1).unwrap();
+        os.write_sequence_begin_lazy(1).unwrap();
+        os.write_sequence_end().unwrap();
+        os.write_unsigned(2, 3).unwrap();
+    });
+    assert_eq!(bytes, [0x00, 0x01, 0x10, 0x03]);
+}
+
+/// A committed run split across a flush boundary produces exactly the one-shot
+/// bytes: the same writes through a 3-byte flushing window and through a buffer
+/// large enough for the whole message agree byte for byte.
+///
+/// Note what this deliberately does *not* claim to test. Held-back headers are
+/// encoder state (`pending`/`npending`) and occupy no buffer space, so no flush
+/// can land *before* a run starts committing. It can land in the middle of one,
+/// though — `commit_pending` writes through `push_byte` like everything else —
+/// and with a sink that is uneventful: the bytes go to the sink and the run
+/// carries on. Without a sink the same cut is `BufferFull`, which is a different
+/// test (`a_cut_run_keeps_the_ids_it_did_not_emit`). What is exercised here is
+/// the boundary in the middle of the bytes a committed run produced (after
+/// `0E 00 2A`, before the closing `07`).
+#[test]
+fn a_committed_run_survives_a_flush_boundary() {
+    fn writes<F: sofab::Flush>(os: &mut OStream<F>) {
+        os.write_sequence_begin_lazy(1).unwrap();
+        os.write_sequence_begin_lazy(2).unwrap();
+        os.write_sequence_end().unwrap();
+        os.write_unsigned(0, 42).unwrap();
+        os.write_sequence_end().unwrap();
+    }
+
+    let mut out: Vec<u8> = Vec::new();
+    let mut buf = [0u8; 3]; // smaller than the message: at least one flush lands
+    {
+        let mut os = sofab::OStream::with_flush(&mut buf, 0, |d: &[u8]| out.extend_from_slice(d));
+        writes(&mut os);
+        os.flush();
+    }
+
+    // The same writes into a buffer large enough that no flush ever happens.
+    let one_shot = encode(writes);
+
+    assert_eq!(out, one_shot);
+    assert_eq!(out, [0x0E, 0x00, 0x2A, 0x07]);
+}
+
+/// A run cut in half by `BufferFull` keeps the ids it did not get to emit.
+///
+/// Without a sink the buffer end is an error, and it can fall *inside*
+/// `commit_pending` — between two `SEQUENCE_START` headers of one run. The
+/// encoder must drop only the headers that actually reached the buffer: the rest
+/// are still open sequences, and `write_sequence_end` will emit an end marker for
+/// every one of them. Forgetting them produces a stream with fewer `begin`s than
+/// `end`s — not a truncated message, a structurally broken one.
+///
+/// The recovery path is the documented one and the one
+/// `buffer_set_switches_buffers` already exercises: install a bigger buffer and
+/// retry the failed write. Concatenating the two buffers must reproduce the
+/// one-shot encode byte for byte.
+///
+/// The cut is driven to *every* position inside the run (1..=3 bytes of room, so
+/// the failure lands after the 1st, 2nd and 3rd header), because the pre-fix bug
+/// lost a different number of ids at each one.
+#[test]
+fn a_cut_run_keeps_the_ids_it_did_not_emit() {
+    // Ids 1..=3 -> single-byte headers 0x0E, 0x16, 0x1E, so every cut inside the
+    // run lands on a header boundary — the case this recovery covers.
+    let one_shot = encode(|os| {
+        for id in 1..=3 {
+            os.write_sequence_begin_lazy(id).unwrap();
+        }
+        os.write_unsigned(0, 42).unwrap();
+        for _ in 0..3 {
+            os.write_sequence_end().unwrap();
+        }
+    });
+    assert_eq!(one_shot, [0x0E, 0x16, 0x1E, 0x00, 0x2A, 0x07, 0x07, 0x07]);
+
+    for room in 1..=3usize {
+        let mut small = [0u8; 3];
+        let mut big = [0u8; 64];
+        let (used_small, used_big) = {
+            let mut os = OStream::new(&mut small[..room]);
+            for id in 1..=3 {
+                os.write_sequence_begin_lazy(id).unwrap();
+            }
+            // The buffer runs out partway through the header run.
+            assert_eq!(
+                os.write_unsigned(0, 42),
+                Err(Error::BufferFull),
+                "room = {room}"
+            );
+            let used_small = os.bytes_used();
+            // Documented recovery: hand the encoder a fresh buffer and retry.
+            os.buffer_set(&mut big, 0);
+            os.write_unsigned(0, 42).unwrap();
+            for _ in 0..3 {
+                os.write_sequence_end().unwrap();
+            }
+            (used_small, os.bytes_used())
+        };
+
+        let mut got = small[..used_small].to_vec();
+        got.extend_from_slice(&big[..used_big]);
+        assert_eq!(got, one_shot, "cut after {room} header byte(s)");
+    }
+}
+
+/// The other caller of the run commit: `write_sequence_end_keep`, which forces an
+/// empty frame out. It has to survive the same cut — this is the closer a
+/// wrapper-array **element** uses (§5.1), where a lost `SEQUENCE_START` would not
+/// merely unbalance the stream but change the decoded array length.
+#[test]
+fn a_cut_run_recovers_through_end_keep_too() {
+    let one_shot = encode(|os| {
+        for id in 1..=3 {
+            os.write_sequence_begin_lazy(id).unwrap();
+        }
+        for _ in 0..3 {
+            os.write_sequence_end_keep().unwrap();
+        }
+    });
+    assert_eq!(one_shot, [0x0E, 0x16, 0x1E, 0x07, 0x07, 0x07]);
+
+    for room in 1..=2usize {
+        let mut small = [0u8; 2];
+        let mut big = [0u8; 64];
+        let (used_small, used_big) = {
+            let mut os = OStream::new(&mut small[..room]);
+            for id in 1..=3 {
+                os.write_sequence_begin_lazy(id).unwrap();
+            }
+            // `end_keep` commits the run first, so the buffer end falls inside it.
+            assert_eq!(
+                os.write_sequence_end_keep(),
+                Err(Error::BufferFull),
+                "room = {room}"
+            );
+            let used_small = os.bytes_used();
+            os.buffer_set(&mut big, 0);
+            // Retrying the failed closer picks the run up where it was cut; the
+            // depth budget was never spent, so all three still close.
+            for _ in 0..3 {
+                os.write_sequence_end_keep().unwrap();
+            }
+            (used_small, os.bytes_used())
+        };
+
+        let mut got = small[..used_small].to_vec();
+        got.extend_from_slice(&big[..used_big]);
+        assert_eq!(got, one_shot, "cut after {room} header byte(s)");
+    }
+}
+
+// --- the hold-back window (LAZY_SEQ_DEPTH, CORELIB_PLAN §6) ------------------
+//
+// This is the heap-free profile of CORELIB_PLAN §6 "How deep the hold-back
+// reaches": a port that can allocate must hold back to the full MAX_DEPTH and is
+// canonical at every depth; this one bounds the pending run at `LAZY_SEQ_DEPTH`
+// and frames eagerly beyond it, which is well-formed and decodes to the same
+// value but is *not* canonical. The bound is therefore observable in the bytes,
+// so it is pinned by tests — changing `LAZY_SEQ_DEPTH` must fail here (and be
+// re-documented in the README) rather than silently changing what this encoder
+// puts on the wire.
+//
+// Every test below nests a **distinct id per level** (level `n` is id `n`), so
+// the expected bytes pin the *order* the headers come out in and not just how
+// many there are. Nesting the same id at every level makes each held-back header
+// the identical byte `0x0E`, which leaves the commit order unobservable: an
+// encoder that framed a sequence before its own ancestors would produce the same
+// byte string, and the decoder cannot tell either — the result is still a
+// well-nested (but differently shaped) tree.
+
+/// The `SEQUENCE_START` header bytes for `id`, so a test can expect a nest of
+/// distinct ids. Ids past 15 need a two-byte varint, which is exactly why this is
+/// built rather than written out as literals.
+fn seq_start(id: sofab::Id) -> Vec<u8> {
+    let mut out = Vec::new();
+    common::push_varint(&mut out, ((id as u64) << 3) | 6); // 6 = T_SEQUENCE_START
+    out
+}
+
+/// Concatenated `SEQUENCE_START` headers for levels `1..=n`, outermost first.
+fn seq_starts(n: usize) -> Vec<u8> {
+    (1..=n as sofab::Id).flat_map(seq_start).collect()
+}
+
+/// At the window's edge the canonical result still holds: `LAZY_SEQ_DEPTH`
+/// nested sequences, all contentless, vanish completely.
+#[test]
+fn contentless_nesting_within_the_window_emits_nothing() {
+    let bytes = encode(|os| {
+        for id in 1..=sofab::LAZY_SEQ_DEPTH as sofab::Id {
+            os.write_sequence_begin_lazy(id).unwrap();
+        }
+        for _ in 0..sofab::LAZY_SEQ_DEPTH {
+            os.write_sequence_end().unwrap();
+        }
+    });
+    assert!(bytes.is_empty(), "got {bytes:02x?}");
+}
+
+/// One level past the window, the documented fallback kicks in: opening the
+/// `LAZY_SEQ_DEPTH + 1`-th sequence commits the whole held-back run and frames
+/// itself eagerly, so all of them keep the empty frame §2 would have omitted.
+/// Non-canonical, but well-formed — and it decodes back to the same (all-default)
+/// value, which is why the profile is allowed to do it.
+///
+/// The ids also pin the *order*: the ninth sequence must commit its eight
+/// ancestors first and frame itself last, so the headers read `1 2 … 9` and not
+/// `9 1 2 … 8`. Both orders are well-nested and decode without complaint, so the
+/// distinct ids are the only thing that can tell them apart.
+#[test]
+fn contentless_nesting_one_past_the_window_keeps_every_frame() {
+    const DEPTH: usize = sofab::LAZY_SEQ_DEPTH + 1;
+    let bytes = encode(|os| {
+        for id in 1..=DEPTH as sofab::Id {
+            os.write_sequence_begin_lazy(id).unwrap();
+        }
+        for _ in 0..DEPTH {
+            os.write_sequence_end().unwrap();
+        }
+    });
+    // Headers for ids 1..=DEPTH, outermost first; end marker = 0x07.
+    let mut expected = seq_starts(DEPTH);
+    expected.extend(std::iter::repeat(0x07).take(DEPTH));
+    assert_eq!(bytes, expected);
+}
+
+/// Deep nesting, far past the window: 40 contentless levels. A port that holds
+/// back to MAX_DEPTH emits zero bytes here; this one emits the frames of every
+/// level that was pushed out of the window, and only the innermost partial run
+/// still vanishes.
+///
+/// The count is exact, not approximate. Each fallback cycle consumes
+/// `LAZY_SEQ_DEPTH + 1` levels — eight fill the window, the ninth commits them
+/// and frames itself — so with a window of 8 the commits happen at levels 9, 18,
+/// 27 and 36: levels 1..=36 are framed, while levels 37..=40 are still held back
+/// when they close and disappear.
+///
+/// With one id per level the expected bytes say *which* levels those are — ids
+/// 1..=36 in ascending order — rather than only how many headers appeared.
+#[test]
+fn contentless_nesting_far_past_the_window_frames_all_but_the_last_run() {
+    const DEPTH: usize = 40;
+    let cycle = sofab::LAZY_SEQ_DEPTH + 1;
+    let framed = DEPTH / cycle * cycle; // 36 at the default window of 8
+    let mut buf = [0u8; 256];
+    let used = {
+        let mut os = OStream::new(&mut buf);
+        for id in 1..=DEPTH as sofab::Id {
+            os.write_sequence_begin_lazy(id).unwrap();
+        }
+        for _ in 0..DEPTH {
+            os.write_sequence_end().unwrap();
+        }
+        os.bytes_used()
+    };
+    let bytes = buf[..used].to_vec();
+
+    let mut expected = seq_starts(framed);
+    expected.extend(std::iter::repeat(0x07).take(framed));
+    assert_eq!(bytes, expected, "framed levels: {framed}");
+}
+
+/// Content deep inside a nest far past the window still comes out in wire order:
+/// the eager fallback commits ancestors in the same outermost-first order as
+/// `commit_pending`, so the frames are properly nested around the leaf.
+///
+/// This is the test that needs distinct ids most. Nesting id 1 forty times makes
+/// every header the byte `0x0E`, and an encoder that framed each window-full
+/// sequence *before* its own ancestors would emit the identical byte string —
+/// and a stream that still decodes as a clean 40-deep nest, just with the wrong
+/// sequence at the wrong depth. With one id per level the ancestors-first commit
+/// order is what the bytes assert.
+#[test]
+fn content_past_the_window_keeps_wire_order() {
+    const DEPTH: usize = 40;
+    let mut buf = [0u8; 256];
+    let used = {
+        let mut os = OStream::new(&mut buf);
+        for id in 1..=DEPTH as sofab::Id {
+            os.write_sequence_begin_lazy(id).unwrap();
+        }
+        os.write_unsigned(0, 42).unwrap();
+        for _ in 0..DEPTH {
+            os.write_sequence_end().unwrap();
+        }
+        os.bytes_used()
+    };
+    let mut expected = seq_starts(DEPTH);
+    expected.extend([0x00, 0x2A]);
+    expected.extend(std::iter::repeat(0x07).take(DEPTH));
+    assert_eq!(buf[..used], expected[..]);
 }
 
 // --- error / overflow behavior ---------------------------------------------
@@ -349,10 +733,99 @@ fn sequence_depth_over_max_is_argument_error() {
     let mut os = OStream::new(&mut buf);
     // Opening MAX_DEPTH (255) nested sequences is fine.
     for _ in 0..255 {
-        os.write_sequence_begin(0).unwrap();
+        os.write_sequence_begin_lazy(0).unwrap();
     }
     // The 256th must be rejected without writing anything.
-    assert_eq!(os.write_sequence_begin(0), Err(Error::Argument));
+    assert_eq!(os.write_sequence_begin_lazy(0), Err(Error::Argument));
+}
+
+/// Depth bookkeeping, the invariant the `MAX_DEPTH` guard rests on: every closer
+/// must give the budget back. Both closers and both open paths (held back, and
+/// eagerly framed past the window) are exercised — a `depth` that is not
+/// decremented on the drop path would make a long-running encoder refuse
+/// sequences after 255 of them, and one decremented twice would let a message
+/// nest past `MAX_DEPTH`.
+#[test]
+fn closing_a_sequence_returns_the_depth_budget() {
+    const MAX: u32 = sofab::MAX_DEPTH;
+    let mut buf = [0u8; 4096];
+    let mut os = OStream::new(&mut buf);
+
+    for closer in 0..2 {
+        // Fill the budget exactly, then prove it is full.
+        for _ in 0..MAX {
+            os.write_sequence_begin_lazy(1).unwrap();
+        }
+        assert_eq!(os.write_sequence_begin_lazy(1), Err(Error::Argument));
+        // Give it all back — with `end` on the first pass, `end_keep` on the
+        // second, so both closers are shown to decrement exactly once.
+        for _ in 0..MAX {
+            if closer == 0 {
+                os.write_sequence_end().unwrap();
+            } else {
+                os.write_sequence_end_keep().unwrap();
+            }
+        }
+        // Budget restored: the whole nest opens again, and still stops at MAX.
+        for _ in 0..MAX {
+            os.write_sequence_begin_lazy(1).unwrap();
+        }
+        assert_eq!(os.write_sequence_begin_lazy(1), Err(Error::Argument));
+        for _ in 0..MAX {
+            os.write_sequence_end().unwrap();
+        }
+    }
+
+    // The other direction. The loop above cannot see a closer that gives back
+    // *two* levels: closing a full nest MAX times then saturates at zero, which
+    // looks exactly like giving back one. So close a *single* sequence out of two
+    // open ones and measure the remaining budget exactly — one level is still
+    // open, so MAX - 1 further opens must fit and the next must be refused. A
+    // double decrement leaves the budget at MAX here and the last open succeeds.
+    //
+    // All three decrement sites are covered: the drop path of `end` (header still
+    // held back), its emit path (a field write committed the run first), and
+    // `end_keep`.
+    for site in 0..3 {
+        let mut buf = [0u8; 1024];
+        let mut os = OStream::new(&mut buf);
+        os.write_sequence_begin_lazy(1).unwrap();
+        os.write_sequence_begin_lazy(2).unwrap();
+        match site {
+            0 => os.write_sequence_end().unwrap(),
+            1 => {
+                os.write_unsigned(3, 7).unwrap(); // commits the run
+                os.write_sequence_end().unwrap();
+            }
+            _ => os.write_sequence_end_keep().unwrap(),
+        }
+        for _ in 0..(MAX - 1) {
+            os.write_sequence_begin_lazy(1).unwrap();
+        }
+        assert_eq!(
+            os.write_sequence_begin_lazy(1),
+            Err(Error::Argument),
+            "closer {site} handed back more than one depth level"
+        );
+    }
+}
+
+/// The drop path on its own: repeatedly opening and closing a contentless
+/// sequence must neither emit bytes nor consume depth, however often it happens.
+#[test]
+fn dropped_sequences_leak_neither_bytes_nor_depth() {
+    let mut buf = [0u8; 512];
+    let mut os = OStream::new(&mut buf);
+    for _ in 0..(sofab::MAX_DEPTH * 4) {
+        os.write_sequence_begin_lazy(1).unwrap();
+        os.write_sequence_end().unwrap();
+    }
+    assert_eq!(os.bytes_used(), 0);
+    // Depth is back at zero, so a full-depth nest still opens.
+    for _ in 0..sofab::MAX_DEPTH {
+        os.write_sequence_begin_lazy(1).unwrap();
+    }
+    assert_eq!(os.write_sequence_begin_lazy(1), Err(Error::Argument));
 }
 
 // --- streaming flush sink ---------------------------------------------------

@@ -100,7 +100,7 @@ fn perf_encode(buf: &mut [u8]) -> usize {
     os.write_array_unsigned(9, &PERF_SAMPLES).unwrap();
     os.write_array_signed(10, &PERF_DELTAS).unwrap();
     os.write_array_fp64(11, &PERF_FP64).unwrap();
-    os.write_sequence_begin(12).unwrap();
+    os.write_sequence_begin_lazy(12).unwrap();
     os.write_unsigned(1, 99).unwrap();
     os.write_signed(2, -7).unwrap();
     os.write_sequence_end().unwrap();
@@ -183,6 +183,20 @@ fn perf_encode_u64(buf: &mut [u8], src: &[u64]) -> usize {
 // ---------------------------------------------------------------------------
 // measurement
 // ---------------------------------------------------------------------------
+
+/// Fixed iteration count from `SOFAB_PERF_ITERS`, replacing the adaptive ~1 s
+/// loop with exactly N iterations of every workload.
+///
+/// This is what makes the instruction counts in the README reproducible: run the
+/// tool under `valgrind --tool=callgrind` at two different N and difference the
+/// totals — `(Ir(N2) - Ir(N1)) / (N2 - N1)` is the per-op instruction cost, with
+/// process start-up, warm-up and reporting cancelling out. The time-derived
+/// numbers the tool prints are meaningless in this mode (and under callgrind);
+/// only the callgrind totals are.
+fn fixed_iters() -> Option<u64> {
+    std::env::var("SOFAB_PERF_ITERS").ok()?.parse().ok()
+}
+
 struct PerfResult {
     iters: u64,
     cycles_op: f64, // hardware cycles per operation
@@ -218,6 +232,7 @@ fn measure_encode(mut encode: impl FnMut() -> usize) -> (PerfResult, usize) {
         msg = encode(); // warmup
     }
 
+    let fixed = fixed_iters();
     let mut sink: usize = 0;
     let mut it: u64 = 0;
     let c0 = cycles::read();
@@ -226,9 +241,19 @@ fn measure_encode(mut encode: impl FnMut() -> usize) -> (PerfResult, usize) {
     loop {
         sink = sink.wrapping_add(encode());
         it += 1;
-        el = cpu_now() - t0;
-        if el >= 1.0 {
-            break;
+        // In fixed mode the clock is read once, at the end: a `clock_gettime`
+        // per iteration would otherwise cost more instructions than the workload
+        // and land in the per-op count.
+        if let Some(n) = fixed {
+            if it >= n {
+                el = cpu_now() - t0;
+                break;
+            }
+        } else {
+            el = cpu_now() - t0;
+            if el >= 1.0 {
+                break;
+            }
         }
     }
     let c1 = cycles::read();
@@ -251,6 +276,7 @@ fn measure_decode(buf: &[u8]) -> PerfResult {
     }
     black_box(out.acc);
 
+    let fixed = fixed_iters();
     let mut sink: u64 = 0;
     let mut it: u64 = 0;
     let c0 = cycles::read();
@@ -261,9 +287,17 @@ fn measure_decode(buf: &[u8]) -> PerfResult {
         perf_decode(black_box(buf), &mut o);
         sink = sink.wrapping_add(o.acc);
         it += 1;
-        el = cpu_now() - t0;
-        if el >= 1.0 {
-            break;
+        // See `measure_encode`: one clock read at the end in fixed mode.
+        if let Some(n) = fixed {
+            if it >= n {
+                el = cpu_now() - t0;
+                break;
+            }
+        } else {
+            el = cpu_now() - t0;
+            if el >= 1.0 {
+                break;
+            }
         }
     }
     let c1 = cycles::read();
@@ -277,13 +311,36 @@ fn measure_decode(buf: &[u8]) -> PerfResult {
     }
 }
 
+/// Which workloads to run, from `SOFAB_PERF_ONLY` (`encode` / `decode` /
+/// `encode_u64` / `decode_u64`); unset runs all four, as it always has.
+///
+/// Companion to [`fixed_iters`]: an instruction-count profiler measures a whole
+/// process, so isolating one workload's per-op cost means running only it.
+fn selected(name: &str) -> bool {
+    match std::env::var("SOFAB_PERF_ONLY") {
+        Ok(only) => only == name,
+        Err(_) => true,
+    }
+}
+
 fn main() {
     let mut buffer = [0u8; 512];
 
     println!("=== SofaBuffers Rust per-op cost (cycles/op + throughput MB/s) ===");
 
-    let (enc, msg_size) = measure_encode(|| perf_encode(&mut buffer));
-    perf_report("serialize (stream API)", &enc, msg_size);
+    // The message is always encoded once, so the decode workloads have their
+    // input even when the encode workload is not the one being measured.
+    let mut msg_size = perf_encode(&mut buffer);
+    if selected("encode") {
+        // `black_box` on the destination buffer, mirroring the one on the decode
+        // input: the encoded bytes are the same every iteration, so without it
+        // the optimizer is free to hoist the whole workload out of the loop —
+        // measured, it does exactly that, and the reported cost is then the
+        // loop's, not the encoder's.
+        let (enc, size) = measure_encode(|| perf_encode(black_box(&mut buffer)));
+        msg_size = size;
+        perf_report("serialize (stream API)", &enc, msg_size);
+    }
 
     // Sanity check that the decode actually reproduced the data.
     let mut out = PerfOut::default();
@@ -293,19 +350,27 @@ fn main() {
         std::process::exit(1);
     }
 
-    let dec = measure_decode(&buffer[..msg_size]);
-    perf_report("deserialize (stream API)", &dec, msg_size);
+    if selected("decode") {
+        let dec = measure_decode(&buffer[..msg_size]);
+        perf_report("deserialize (stream API)", &dec, msg_size);
+    }
 
     // Second reference workload (ARCHITECTURE.md §10): a standalone 1000-element
     // u64 array, measured with the exact same perf machinery as above.
     let src = perf_make_u64();
     let mut u64_buf = vec![0u8; PERF_N * 11 + 16];
+    let mut u64_size = perf_encode_u64(&mut u64_buf, &src);
 
-    let (enc_u64, u64_size) = measure_encode(|| perf_encode_u64(&mut u64_buf, &src));
-    perf_report("encode u64[1000] (stream API)", &enc_u64, u64_size);
+    if selected("encode_u64") {
+        let (enc_u64, size) = measure_encode(|| perf_encode_u64(black_box(&mut u64_buf), &src));
+        u64_size = size;
+        perf_report("encode u64[1000] (stream API)", &enc_u64, u64_size);
+    }
 
-    let dec_u64 = measure_decode(&u64_buf[..u64_size]);
-    perf_report("decode u64[1000] (stream API)", &dec_u64, u64_size);
+    if selected("decode_u64") {
+        let dec_u64 = measure_decode(&u64_buf[..u64_size]);
+        perf_report("decode u64[1000] (stream API)", &dec_u64, u64_size);
+    }
 
     println!("\ncycles/op tracks code cost; MB/s is this machine's throughput.");
 }

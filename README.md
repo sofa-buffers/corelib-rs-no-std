@@ -180,6 +180,87 @@ for piece in wire.chunks(4) {                 // one packet at a time, from any 
 }
 ```
 
+### Sequence framing, and the hold-back window
+
+A nested message is a **sequence**: `write_sequence_begin_lazy(id)` opens one and
+a closer ends it. MESSAGE_SPEC §2 **omits a sequence-typed field whose value
+equals its declared default**, and "not one child was written" is exactly that
+condition — but the header has to be on the wire *before* the children that
+decide it. Rather than buffer the sub-message (impossible without a heap), the
+encoder **holds the header back**: the ids of the innermost open sequences form a
+pending run, the first field write emits the whole run outermost-first, and the
+closer decides what an empty one does.
+
+| call | effect |
+|------|--------|
+| `write_sequence_begin_lazy(id)` | open a scope, hold its header back (no bytes, no allocation) |
+| `write_sequence_end()` | got no content → **drop it**, header and end marker both |
+| `write_sequence_end_keep()` | emit the run *and* the end marker, so an empty sequence still reaches the wire as `begin`+`end` |
+
+Which closer to use is a **static** property of the position in the schema, not
+of the value: `end` for a `struct`/`union` field and for an array *wrapper*;
+`end_keep` for a wrapper-array **element**, whose presence is what carries a
+dynamic array's length (§5.1), and for an array field that must encode
+"explicitly empty" against a non-empty declared default. Getting it wrong is not
+symmetric — `end_keep` where `end` would do costs one non-canonical empty frame
+that every decoder normalizes away, while the reverse silently changes an
+array's decoded length. So "always framed" is false for a **field** and still
+true for an **element**.
+
+```rust
+let mut buf = [0u8; 32];
+let mut os = sofab::OStream::new(&mut buf);
+os.write_sequence_begin_lazy(1).unwrap();   // a struct field that stays all-default
+os.write_sequence_end().unwrap();
+assert_eq!(os.bytes_used(), 0);             // omitted entirely: zero bytes
+```
+
+**The bound: `LAZY_SEQ_DEPTH = 8`.** The pending run lives in a fixed array
+inside `OStream` — this port has no heap to grow one. CORELIB_PLAN §6 ("How deep
+the hold-back reaches") lets a **heap-free profile** bound the run and requires
+it to document the bound, because two encoders that disagree about it disagree
+about *bytes*, not about validity:
+
+- Up to **8** nested sequences are held back, and an all-default one at any of
+  those depths is **omitted** — the canonical §2 encoding.
+- Open a 9th while eight are pending and the encoder **commits the run and frames
+  that sequence eagerly**. An all-default sequence beyond the window therefore
+  keeps its empty `begin`+`end` frame: still well-formed, still decodes to the
+  same value (it is the non-canonical form §2 already requires every decoder to
+  accept and normalize) — just not canonical. Ports that can allocate
+  (`corelib-rs` and the rest) hold back to the full `MAX_DEPTH` and are canonical
+  at every depth.
+- `MAX_DEPTH` (255) is unaffected: it still bounds the nesting itself, and
+  exceeding it is `Error::Argument`.
+
+The window is the price in RAM, which is why it is 8 and not 255: on Cortex-M0
+the pending array grows `OStream` from **16 B to 52 B** (`4 * LAZY_SEQ_DEPTH`
+plus the count) — see the RAM table under [Footprint](#footprint), where the
+`sequence`-enabled rows carry exactly that cost. A schema nesting deeper than the
+window still encodes **correctly**, it only keeps the empty frames beyond it.
+
+The value is **not configurable**: `sofab::LAZY_SEQ_DEPTH` is a public constant to
+read and test against, but no Cargo feature, `cfg` or environment variable
+changes it — every build of this crate holds back 8. A firmware that nests only
+two or three levels deep and wants those RAM bytes back has to edit the constant
+in a patched or vendored copy of the crate; that changes which bytes the encoder
+emits, so the window tests in
+[`tests/ostream_tests.rs`](tests/ostream_tests.rs) have to be re-stated with it.
+
+**If the buffer runs out while a run is committing.** Held-back ids are encoder
+state, not buffer content, so no flush can split a run *before* it commits. One
+can land in the middle of one, and with a `Flush` sink that is uneventful — the
+bytes go to the sink and the run carries on. Without a sink the same point is
+`Error::BufferFull`, possibly *between* two headers of a single run, and the
+encoder then **keeps the ids it did not emit**, still as the innermost pending
+suffix. Install a bigger buffer with `buffer_set` and retry the failed write: it
+resumes at the cut. That recovery reaches exactly as far as the rest of this
+encoder does and no further — no writer here is atomic on failure, so a cut that
+falls *inside* a multi-byte header (id > 15), or inside any other varint, still
+leaves a partial message behind, exactly as it does for a scalar field. What is
+guaranteed is the structural half: a run never silently drops a `SEQUENCE_START`
+whose `SEQUENCE_END` still gets written.
+
 ### Code generator
 
 The common real use is a schema compiled by **`sofabgen`** into typed structs
@@ -312,7 +393,7 @@ cargo build --lib --all-features --target thumbv7em-none-eabihf
 Integration tests live in `tests/`: `vectors_tests.rs` (replays the shared
 `assets/test_vectors.json`, feature-aware), `ostream_tests.rs`,
 `istream_tests.rs`, `roundtrip_tests.rs`, `api_tests.rs`, and `config_tests.rs`.
-Line coverage is ~93% (`cargo llvm-cov --all-features`). To exercise the whole
+Line coverage is ~92% (`cargo llvm-cov --all-features`). To exercise the whole
 feature powerset, use [`cargo-hack`](https://github.com/taiki-e/cargo-hack):
 
 ```bash
@@ -331,6 +412,22 @@ a typical composite message), so results are comparable across language ports:
 ```bash
 cargo bench --bench perf    # per-op cost: HW cycles/op + MB/s
 cargo bench --bench bench   # throughput in MB/s (MB = 1,000,000 bytes)
+```
+
+**Instruction counts.** Cycles and MB/s are noisy across machines, so the numbers
+quoted in the [changelog](CHANGELOG.md) are callgrind instruction counts, which
+are deterministic. Two environment variables make `perf` measurable that way, and
+change nothing otherwise: `SOFAB_PERF_ONLY` (`encode` / `decode` / `encode_u64` /
+`decode_u64`) runs a single workload, and `SOFAB_PERF_ITERS=N` replaces the
+adaptive ~1 s loop with exactly N iterations. Run at two N and difference the
+totals — start-up and warm-up cancel:
+
+```bash
+cargo bench --bench perf --all-features --no-run   # prints the binary path
+for n in 20000 120000; do
+  SOFAB_PERF_ONLY=encode SOFAB_PERF_ITERS=$n \
+    valgrind --tool=callgrind --callgrind-out-file=/dev/null <binary>
+done                       # per-op Ir = (Ir(120000) - Ir(20000)) / 100000
 ```
 
 ### Footprint
@@ -353,14 +450,23 @@ are zero and flash equals `.text`:
 |---------------|----------:|-----------:|----------:|
 | **MIN** — integers only, 32-bit (`default-features = false`) | **620 B** | **640 B** | **770 B** |
 | integers only, 64-bit (`value64`) | 802 B | 832 B | 944 B |
-| `+ sequence` (64-bit) | 902 B | 928 B | 1 080 B |
+| `+ sequence` (64-bit) | 1 130 B | 1 144 B | 1 432 B |
 | `+ array` (64-bit) | 1 118 B | 1 126 B | 1 310 B |
 | `+ fixlen` (fp32 / str / blob, 64-bit) | 1 325 B | 1 371 B | 1 425 B |
-| all wire types, 32-bit | 1 705 B | 1 645 B | 2 165 B |
-| **MAX** — all wire types, 64-bit (default) | **2 117 B** | **2 053 B** | **2 461 B** |
-| generated-shape visitor (MAX) | 4 061 B | 3 943 B | 4 865 B |
+| all wire types, 32-bit | 1 937 B | 1 881 B | 2 497 B |
+| **MAX** — all wire types, 64-bit (default) | **2 325 B** | **2 267 B** | **2 781 B** |
+| generated-shape visitor (MAX) | 4 281 B | 4 161 B | 5 297 B |
 
-The codec spans **≈0.6 KiB** (integer-only, 32-bit) to **≈2.1 KiB** (every wire
+The `sequence` rows carry the lazy-framing machinery of MESSAGE_SPEC §2 (the
+hold-back run, [above](#sequence-framing-and-the-hold-back-window)): 228 B of
+flash on Cortex-M0 over an eager `begin`/`end` pair (1 130 B against the 902 B
+the same row measured before lazy framing), plus the pending array's RAM in the
+table below. About 60 B of that is `commit_pending` tracking how much
+of the run reached the buffer so a `BufferFull` in the middle of one keeps the
+ids it did not emit ([above](#sequence-framing-and-the-hold-back-window)) — the
+price of not emitting a `SEQUENCE_END` whose `SEQUENCE_START` was dropped.
+
+The codec spans **≈0.6 KiB** (integer-only, 32-bit) to **≈2.2 KiB** (every wire
 type, 64-bit) of flash on Cortex-M0; disabling `value64` removes ~20% of the code
 by deleting the 64-bit shift/`memclr` helpers and halving every varint
 operation. The decoder carries no panic paths (all bounds are proven in-bounds),
@@ -382,11 +488,19 @@ allocated. Sizes are identical across these 32-bit targets:
 |---------------|----------:|----------:|------:|
 | **MIN** — integers only, 32-bit | 16 B | 12 B | **28 B** |
 | integers only, 64-bit | 24 B | 12 B | 36 B |
-| `+ sequence` (64-bit) | 32 B | 16 B | 48 B |
+| `+ sequence` (64-bit) | 32 B | 52 B | 84 B |
 | `+ array` (64-bit) | 32 B | 12 B | 44 B |
 | `+ fixlen` (64-bit) | 40 B | 12 B | 52 B |
-| all wire types, 32-bit | 40 B | 16 B | 56 B |
-| **MAX** — all wire types, 64-bit (default) | 48 B | 16 B | **64 B** |
+| all wire types, 32-bit | 40 B | 52 B | 92 B |
+| **MAX** — all wire types, 64-bit (default) | 48 B | 52 B | **100 B** |
+
+The `sequence` rows are where `OStream` grows from 12/16 B to 52 B: that is the
+`LAZY_SEQ_DEPTH`-slot hold-back array
+([above](#sequence-framing-and-the-hold-back-window)) — `4 * 8` bytes of ids plus
+the count. It is the only per-stream cost of omitting all-default sequences, and
+it is fixed at build time — see
+[the bound](#sequence-framing-and-the-hold-back-window) for what a target that
+cannot spare it has to do.
 
 ## Choosing between the two Rust corelibs
 

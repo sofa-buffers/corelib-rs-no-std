@@ -23,6 +23,15 @@
 //!   string/blob payloads are delivered in chunks, so they too may exceed RAM.
 //! * **Zero-cost feature gating** — disable `fixlen` / `array` / `sequence` /
 //!   `fp64` to drop whole code paths, mirroring the C `SOFAB_DISABLE_*` macros.
+//! * **Sequences frame lazily** — [`OStream::write_sequence_begin_lazy`] holds a
+//!   sequence header back until the sequence turns out to have content, so a
+//!   sequence-typed *field* equal to its declared default is omitted rather than
+//!   framed empty (MESSAGE_SPEC §2), while
+//!   [`OStream::write_sequence_end_keep`] forces the frame where it carries
+//!   information (a wrapper-array *element*, §5.1). Heap-free, so the pending
+//!   run is bounded by [`LAZY_SEQ_DEPTH`]: beyond that window sequences are
+//!   framed eagerly — valid, decodes identically, just not canonical
+//!   (CORELIB_PLAN §6).
 //!
 //! ## String validity: strict UTF-8 (always on)
 //!
@@ -96,6 +105,8 @@ pub use types::FixlenType;
 #[cfg(feature = "array")]
 pub use types::ArrayKind;
 
+#[cfg(feature = "sequence")]
+pub use ostream::LAZY_SEQ_DEPTH;
 #[cfg(feature = "sequence")]
 pub use types::MAX_DEPTH;
 

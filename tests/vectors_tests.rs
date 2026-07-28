@@ -36,6 +36,21 @@ use sofab::ArrayKind;
 use sofab::{Error, Flush, IStream, Id, OStream, Signed, Unsigned, Visitor};
 
 /// The shared vectors, embedded from the verbatim asset copy.
+///
+/// **Which column this suite asserts.** Every vector carries two encodings:
+/// `serialized` — the dense, primitive-layer ground truth, in which every
+/// sequence is framed — and `serialized_sparse`, the canonical *message-layer*
+/// form where a sequence-typed field equal to its declared default is omitted
+/// (MESSAGE_SPEC §2). This corelib has **no message layer**: it knows nothing
+/// about schemas, declared defaults, or which closer a schema position calls
+/// for, so it cannot produce the sparse form. This suite therefore asserts
+/// `serialized` only, closing every sequence with `end_keep` (see
+/// `write_fields`). `serialized_sparse` is exercised by the **generator's**
+/// conformance drivers (`sofabgen`'s `tests/conformance/<lang>/`), which own the
+/// layer that decides per field between `write_sequence_end` and
+/// `write_sequence_end_keep`. The column is present here only because the asset
+/// file is copied verbatim from the documentation repo; its absence from the
+/// assertions below is deliberate, not a coverage gap.
 const VECTORS_JSON: &str = include_str!("../assets/test_vectors.json");
 
 // --- requires / capability gating -------------------------------------------
@@ -117,6 +132,10 @@ fn array_kind(element_type: &str) -> ArrayKind {
 /// Write a vector's `fields[]` into any stream (buffered or flushing). Feature-
 /// gated per op; vectors needing a disabled op are filtered out by `requires`.
 fn write_fields<F: Flush>(os: &mut OStream<F>, fields: &[Value]) {
+    // A vector's `serialized` form is the primitive-layer ground truth and always
+    // carries the frame, so every sequence closes with `end_keep`: identical bytes
+    // once the sequence has content, and the empty-sequence vectors keep their
+    // `begin`+`end` pair instead of vanishing.
     for f in fields {
         let op = f["op"].as_str().expect("op");
         let id = f.get("id").and_then(Value::as_u64).unwrap_or(0) as Id;
@@ -141,9 +160,9 @@ fn write_fields<F: Flush>(os: &mut OStream<F>, fields: &[Value]) {
             #[cfg(feature = "array")]
             "array" => encode_array(os, id, f),
             #[cfg(feature = "sequence")]
-            "sequence_begin" => os.write_sequence_begin(id).unwrap(),
+            "sequence_begin" => os.write_sequence_begin_lazy(id).unwrap(),
             #[cfg(feature = "sequence")]
-            "sequence_end" => os.write_sequence_end().unwrap(),
+            "sequence_end" => os.write_sequence_end_keep().unwrap(),
             other => panic!("unsupported op {other:?} (vector should be `requires`-skipped)"),
         }
     }
