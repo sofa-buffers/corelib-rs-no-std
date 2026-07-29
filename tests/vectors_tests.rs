@@ -121,8 +121,12 @@ fn array_kind(element_type: &str) -> ArrayKind {
     match element_type {
         "u8" | "u16" | "u32" | "u64" => ArrayKind::Unsigned,
         "i8" | "i16" | "i32" | "i64" => ArrayKind::Signed,
+        // A fixlen array names its element subtype, not a collapsed "fixlen"
+        // category (§4.8): the decoder reports what the `fixlen_word` carried.
         #[cfg(feature = "fixlen")]
-        "fp32" | "fp64" => ArrayKind::Fixlen,
+        "fp32" => ArrayKind::Fp32,
+        #[cfg(feature = "fp64")]
+        "fp64" => ArrayKind::Fp64,
         other => panic!("unknown element_type {other:?}"),
     }
 }

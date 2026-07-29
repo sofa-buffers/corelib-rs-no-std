@@ -129,7 +129,7 @@ fn decode_array_of_fp32() {
         0xFF, 0xFF, 0x7F, 0xFF, 0xFF, 0xFF, 0x7F, 0x7F,
     ];
     let want = [1.0_f32, 2.0, 3.0, -f32::MAX, f32::MAX];
-    let mut expected = vec![Event::ArrayBegin(0, ArrayKind::Fixlen, 5)];
+    let mut expected = vec![Event::ArrayBegin(0, ArrayKind::Fp32, 5)];
     expected.extend(want.iter().map(|f| Event::Fp32(0, f.to_bits())));
     assert_eq!(decode(&bytes), expected);
 }
@@ -218,7 +218,7 @@ fn decode_empty_fixlen_array_reads_word() {
     assert_eq!(
         decode(&[0x05, 0x00, 0x20, 0x00, 0x2A]),
         [
-            Event::ArrayBegin(0, ArrayKind::Fixlen, 0),
+            Event::ArrayBegin(0, ArrayKind::Fp32, 0),
             Event::Unsigned(0, 42),
         ]
     );
