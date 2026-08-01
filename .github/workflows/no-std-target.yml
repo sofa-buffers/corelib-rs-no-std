@@ -1,0 +1,124 @@
+name: no-std target
+
+# Reusable body behind the one-workflow-per-target files
+# (`no-std-cortex-m0.yml`, `no-std-cortex-m4f.yml`, `no-std-riscv32.yml`).
+# Everything bare-metal for a single target lives here, so adding a target is a
+# five-line caller and never a copy of this file.
+on:
+  workflow_call:
+    inputs:
+      target:
+        description: Rust target triple to build for.
+        required: true
+        type: string
+      label:
+        description: Short human name used in job titles (e.g. "Cortex-M0").
+        required: true
+        type: string
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # One job per feature configuration, so the checks list shows at a glance
+  # which configuration broke on which target — not just "the no-std job".
+  # The list mirrors the rows of `tools/footprint.sh` (and therefore the
+  # README's footprint table) so a size number always has a build behind it.
+  build:
+    name: ${{ inputs.label }} — ${{ matrix.config.name }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          - { name: "MIN: integers only, 32-bit", features: "" }
+          - { name: "integers only, 64-bit", features: "value64" }
+          - { name: "+ sequence (64-bit)", features: "value64,sequence" }
+          - { name: "+ array (64-bit)", features: "value64,array" }
+          - { name: "+ fixlen (64-bit)", features: "value64,fixlen" }
+          - { name: "+ fp64 (64-bit)", features: "value64,fixlen,fp64" }
+          - { name: "all wire types, 32-bit", features: "fixlen,array,sequence,fp64" }
+          - { name: "MAX: all wire types, 64-bit", features: "fixlen,array,sequence,fp64,value64" }
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain (1.97, ${{ inputs.target }})
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97"
+          targets: ${{ inputs.target }}
+
+      - name: Cache cargo registry & build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ inputs.target }}-${{ matrix.config.features }}
+
+      # Building the library for a bare-metal target with no host std proves the
+      # crate is genuinely no_std / heap-free in this configuration. The release
+      # profile is the shipping one (`opt-level="z"`, LTO, `panic="abort"`), so
+      # it is what the footprint numbers are taken from.
+      - name: Build library
+        run: |
+          cargo build --locked --lib --release --target ${{ inputs.target }} \
+            --no-default-features --features "${{ matrix.config.features }}"
+
+  # The matrix above names the configurations that carry meaning; this job is
+  # the backstop that leaves no combination unbuilt for this target, including
+  # the ones nobody would think to name (`fp64` without `array`, `sequence`
+  # alone at 32-bit width, …). `check` rather than `build`: it is a `cfg`
+  # correctness sweep, and the named rows above already produce real objects.
+  powerset:
+    name: ${{ inputs.label }} — every feature combination
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain (1.97, ${{ inputs.target }})
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97"
+          targets: ${{ inputs.target }}
+
+      - name: Cache cargo registry & build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ inputs.target }}-powerset
+
+      - name: Install cargo-hack
+        uses: taiki-e/install-action@cargo-hack
+
+      # `--no-dev-deps` keeps it to the library: the conformance test crates
+      # need all wire types (and a host) to compile.
+      - name: Check every feature combination
+        run: |
+          cargo hack --feature-powerset --no-dev-deps \
+            check --lib --target ${{ inputs.target }}
+
+  # The size report for this target. Runs after the configurations are known to
+  # build, so a red footprint job means the *measurement* broke, not the code.
+  footprint:
+    name: ${{ inputs.label }} — footprint
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain (1.97, ${{ inputs.target }})
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97"
+          targets: ${{ inputs.target }}
+          # llvm-tools-preview provides llvm-size / llvm-nm and rust-lld, which
+          # footprint.sh links with and reads the section sizes from.
+          components: llvm-tools-preview
+
+      - name: Cache cargo registry & build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ inputs.target }}-footprint
+
+      # Reports flash (.text + .data) and the caller-provided RAM across the
+      # feature configurations, so size changes surface in the CI log — the
+      # single source of truth for the numbers documented in the README.
+      - name: Library footprint
+        run: tools/footprint.sh ${{ inputs.target }}

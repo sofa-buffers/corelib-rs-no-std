@@ -9,6 +9,13 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# Bare-metal coverage lives in its own workflow per target
+# (`no-std-cortex-m0.yml`, `no-std-cortex-m4f.yml`, `no-std-riscv32.yml`), each
+# building the library across a matrix of feature configurations, sweeping the
+# whole feature powerset for that target and reporting its footprint. This
+# workflow is the host side: lint, tests, vectors, the feature powerset and
+# coverage.
+
 jobs:
   lint:
     name: Lint
@@ -205,44 +212,3 @@ jobs:
           git add coverage.json
           git commit -q -m "chore: update coverage badge ($MSG)"
           git push -f "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" badges
-
-  no-std:
-    name: No-std
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Install Rust toolchain (1.97, bare-metal targets)
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: "1.97"
-          # Cortex-M0 / Cortex-M4F / RISC-V 32 — the targets measured by
-          # tools/footprint.sh. llvm-tools-preview provides llvm-size and
-          # rust-lld, which footprint.sh links and reads the .text size with.
-          targets: thumbv7em-none-eabihf, thumbv6m-none-eabi, riscv32imc-unknown-none-elf
-          components: llvm-tools-preview
-
-      - name: Cache cargo registry & build
-        uses: Swatinem/rust-cache@v2
-
-      # Building the library for a bare-metal Cortex-M target with no host std
-      # proves the crate is genuinely no_std / heap-free.
-      - name: Build for thumbv7em-none-eabihf (all features)
-        run: cargo build --lib --all-features --target thumbv7em-none-eabihf
-
-      # The 32-bit value width (default features minus `value64`) must also
-      # compile for bare metal.
-      - name: Build for thumbv7em-none-eabihf (32-bit value width)
-        run: cargo build --lib --no-default-features --features fixlen,array,sequence,fp64 --target thumbv7em-none-eabihf
-
-      # Report the library .text footprint across feature configurations for
-      # Cortex-M and RISC-V, so size changes surface in the CI log (single
-      # source of truth for the numbers documented in the README).
-      - name: Library .text footprint (Cortex-M0)
-        run: tools/footprint.sh thumbv6m-none-eabi
-
-      - name: Library .text footprint (Cortex-M4F)
-        run: tools/footprint.sh thumbv7em-none-eabihf
-
-      - name: Library .text footprint (RISC-V 32)
-        run: tools/footprint.sh riscv32imc-unknown-none-elf
