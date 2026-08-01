@@ -448,28 +448,27 @@ are zero and flash equals `.text`:
 
 | Configuration | Cortex-M0 | Cortex-M4F | RISC-V 32 |
 |---------------|----------:|-----------:|----------:|
-| **MIN** — integers only, 32-bit (`default-features = false`) | **620 B** | **640 B** | **770 B** |
-| integers only, 64-bit (`value64`) | 802 B | 832 B | 944 B |
-| `+ sequence` (64-bit) | 1 130 B | 1 144 B | 1 432 B |
-| `+ array` (64-bit) | 1 118 B | 1 126 B | 1 310 B |
-| `+ fixlen` (fp32 / str / blob, 64-bit) | 1 325 B | 1 371 B | 1 425 B |
-| all wire types, 32-bit | 1 937 B | 1 881 B | 2 497 B |
-| **MAX** — all wire types, 64-bit (default) | **2 325 B** | **2 267 B** | **2 781 B** |
-| generated-shape visitor (MAX) | 4 281 B | 4 161 B | 5 297 B |
+| **MIN** — integers only, 32-bit (`default-features = false`) | **626 B** | **638 B** | **780 B** |
+| integers only, 64-bit (`value64`) | 804 B | 826 B | 952 B |
+| `+ sequence` (64-bit) | 1 128 B | 1 142 B | 1 442 B |
+| `+ array` (64-bit) | 1 100 B | 1 100 B | 1 260 B |
+| `+ fixlen` (fp32 / str / blob, 64-bit) | 1 161 B | 1 191 B | 1 433 B |
+| all wire types, 32-bit | 1 931 B | 1 911 B | 2 501 B |
+| **MAX** — all wire types, 64-bit (default) | **2 201 B** | **2 131 B** | **2 797 B** |
+| generated-shape visitor (MAX) | 4 283 B | 4 199 B | 5 293 B |
 
 The `sequence` rows carry the lazy-framing machinery of MESSAGE_SPEC §2 (the
-hold-back run, [above](#sequence-framing-and-the-hold-back-window)): 228 B of
-flash on Cortex-M0 over an eager `begin`/`end` pair (1 130 B against the 902 B
+hold-back run, [above](#sequence-framing-and-the-hold-back-window)): 226 B of
+flash on Cortex-M0 over an eager `begin`/`end` pair (1 128 B against the 902 B
 the same row measured before lazy framing), plus the pending array's RAM in the
 table below. About 60 B of that is `commit_pending` tracking how much
 of the run reached the buffer so a `BufferFull` in the middle of one keeps the
 ids it did not emit ([above](#sequence-framing-and-the-hold-back-window)) — the
 price of not emitting a `SEQUENCE_END` whose `SEQUENCE_START` was dropped.
 
-The codec spans **≈0.6 KiB** (integer-only, 32-bit) to **≈2.2 KiB** (every wire
-type, 64-bit) of flash on Cortex-M0; disabling `value64` removes ~20% of the code
-by deleting the 64-bit shift/`memclr` helpers and halving every varint
-operation. The decoder carries no panic paths (all bounds are proven in-bounds),
+The codec spans **≈0.6 KiB** (integer-only, 32-bit) to **≈2.1 KiB** (every wire
+type, 64-bit) of flash on Cortex-M0; disabling `value64` removes ~12% of the code
+by deleting the 64-bit shift helpers and halving every varint operation. The decoder carries no panic paths (all bounds are proven in-bounds),
 so the whole codec links without `core::panicking` — which is what keeps the
 RISC-V builds, lacking Thumb-2's density, close behind Cortex-M.
 
@@ -486,13 +485,19 @@ allocated. Sizes are identical across these 32-bit targets:
 
 | Configuration | `IStream` | `OStream` | total |
 |---------------|----------:|----------:|------:|
-| **MIN** — integers only, 32-bit | 16 B | 12 B | **28 B** |
+| **MIN** — integers only, 32-bit | 12 B | 12 B | **24 B** |
 | integers only, 64-bit | 24 B | 12 B | 36 B |
-| `+ sequence` (64-bit) | 32 B | 52 B | 84 B |
-| `+ array` (64-bit) | 32 B | 12 B | 44 B |
-| `+ fixlen` (64-bit) | 40 B | 12 B | 52 B |
-| all wire types, 32-bit | 40 B | 52 B | 92 B |
-| **MAX** — all wire types, 64-bit (default) | 48 B | 52 B | **100 B** |
+| `+ sequence` (64-bit) | 24 B | 52 B | 76 B |
+| `+ array` (64-bit) | 24 B | 12 B | 36 B |
+| `+ fixlen` (64-bit) | 32 B | 12 B | 44 B |
+| all wire types, 32-bit | 32 B | 52 B | 84 B |
+| **MAX** — all wire types, 64-bit (default) | 32 B | 52 B | **84 B** |
+
+The decoder state is held at **32 bytes or less** in every configuration on
+purpose, and that is a flash figure as much as a RAM one: at or below that size
+the compiler zero-initializes an `IStream` with inline stores, while a larger one
+links a ~158-byte `__aeabi_memclr8` helper that a lean firmware needs for nothing
+else.
 
 The `sequence` rows are where `OStream` grows from 12/16 B to 52 B: that is the
 `LAZY_SEQ_DEPTH`-slot hold-back array

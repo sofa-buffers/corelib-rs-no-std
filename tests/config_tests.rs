@@ -174,6 +174,73 @@ fn fp64_roundtrip() {
     assert_eq!(v.fp64, [(1, 2.5f64.to_bits())]);
 }
 
+/// Float payloads are assembled byte by byte in an accumulator that is shared
+/// with (or split across) the decoder's value word, and the split differs per
+/// value width — so decode every float one byte per `feed` and check the bits
+/// survive the chunk boundaries, in whichever configuration is being built.
+/// Signalling and negative-zero patterns are included because they are exactly
+/// the ones a shift/mask slip would quietly normalize (CORELIB_PLAN §4.6).
+#[cfg(feature = "fixlen")]
+#[test]
+fn float_payload_survives_byte_at_a_time_feed() {
+    #[derive(Default)]
+    struct V {
+        fp32: Vec<u32>,
+        #[cfg(feature = "fp64")]
+        fp64: Vec<u64>,
+    }
+    impl Visitor for V {
+        fn fp32(&mut self, _id: u32, v: f32) {
+            self.fp32.push(v.to_bits());
+        }
+        #[cfg(feature = "fp64")]
+        fn fp64(&mut self, _id: u32, v: f64) {
+            self.fp64.push(v.to_bits());
+        }
+    }
+
+    let f32s = [
+        1.5f32,
+        -0.0f32,
+        f32::from_bits(0x7F80_0001), // signalling NaN
+        f32::from_bits(0x0000_0001), // smallest subnormal
+    ];
+    #[cfg(feature = "fp64")]
+    let f64s = [
+        2.5f64,
+        -0.0f64,
+        f64::from_bits(0x7FF0_0000_0000_0001),
+        f64::from_bits(0x0000_0000_0000_0001),
+    ];
+
+    let mut buf = [0u8; 128];
+    let used = {
+        let mut os = OStream::new(&mut buf);
+        for (i, v) in f32s.iter().enumerate() {
+            os.write_fp32(i as u32, *v).unwrap();
+        }
+        #[cfg(feature = "fp64")]
+        for (i, v) in f64s.iter().enumerate() {
+            os.write_fp64(10 + i as u32, *v).unwrap();
+        }
+        // A trailing integer proves the accumulator was left clean for the
+        // varint that follows the last float.
+        os.write_unsigned(20, 300).unwrap();
+        os.bytes_used()
+    };
+
+    let mut v = V::default();
+    let mut is = IStream::new();
+    let mut last = Ok(());
+    for &b in &buf[..used] {
+        last = is.feed(&[b], &mut v);
+    }
+    assert_eq!(last, Ok(()));
+    assert_eq!(v.fp32, f32s.map(f32::to_bits));
+    #[cfg(feature = "fp64")]
+    assert_eq!(v.fp64, f64s.map(f64::to_bits));
+}
+
 #[cfg(feature = "array")]
 #[test]
 fn integer_array_roundtrip() {

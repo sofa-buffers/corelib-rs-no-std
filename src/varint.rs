@@ -2,85 +2,16 @@
 //! §2.2 / §2.3: <https://github.com/sofa-buffers/documentation>).
 //!
 //! The decoder is incremental (one byte at a time) so it works across streaming
-//! chunk boundaries. The encoder side is implemented inline in [`crate::ostream`]
-//! in terms of a single-byte push, so this module only holds the decode state
-//! and the ZigZag helpers.
+//! chunk boundaries. Its two state words live in [`crate::IStream`]'s `Core`
+//! (which packs the decoder's own tail padding with the decoder-mode flags), so
+//! this module holds only the value-width constant and the ZigZag helpers; the
+//! encoder side is implemented inline in [`crate::ostream`] in terms of a
+//! single-byte push.
 
-use crate::{Error, Result, Signed, Unsigned};
+use crate::{Signed, Unsigned};
 
 /// Number of value bits; bounds the maximum varint length.
-const VALUE_BITS: u32 = Unsigned::BITS;
-
-/// Incremental unsigned-varint decoder.
-#[derive(Default)]
-pub(crate) struct VarintDecoder {
-    value: Unsigned,
-    shift: u32,
-}
-
-impl VarintDecoder {
-    pub(crate) const fn new() -> Self {
-        Self { value: 0, shift: 0 }
-    }
-
-    /// Feed one byte.
-    ///
-    /// * `Ok(Some(v))` — a complete value was decoded (state auto-resets).
-    /// * `Ok(None)` — more bytes are needed.
-    /// * `Err(InvalidMsg)` — the varint is longer than the value type allows.
-    ///
-    /// `inline(never)`: this is the per-byte prologue of every decoder state,
-    /// reached from the monomorphized `IStream::step<V>`. Left to LTO it gets
-    /// inlined into each visitor instantiation's state machine, costing ~1 KB
-    /// of flash in a generated-code decoder for a ~50 B saving in the
-    /// synthetic probe. Keeping it outlined shares one copy across all states
-    /// and visitors.
-    #[inline(never)]
-    pub(crate) fn push(&mut self, byte: u8) -> Result<Option<Unsigned>> {
-        // Reject an overlong (>value-width) varint before it silently truncates
-        // (§4.1/§6.3). On the final byte that fills the value, only the low
-        // `room` payload bits fit below the value width; any higher bit is a
-        // >64-bit overflow. This matches corelib-c-cpp (`istream.c`),
-        // corelib-rs (`varint.rs`) and corelib-zig — where this port previously
-        // discarded the spilling bits and returned a corrupted value.
-        let room = VALUE_BITS - self.shift; // payload bits still below the width
-        if room < 7 && (byte & 0x7F) >> room != 0 {
-            self.value = 0;
-            self.shift = 0;
-            return Err(Error::InvalidMsg);
-        }
-
-        // OR in the 7 payload bits at the current position.
-        self.value |= ((byte & 0x7F) as Unsigned) << self.shift;
-        self.shift += 7;
-
-        if byte & 0x80 == 0 {
-            let v = self.value;
-            self.value = 0;
-            self.shift = 0;
-            return Ok(Some(v));
-        }
-
-        // Continuation bit set but no more room -> overflow.
-        if self.shift >= VALUE_BITS {
-            self.value = 0;
-            self.shift = 0;
-            return Err(Error::InvalidMsg);
-        }
-
-        Ok(None)
-    }
-
-    /// True while a varint is mid-decode: at least one continuation byte has
-    /// been absorbed but the terminating byte (high bit clear) has not arrived
-    /// yet. At a clean field boundary this is `false` (the decoder auto-resets
-    /// to `shift == 0` after every complete value). Used to distinguish an
-    /// unterminated-varint tail (`INCOMPLETE`) from a clean boundary.
-    #[inline]
-    pub(crate) fn is_pending(&self) -> bool {
-        self.shift != 0
-    }
-}
+pub(crate) const VALUE_BITS: u8 = Unsigned::BITS as u8;
 
 /// ZigZag encode a signed value to its unsigned varint representation.
 #[inline]
