@@ -1,0 +1,17 @@
+name: no-std (Cortex-M0)
+
+# One workflow per bare-metal target; the matrix over feature configurations
+# lives in the shared body (`no-std-target.yml`), so every target is covered
+# the same way and adding one is this file.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  cortex-m0:
+    uses: ./.github/workflows/no-std-target.yml
+    with:
+      target: thumbv6m-none-eabi
+      label: Cortex-M0

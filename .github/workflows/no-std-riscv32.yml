@@ -1,0 +1,17 @@
+name: no-std (RISC-V 32)
+
+# One workflow per bare-metal target; the matrix over feature configurations
+# lives in the shared body (`no-std-target.yml`), so every target is covered
+# the same way and adding one is this file.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  riscv32:
+    uses: ./.github/workflows/no-std-target.yml
+    with:
+      target: riscv32imc-unknown-none-elf
+      label: RISC-V 32
