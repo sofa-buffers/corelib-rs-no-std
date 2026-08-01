@@ -13,7 +13,7 @@
 
 use crate::error::{Error, Result};
 use crate::types::*;
-use crate::varint::{zigzag_decode, VarintDecoder};
+use crate::varint::{zigzag_decode, VALUE_BITS};
 use crate::{Id, Signed, Unsigned};
 
 #[cfg(feature = "array")]
@@ -109,17 +109,28 @@ enum State {
     ArrayCount,
 }
 
-/// Streaming Sofab decoder.
-pub struct IStream {
-    varint: VarintDecoder,
+/// The decoder's per-byte state, grouped into one struct.
+///
+/// `acc` is 64 bits on a `value64` build, so this struct is 8-byte aligned and
+/// would carry 7 bytes of tail padding; the mode flags live there **for free**.
+/// That packing is what keeps [`IStream`] at 32 bytes with every feature on —
+/// the size at (and below) which the compiler zero-initializes it with inline
+/// stores instead of linking a ~158-byte `__aeabi_memclr8` helper, which is a
+/// bigger flash item than the state machine's own bookkeeping.
+struct Core {
+    /// Accumulator of the varint being decoded — and, on builds whose value
+    /// type is wide enough, of the `fixlen` float payload being assembled
+    /// (`float_push`): the two are never in flight at the same time, so they
+    /// share one word instead of costing a second one.
+    acc: Unsigned,
+    /// Payload bits already in `acc`. Non-zero exactly while a varint is
+    /// mid-decode, which is how an unterminated tail is told from a clean field
+    /// boundary.
+    shift: u8,
     state: State,
-    id: Id,
 
-    // array context
     #[cfg(feature = "array")]
     array_kind: ArrayKind,
-    #[cfg(feature = "array")]
-    array_remaining: usize,
     #[cfg(feature = "array")]
     in_array: bool,
     /// The array being decoded is a fixlen array, so its element kind is still
@@ -128,19 +139,93 @@ pub struct IStream {
     #[cfg(all(feature = "array", feature = "fixlen"))]
     array_fixlen: bool,
 
-    // fixlen context
     #[cfg(feature = "fixlen")]
     fixlen_type: FixlenType,
+
+    /// Sequence nesting depth (for balanced start/end validation). `MAX_DEPTH`
+    /// is 255, so a byte holds every legal depth.
+    #[cfg(feature = "sequence")]
+    depth: u8,
+}
+
+/// Streaming Sofab decoder.
+pub struct IStream {
+    core: Core,
+    id: Id,
+
+    // array context
+    #[cfg(feature = "array")]
+    array_remaining: usize,
+
+    // fixlen context
     #[cfg(feature = "fixlen")]
     fixlen_total: usize,
     #[cfg(feature = "fixlen")]
     fixlen_remaining: usize,
-    #[cfg(feature = "fixlen")]
-    acc: [u8; 8],
 
-    // sequence nesting depth (for balanced start/end validation)
-    #[cfg(feature = "sequence")]
-    depth: u32,
+    /// Low half of the float accumulator, for the one build shape whose value
+    /// word cannot hold a whole `fp64` payload: 8 payload bytes against a
+    /// 4-byte `Core::acc` when `value64` is off. The payload is then assembled
+    /// in the two-word window `(acc_lo, Core::acc)` — one extra word, not a
+    /// separate 8-byte buffer.
+    #[cfg(all(feature = "fp64", not(feature = "value64")))]
+    acc_lo: u32,
+}
+
+impl Core {
+    /// Feed one byte into the varint currently being decoded.
+    ///
+    /// * `Ok(Some(v))` — a complete value was decoded (state auto-resets).
+    /// * `Ok(None)` — more bytes are needed.
+    /// * `Err(InvalidMsg)` — the varint is longer than the value type allows.
+    ///
+    /// `inline(never)`: this is the per-byte prologue of every decoder state,
+    /// reached from the monomorphized [`IStream::step`]. Left to LTO it gets
+    /// inlined into each visitor instantiation's state machine, costing ~1 KB
+    /// of flash in a generated-code decoder for a ~50 B saving in the
+    /// synthetic probe. Keeping it outlined shares one copy across all states
+    /// and visitors, and borrowing only `Core` (not the whole `IStream`) leaves
+    /// the surrounding fields promotable to registers.
+    #[inline(never)]
+    fn push(&mut self, byte: u8) -> Result<Option<Unsigned>> {
+        // Reject an overlong (>value-width) varint before it silently truncates
+        // (§4.1/§6.3). On the final byte that fills the value, only the low
+        // `room` payload bits fit below the value width; any higher bit is a
+        // >64-bit overflow. This matches corelib-c-cpp (`istream.c`),
+        // corelib-rs (`varint.rs`) and corelib-zig — where this port previously
+        // discarded the spilling bits and returned a corrupted value.
+        //
+        // The shift is kept as a byte in `Core` (it has to fit the tail padding
+        // there) but computed in the machine's natural width, so the arithmetic
+        // costs no repeated byte-truncation.
+        let shift = u32::from(self.shift);
+        let room = u32::from(VALUE_BITS) - shift; // payload bits below the width
+        if room < 7 && u32::from(byte & 0x7F) >> room != 0 {
+            self.acc = 0;
+            self.shift = 0;
+            return Err(Error::InvalidMsg);
+        }
+
+        // OR in the 7 payload bits at the current position.
+        self.acc |= ((byte & 0x7F) as Unsigned) << shift;
+        self.shift = (shift + 7) as u8;
+
+        if byte & 0x80 == 0 {
+            let v = self.acc;
+            self.acc = 0;
+            self.shift = 0;
+            return Ok(Some(v));
+        }
+
+        // Continuation bit set but no more room -> overflow.
+        if shift + 7 >= u32::from(VALUE_BITS) {
+            self.acc = 0;
+            self.shift = 0;
+            return Err(Error::InvalidMsg);
+        }
+
+        Ok(None)
+    }
 }
 
 impl Default for IStream {
@@ -153,27 +238,35 @@ impl IStream {
     /// Create a fresh decoder ready to accept a new message.
     pub const fn new() -> Self {
         IStream {
-            varint: VarintDecoder::new(),
-            state: State::Idle,
+            core: Core {
+                acc: 0,
+                shift: 0,
+                state: State::Idle,
+                #[cfg(feature = "array")]
+                array_kind: ArrayKind::Unsigned,
+                #[cfg(feature = "array")]
+                in_array: false,
+                #[cfg(all(feature = "array", feature = "fixlen"))]
+                array_fixlen: false,
+                // Any subtype will do — `on_fixlen_len` sets it before anything
+                // reads it — and a non-zero one keeps the whole struct from
+                // being an all-zero image, which the compiler would otherwise
+                // materialize by calling a ~158-byte `__aeabi_memclr8` helper
+                // instead of storing the few words inline.
+                #[cfg(feature = "fixlen")]
+                fixlen_type: FixlenType::Blob,
+                #[cfg(feature = "sequence")]
+                depth: 0,
+            },
             id: 0,
             #[cfg(feature = "array")]
-            array_kind: ArrayKind::Unsigned,
-            #[cfg(feature = "array")]
             array_remaining: 0,
-            #[cfg(feature = "array")]
-            in_array: false,
-            #[cfg(all(feature = "array", feature = "fixlen"))]
-            array_fixlen: false,
-            #[cfg(feature = "fixlen")]
-            fixlen_type: FixlenType::Fp32,
             #[cfg(feature = "fixlen")]
             fixlen_total: 0,
             #[cfg(feature = "fixlen")]
             fixlen_remaining: 0,
-            #[cfg(feature = "fixlen")]
-            acc: [0; 8],
-            #[cfg(feature = "sequence")]
-            depth: 0,
+            #[cfg(all(feature = "fp64", not(feature = "value64")))]
+            acc_lo: 0,
         }
     }
 
@@ -203,7 +296,7 @@ impl IStream {
             // Fast path: stream string/blob payloads in bulk rather than
             // one callback per byte.
             #[cfg(feature = "fixlen")]
-            if self.state == State::FixlenRaw {
+            if self.core.state == State::FixlenRaw {
                 // Slice the remaining input first, then cap by `fixlen_remaining`;
                 // `min` makes `take <= rest.len()`, so the chunk slice carries no
                 // panicking bounds check.
@@ -211,7 +304,7 @@ impl IStream {
                 let take = rest.len().min(self.fixlen_remaining);
                 let offset = self.fixlen_total - self.fixlen_remaining;
                 let chunk = &rest[..take];
-                match self.fixlen_type {
+                match self.core.fixlen_type {
                     FixlenType::Str => visitor.string(self.id, self.fixlen_total, offset, chunk),
                     FixlenType::Blob => visitor.blob(self.id, self.fixlen_total, offset, chunk),
                     _ => return Err(Error::InvalidMsg),
@@ -219,7 +312,7 @@ impl IStream {
                 self.fixlen_remaining -= take;
                 i += take;
                 if self.fixlen_remaining == 0 {
-                    self.state = State::Idle;
+                    self.core.state = State::Idle;
                 }
                 continue;
             }
@@ -248,12 +341,12 @@ impl IStream {
     /// the consumed bytes form a `COMPLETE` message (§7); any other state means
     /// the bytes end mid-field or with an open sequence and is `INCOMPLETE`.
     fn at_field_boundary(&self) -> bool {
-        if self.state != State::Idle || self.varint.is_pending() {
+        if self.core.state != State::Idle || self.core.shift != 0 {
             // Mid-value, mid-payload, or a partial header varint pending.
             return false;
         }
         #[cfg(feature = "sequence")]
-        if self.depth != 0 {
+        if self.core.depth != 0 {
             // A sequence-start with no matching sequence-end yet.
             return false;
         }
@@ -267,24 +360,26 @@ impl IStream {
         // push-a-byte / "need more" dance is decoded **once** here and the
         // completed value dispatched below — rather than repeated per state.
         #[cfg(feature = "fixlen")]
-        if self.state == State::FixlenVal {
+        if self.core.state == State::FixlenVal {
             return self.step_fixlen_val(byte, visitor);
         }
 
-        let value = match self.varint.push(byte)? {
+        let value = match self.core.push(byte)? {
             Some(v) => v,
             None => return Ok(()),
         };
 
-        match self.state {
+        match self.core.state {
             State::Idle => self.on_header(value, visitor),
-            State::VarintUnsigned => {
-                visitor.unsigned(self.id, value);
-                self.advance_after_element();
-                Ok(())
-            }
-            State::VarintSigned => {
-                visitor.signed(self.id, zigzag_decode(value));
+            // Both integer states end the same way — deliver, then take the
+            // next element or leave the field — so they share that tail instead
+            // of each carrying a copy of it.
+            State::VarintUnsigned | State::VarintSigned => {
+                if self.core.state == State::VarintSigned {
+                    visitor.signed(self.id, zigzag_decode(value));
+                } else {
+                    visitor.unsigned(self.id, value);
+                }
                 self.advance_after_element();
                 Ok(())
             }
@@ -310,55 +405,55 @@ impl IStream {
         self.id = id as Id;
         #[cfg(feature = "array")]
         {
-            self.in_array = false;
+            self.core.in_array = false;
         }
         #[cfg(all(feature = "array", feature = "fixlen"))]
         {
-            self.array_fixlen = false;
+            self.core.array_fixlen = false;
         }
 
         match wire_type {
-            T_VARINT_UNSIGNED => self.state = State::VarintUnsigned,
-            T_VARINT_SIGNED => self.state = State::VarintSigned,
+            T_VARINT_UNSIGNED => self.core.state = State::VarintUnsigned,
+            T_VARINT_SIGNED => self.core.state = State::VarintSigned,
 
             #[cfg(feature = "fixlen")]
-            T_FIXLEN => self.state = State::FixlenLen,
+            T_FIXLEN => self.core.state = State::FixlenLen,
 
             #[cfg(feature = "array")]
             T_VARINTARRAY_UNSIGNED => {
-                self.array_kind = ArrayKind::Unsigned;
-                self.state = State::ArrayCount;
+                self.core.array_kind = ArrayKind::Unsigned;
+                self.core.state = State::ArrayCount;
             }
             #[cfg(feature = "array")]
             T_VARINTARRAY_SIGNED => {
-                self.array_kind = ArrayKind::Signed;
-                self.state = State::ArrayCount;
+                self.core.array_kind = ArrayKind::Signed;
+                self.core.state = State::ArrayCount;
             }
             #[cfg(all(feature = "array", feature = "fixlen"))]
             T_FIXLENARRAY => {
                 // The element kind is not known yet — it is carried by the
                 // `fixlen_word` that follows the count (§4.8), so `array_kind`
                 // is set (and the array announced) in `on_fixlen_len`.
-                self.array_fixlen = true;
-                self.state = State::ArrayCount;
+                self.core.array_fixlen = true;
+                self.core.state = State::ArrayCount;
             }
 
             #[cfg(feature = "sequence")]
             T_SEQUENCE_START => {
                 // Reject nesting beyond the normative MAX_DEPTH (§4.9/§6.2).
-                if self.depth >= MAX_DEPTH {
+                if u32::from(self.core.depth) >= MAX_DEPTH {
                     return Err(Error::InvalidMsg);
                 }
-                self.depth += 1;
+                self.core.depth += 1;
                 visitor.sequence_begin(self.id);
                 // stays in Idle
             }
             #[cfg(feature = "sequence")]
             T_SEQUENCE_END => {
-                if self.depth == 0 {
+                if self.core.depth == 0 {
                     return Err(Error::InvalidMsg);
                 }
-                self.depth -= 1;
+                self.core.depth -= 1;
                 visitor.sequence_end();
                 // stays in Idle
             }
@@ -368,18 +463,23 @@ impl IStream {
         Ok(())
     }
 
-    /// Shared "next element or back to idle" logic for varint scalars/arrays.
+    /// Shared "next element or back to idle" logic, for every element kind.
+    ///
+    /// Returns `true` when another array element follows — the decoder then
+    /// stays in the state that reads one — and otherwise leaves it idle at the
+    /// next field boundary.
     #[inline]
-    fn advance_after_element(&mut self) {
+    fn advance_after_element(&mut self) -> bool {
         #[cfg(feature = "array")]
-        if self.in_array {
+        if self.core.in_array {
             self.array_remaining -= 1;
             if self.array_remaining > 0 {
-                return; // stay in the same state for the next element
+                return true;
             }
-            self.in_array = false;
+            self.core.in_array = false;
         }
-        self.state = State::Idle;
+        self.core.state = State::Idle;
+        false
     }
 
     #[cfg(feature = "fixlen")]
@@ -391,28 +491,47 @@ impl IStream {
             return Err(Error::InvalidMsg);
         }
 
-        self.fixlen_type = subtype;
+        self.core.fixlen_type = subtype;
         self.fixlen_total = length;
         self.fixlen_remaining = length;
+
+        // The float subtypes have exactly one legal payload width each; the
+        // dynamic ones (string / blob) take whatever length the word declares.
+        // Deciding that once here — rather than per subtype in both branches
+        // below — turns the wrong-width rejection (§4.6) and the fixed-width
+        // rule for array elements (§4.8) into plain comparisons.
+        let width = match subtype {
+            FixlenType::Fp32 => 4,
+            #[cfg(feature = "fp64")]
+            FixlenType::Fp64 => 8,
+            FixlenType::Str | FixlenType::Blob => 0,
+        };
+        let legal_float = width != 0 && length == width;
 
         // The second header word of a fixlen array (§4.8). It carries the
         // element subtype, so this — not the count word — is where the array is
         // announced to the visitor.
         #[cfg(feature = "array")]
-        if self.in_array {
+        if self.core.in_array {
             // Format first: an array element must be a fixed-width subtype whose
             // per-element length matches it. A string/blob subtype, or an fp32
             // that is not 4 bytes / an fp64 that is not 8, is malformed outright
             // (§4.8 allows only fixed-width subtypes here) — that is a format
             // violation, never a §7.3 schema-mismatch skip, so it is rejected
             // before the visitor hears about the array at all.
-            let kind = match subtype {
-                FixlenType::Fp32 if length == 4 => ArrayKind::Fp32,
-                #[cfg(feature = "fp64")]
-                FixlenType::Fp64 if length == 8 => ArrayKind::Fp64,
-                _ => return Err(Error::InvalidMsg),
+            if !legal_float {
+                return Err(Error::InvalidMsg);
+            }
+            // The two legal widths are the two float kinds, one to one.
+            #[cfg(feature = "fp64")]
+            let kind = if width == 4 {
+                ArrayKind::Fp32
+            } else {
+                ArrayKind::Fp64
             };
-            self.array_kind = kind;
+            #[cfg(not(feature = "fp64"))]
+            let kind = ArrayKind::Fp32;
+            self.core.array_kind = kind;
             // §4.8 step 2/3: the subtype is known, so the consumer can compare
             // it against a declared element type and skip the whole field
             // before any schema bound on `count` comes into play.
@@ -422,80 +541,135 @@ impl IStream {
                 // An empty fixlen array still carries its `fixlen_word` (so an
                 // empty fp32 stays distinct from an empty fp64), but no payload
                 // follows: resume at the next field without entering `FixlenVal`.
-                self.in_array = false;
-                self.state = State::Idle;
+                self.core.in_array = false;
+                self.core.state = State::Idle;
             } else {
-                self.state = State::FixlenVal;
+                self.core.state = State::FixlenVal;
             }
             return Ok(());
         }
 
-        match subtype {
-            FixlenType::Fp32 => {
-                if length != 4 {
-                    return Err(Error::InvalidMsg);
-                }
-                self.state = State::FixlenVal;
+        if width != 0 {
+            // A `fixlen_word` declaring any other length for fp32 / fp64 is
+            // malformed and must be rejected here, before any payload byte is
+            // consumed or waited for (§4.6, §5.2).
+            if !legal_float {
+                return Err(Error::InvalidMsg);
             }
-            #[cfg(feature = "fp64")]
-            FixlenType::Fp64 => {
-                if length != 8 {
-                    return Err(Error::InvalidMsg);
-                }
-                self.state = State::FixlenVal;
+            self.core.state = State::FixlenVal;
+            return Ok(());
+        }
+
+        // A scalar string/blob field: the array case (where these subtypes are
+        // illegal) already returned above.
+        if length == 0 {
+            // An empty string/blob has no payload to stream, so it is delivered
+            // as the single zero-length chunk the callback contract promises.
+            match subtype {
+                FixlenType::Blob => visitor.blob(self.id, 0, 0, &[]),
+                _ => visitor.string(self.id, 0, 0, &[]),
             }
-            FixlenType::Str | FixlenType::Blob => {
-                // A scalar string/blob field: the array case (where these
-                // subtypes are illegal) already returned above.
-                if length == 0 {
-                    match subtype {
-                        FixlenType::Str => visitor.string(self.id, 0, 0, &[]),
-                        FixlenType::Blob => visitor.blob(self.id, 0, 0, &[]),
-                        _ => unreachable!(),
-                    }
-                    self.state = State::Idle;
-                } else {
-                    self.state = State::FixlenRaw;
-                }
-            }
+            self.core.state = State::Idle;
+        } else {
+            self.core.state = State::FixlenRaw;
         }
         Ok(())
     }
 
+    /// Absorb one byte of an `fp32` / `fp64` payload.
+    ///
+    /// Bytes arrive least-significant first and are shifted in from the top, so
+    /// after `n` bytes the payload occupies the accumulator's top `8 * n` bits
+    /// in wire order. Both shifts are by a constant, so this needs no
+    /// variable-shift helper and no index that has to be proven in bounds.
+    #[cfg(feature = "fixlen")]
+    #[inline]
+    fn float_push(&mut self, byte: u8) {
+        #[cfg(any(feature = "value64", not(feature = "fp64")))]
+        {
+            self.core.acc = (self.core.acc >> 8) | ((byte as Unsigned) << (Unsigned::BITS - 8));
+        }
+        // Same shift, carried across the two-word window (see `acc_lo`): the
+        // byte enters at the top of the high word and each word hands its
+        // lowest byte down to the next.
+        #[cfg(all(feature = "fp64", not(feature = "value64")))]
+        {
+            self.acc_lo = (self.acc_lo >> 8) | (self.core.acc << 24);
+            self.core.acc = (self.core.acc >> 8) | ((byte as Unsigned) << 24);
+        }
+    }
+
+    /// Take the assembled 4-byte payload as an `f32`, clearing the accumulator
+    /// so the next varint starts from zero.
+    #[cfg(feature = "fixlen")]
+    #[inline]
+    fn float_take_f32(&mut self) -> f32 {
+        #[cfg(any(feature = "value64", not(feature = "fp64")))]
+        {
+            // The shift and the cast are both no-ops when the value type is
+            // already 32-bit, which is exactly what makes one expression serve
+            // both widths.
+            #[allow(clippy::unnecessary_cast)]
+            let bits = (self.core.acc >> (Unsigned::BITS - 32)) as u32;
+            self.core.acc = 0;
+            f32::from_bits(bits)
+        }
+        // Four bytes fill exactly the window's high word.
+        #[cfg(all(feature = "fp64", not(feature = "value64")))]
+        {
+            let bits = self.core.acc;
+            self.core.acc = 0;
+            f32::from_bits(bits)
+        }
+    }
+
+    /// Take the assembled 8-byte payload as an `f64`. See [`float_take_f32`].
+    #[cfg(feature = "fp64")]
+    #[inline]
+    fn float_take_f64(&mut self) -> f64 {
+        #[cfg(feature = "value64")]
+        {
+            let bits = self.core.acc;
+            self.core.acc = 0;
+            f64::from_bits(bits)
+        }
+        #[cfg(not(feature = "value64"))]
+        {
+            let bits = (u64::from(self.core.acc) << 32) | u64::from(self.acc_lo);
+            self.core.acc = 0;
+            self.acc_lo = 0;
+            f64::from_bits(bits)
+        }
+    }
+
     #[cfg(feature = "fixlen")]
     fn step_fixlen_val<V: Visitor>(&mut self, byte: u8, visitor: &mut V) -> Result<()> {
-        // Byte position within the value = bytes already accumulated. The `& 7`
-        // is a no-op on the value (`fixlen_total` is 4 or 8 here) but proves the
-        // index in-bounds so no panicking bounds check is emitted.
-        self.acc[(self.fixlen_total - self.fixlen_remaining) & 7] = byte;
+        self.float_push(byte);
         self.fixlen_remaining -= 1;
         if self.fixlen_remaining != 0 {
             return Ok(());
         }
 
-        match self.fixlen_type {
-            FixlenType::Fp32 => {
-                let bytes = [self.acc[0], self.acc[1], self.acc[2], self.acc[3]];
-                visitor.fp32(self.id, f32::from_le_bytes(bytes));
-            }
+        // `FixlenVal` is only ever entered for a float subtype whose width
+        // `on_fixlen_len` has already validated, so there is no third case to
+        // reject here — and no unreachable error path to carry.
+        match self.core.fixlen_type {
             #[cfg(feature = "fp64")]
             FixlenType::Fp64 => {
-                visitor.fp64(self.id, f64::from_le_bytes(self.acc));
+                let v = self.float_take_f64();
+                visitor.fp64(self.id, v);
             }
-            _ => return Err(Error::InvalidMsg),
+            _ => {
+                let v = self.float_take_f32();
+                visitor.fp32(self.id, v);
+            }
         }
 
-        // Next array element (reuse the element size) or back to idle.
-        #[cfg(feature = "array")]
-        if self.in_array {
-            self.array_remaining -= 1;
-            if self.array_remaining > 0 {
-                self.fixlen_remaining = self.fixlen_total;
-                return Ok(());
-            }
-            self.in_array = false;
+        // A float array's next element reuses the width its `fixlen_word`
+        // declared once for all of them (§4.8).
+        if self.advance_after_element() {
+            self.fixlen_remaining = self.fixlen_total;
         }
-        self.state = State::Idle;
         Ok(())
     }
 
@@ -519,30 +693,30 @@ impl IStream {
         // is what makes a message truncated *between* the two words INCOMPLETE
         // rather than judged on the count alone.
         #[cfg(feature = "fixlen")]
-        if self.array_fixlen {
+        if self.core.array_fixlen {
             self.array_remaining = count;
-            self.in_array = true;
-            self.state = State::FixlenLen;
+            self.core.in_array = true;
+            self.core.state = State::FixlenLen;
             return Ok(());
         }
 
         // An integer array's header is complete at the count word: there is no
         // second word, so the array is announced right away, as before.
-        visitor.array_begin(self.id, self.array_kind, count);
+        visitor.array_begin(self.id, self.core.array_kind, count);
 
         // A zero-count integer array is exactly `[ header ][ count = 0 ]` and
         // resumes at the next field (§4.7).
         if count == 0 {
-            self.in_array = false;
-            self.state = State::Idle;
+            self.core.in_array = false;
+            self.core.state = State::Idle;
             return Ok(());
         }
 
         self.array_remaining = count;
-        self.in_array = true;
+        self.core.in_array = true;
         // Only the two integer kinds can reach this point; a fixlen array
         // returned above.
-        self.state = if self.array_kind == ArrayKind::Signed {
+        self.core.state = if self.core.array_kind == ArrayKind::Signed {
             State::VarintSigned
         } else {
             State::VarintUnsigned
