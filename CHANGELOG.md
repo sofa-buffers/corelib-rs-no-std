@@ -31,6 +31,26 @@ from 0.8.0.
   heap-free profile (CORELIB_PLAN §6). It is fixed at build time — no feature,
   `cfg` or environment variable changes it.
 
+- **`ArrayKind::Fixlen` is replaced by `ArrayKind::Fp32` / `ArrayKind::Fp64`**,
+  and `Visitor::array_begin` now fires **after** a fixlen array's `fixlen_word`
+  instead of on its count varint (Crucible finding **F-0042**, CORELIB_PLAN
+  §4.8). The signature is unchanged; only the kind's domain and the fixlen call
+  site move. Migration: match on the two subtypes where you matched `Fixlen`.
+
+  Both halves are needed by the same rule. §4.8 decides a fixlen array's element
+  subtype *before* the field is acted on: a subtype that contradicts the
+  declared element type makes the whole field a §7.3 skip, and a schema `count`
+  bound must **not** be applied to it — so a consumer has to know fp32-vs-fp64
+  at the moment it is asked about the array, and must not be asked before the
+  subtype exists. Consequences, both intended: a message truncated *between* the
+  count word and the `fixlen_word` is now `INCOMPLETE` (it was judged on the
+  count alone), and an over-long array with a contradicting subtype is a skip
+  rather than a rejection. Integer arrays are untouched — they have no second
+  word, so their header still fires on the count varint — and the `ARRAY_MAX`
+  format ceiling still fires there for *every* array kind, before anything is
+  announced. A zero-count fixlen array is still announced exactly once, with the
+  subtype from its word.
+
 ### Breaking — wire output
 
 - An all-default sequence **field** no longer reaches the wire, so an all-default

@@ -101,16 +101,36 @@ impl FixlenType {
     }
 }
 
-/// Element category of an array, reported to a [`crate::Visitor`] at the start
-/// of an array field.
+/// Element type of an array, reported to a [`crate::Visitor`] at the start of an
+/// array field.
+///
+/// A fixlen array names its **element subtype** (`Fp32` / `Fp64`) rather than a
+/// collapsed "fixlen" category, because a consumer has to compare it against a
+/// declared element type before it may apply any schema bound: a header whose
+/// subtype contradicts the schema is a field that is skipped whole
+/// (CORELIB_PLAN §4.8 step 3, MESSAGE_SPEC §7.3), and a bound that belongs to a
+/// different field must not be applied to it. That is only possible if the kind
+/// distinguishes fp32 from fp64, and if the array is announced *after* the
+/// `fixlen_word` that carries the subtype — see [`crate::Visitor::array_begin`].
+///
+/// The discriminants are normative and shared by every SofaBuffers corelib that
+/// exposes this hook.
 #[cfg(feature = "array")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
 pub enum ArrayKind {
     /// Unsigned-integer elements (delivered via [`crate::Visitor::unsigned`]).
-    Unsigned,
+    Unsigned = 0,
     /// Signed-integer elements (delivered via [`crate::Visitor::signed`]).
-    Signed,
-    /// Floating-point elements (delivered via `fp32` / `fp64`).
+    Signed = 1,
+    /// 32-bit float elements (delivered via [`crate::Visitor::fp32`]).
     #[cfg(feature = "fixlen")]
-    Fixlen,
+    Fp32 = 2,
+    /// 64-bit float elements (delivered via `Visitor::fp64`).
+    ///
+    /// Present whenever `fixlen` is — the enum is a shared contract, so a
+    /// consumer's `match` on it stays feature-independent — but never reported
+    /// by a build without `fp64`, which rejects the fp64 subtype outright.
+    #[cfg(feature = "fixlen")]
+    Fp64 = 3,
 }
