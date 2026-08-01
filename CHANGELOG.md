@@ -3,7 +3,18 @@
 All notable changes to this crate. Versions follow semver with the 0.x rule that
 a **minor** bump may break API or wire output.
 
-## 0.9.0 — unreleased
+## 0.10.0 - 2026-08-01
+
+### Breaking — API
+
+`ArrayKind` gained `Fp32` and `Fp64` and lost the collapsed `Fixlen`, and the
+array-header hook now fires **after** a fixlen array's `fixlen_word` so `kind`
+names the real element subtype (CORELIB_PLAN §4.8, Crucible F-0042). A consumer
+can therefore skip a header whose subtype contradicts the declared element type
+*before* any schema `count` bound is applied to it. Generated code is the
+expected consumer and sofabgen changed in lockstep.
+
+## 0.9.0
 
 Implements MESSAGE_SPEC §2 as amended by
 [documentation#29](https://github.com/sofa-buffers/documentation/pull/29): a
