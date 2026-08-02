@@ -193,6 +193,37 @@ fn perf_encode_u64(buf: &mut [u8], src: &[u64]) -> usize {
 /// process start-up, warm-up and reporting cancelling out. The time-derived
 /// numbers the tool prints are meaningless in this mode (and under callgrind);
 /// only the callgrind totals are.
+/// How long one batch of operations runs before the clock is read again, in the
+/// adaptive mode. See [`calibrate`].
+const BATCH_SECS: f64 = 0.01;
+
+/// Operations to run between clock reads: the smallest power of two whose run
+/// spans [`BATCH_SECS`].
+///
+/// `clock_gettime(CLOCK_PROCESS_CPUTIME_ID)` is a real syscall — never
+/// vDSO-accelerated — costing on the order of a microsecond, so reading it once
+/// per iteration times the clock rather than the codec, and the cycle counter
+/// bracketing the loop absorbs it too. On the 170-byte message that was ~10x on
+/// `cycles/op`.
+///
+/// Only ever called in the adaptive mode: `SOFAB_PERF_ITERS` fixes the count
+/// precisely so the Callgrind two-rep subtraction has a known, constant amount
+/// of work to difference, and calibrating first would add an unknown amount to
+/// it.
+fn calibrate(mut body: impl FnMut()) -> u64 {
+    let mut batch: u64 = 1;
+    loop {
+        let t0 = cpu_now();
+        for _ in 0..batch {
+            body();
+        }
+        if cpu_now() - t0 >= BATCH_SECS {
+            return batch;
+        }
+        batch = batch.saturating_mul(2);
+    }
+}
+
 fn fixed_iters() -> Option<u64> {
     std::env::var("SOFAB_PERF_ITERS").ok()?.parse().ok()
 }
@@ -233,27 +264,28 @@ fn measure_encode(mut encode: impl FnMut() -> usize) -> (PerfResult, usize) {
     }
 
     let fixed = fixed_iters();
+    // One clock read per batch in both modes. Fixed mode is a single batch of
+    // exactly N; adaptive mode sizes the batch so the read is negligible against
+    // it, then runs batches to ~1 s.
+    let batch = match fixed {
+        Some(n) => n,
+        None => calibrate(|| {
+            black_box(encode());
+        }),
+    };
     let mut sink: usize = 0;
     let mut it: u64 = 0;
     let c0 = cycles::read();
     let t0 = cpu_now();
     let mut el;
     loop {
-        sink = sink.wrapping_add(encode());
-        it += 1;
-        // In fixed mode the clock is read once, at the end: a `clock_gettime`
-        // per iteration would otherwise cost more instructions than the workload
-        // and land in the per-op count.
-        if let Some(n) = fixed {
-            if it >= n {
-                el = cpu_now() - t0;
-                break;
-            }
-        } else {
-            el = cpu_now() - t0;
-            if el >= 1.0 {
-                break;
-            }
+        for _ in 0..batch {
+            sink = sink.wrapping_add(encode());
+        }
+        it += batch;
+        el = cpu_now() - t0;
+        if fixed.is_some() || el >= 1.0 {
+            break;
         }
     }
     let c1 = cycles::read();
@@ -277,27 +309,30 @@ fn measure_decode(buf: &[u8]) -> PerfResult {
     black_box(out.acc);
 
     let fixed = fixed_iters();
+    // See `measure_encode`: one clock read per batch in both modes.
+    let batch = match fixed {
+        Some(n) => n,
+        None => calibrate(|| {
+            let mut o = PerfOut::default();
+            perf_decode(black_box(buf), &mut o);
+            black_box(o.acc);
+        }),
+    };
     let mut sink: u64 = 0;
     let mut it: u64 = 0;
     let c0 = cycles::read();
     let t0 = cpu_now();
     let mut el;
     loop {
-        let mut o = PerfOut::default();
-        perf_decode(black_box(buf), &mut o);
-        sink = sink.wrapping_add(o.acc);
-        it += 1;
-        // See `measure_encode`: one clock read at the end in fixed mode.
-        if let Some(n) = fixed {
-            if it >= n {
-                el = cpu_now() - t0;
-                break;
-            }
-        } else {
-            el = cpu_now() - t0;
-            if el >= 1.0 {
-                break;
-            }
+        for _ in 0..batch {
+            let mut o = PerfOut::default();
+            perf_decode(black_box(buf), &mut o);
+            sink = sink.wrapping_add(o.acc);
+        }
+        it += batch;
+        el = cpu_now() - t0;
+        if fixed.is_some() || el >= 1.0 {
+            break;
         }
     }
     let c1 = cycles::read();
