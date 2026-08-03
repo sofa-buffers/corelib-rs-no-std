@@ -399,10 +399,26 @@ impl IStream {
     fn on_header<V: Visitor>(&mut self, header: Unsigned, visitor: &mut V) -> Result<()> {
         let wire_type = (header & 0x07) as u8;
         let id = header >> 3;
-        if id > ID_MAX as Unsigned {
-            return Err(Error::InvalidMsg);
+
+        // §6.2 scopes the `ID_MAX` ceiling to *value-bearing* headers — unsigned,
+        // signed, fixlen, the array types and sequence **start** — and names the
+        // sequence-end marker as the exclusion. Its id addresses nothing, so
+        // §4.9 has a decoder accept whatever it carries, discard it, and
+        // re-encode the marker as `0x07`; a non-zero id there is normalized away
+        // like a non-minimal varint, not `INVALID`. §4.1's 64-bit varint bound
+        // still governs the header encoding itself, on an end marker as anywhere
+        // else — only the *value* bound is lifted.
+        #[cfg(feature = "sequence")]
+        let id_is_discarded = wire_type == T_SEQUENCE_END;
+        #[cfg(not(feature = "sequence"))]
+        let id_is_discarded = false;
+
+        if !id_is_discarded {
+            if id > ID_MAX as Unsigned {
+                return Err(Error::InvalidMsg);
+            }
+            self.id = id as Id;
         }
-        self.id = id as Id;
         #[cfg(feature = "array")]
         {
             self.core.in_array = false;

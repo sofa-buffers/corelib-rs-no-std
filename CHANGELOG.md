@@ -3,6 +3,28 @@
 All notable changes to this crate. Versions follow semver with the 0.x rule that
 a **minor** bump may break API or wire output.
 
+## Unreleased
+
+### Fixed
+
+- **A sequence-end header carrying an id above `ID_MAX` is accepted again**
+  (Crucible finding **F-0054**, CORELIB_PLAN §4.9/§6.2). The decoder applied the
+  `ID_MAX` ceiling to *every* field header, including wire type 7. §6.2 scopes
+  that ceiling to **value-bearing** headers — unsigned, signed, fixlen, the array
+  types and sequence *start* — and names the end marker as the exclusion: its id
+  addresses nothing, so §4.9 has a decoder accept any value, discard it, and
+  re-encode the marker as `0x07`, exactly as a non-minimal varint is normalized
+  away. `76 87 80 80 80 40` — an unknown id opened as a sequence, closed by an
+  end marker with id 2³¹ — decoded as `INVALID` where the spec requires it to be
+  accepted.
+
+  Decode-only, and a relaxation: input this crate used to reject now decodes, and
+  nothing that decoded before changes meaning. The bound is lifted for the end
+  marker alone — an over-`ID_MAX` id on any value-bearing header stays `INVALID`,
+  at the top level and inside a sequence alike, and §4.1's 64-bit varint bound
+  still rejects an over-long header varint on an end marker as anywhere else. The
+  encoder is untouched: §4.9 still requires it to emit exactly `0x07`.
+
 ## 0.10.0 - 2026-08-01
 
 ### Breaking — API

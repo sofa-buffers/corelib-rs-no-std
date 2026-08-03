@@ -299,6 +299,90 @@ fn dangling_sequence_end_is_invalid() {
     assert_eq!(is.feed(&[0x07], &mut rec), Err(Error::InvalidMsg));
 }
 
+// --- sequence-end ids are discarded, not bounded (§4.9/§6.2) ----------------
+//
+// F-0054. `ID_MAX` bounds a *value-bearing* header's id; a sequence-end marker
+// addresses nothing, so its id is accepted at any value, discarded, and the
+// marker re-encoded as `0x07`. The three `seq_end_id_*` cases below walk that
+// id from small to `ID_MAX` to one past it — the first two already passed
+// before the fix, and are here to pin that the fix did not flip them.
+
+/// A sequence-end header carrying `id`, as its raw varint bytes.
+fn sequence_end_with_id(id: u64) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    push_varint(&mut bytes, (id << 3) | 0x07); // type tag 7 = sequence end
+    bytes
+}
+
+#[test]
+fn seq_end_id_small_is_discarded() {
+    let mut bytes = vec![0x06]; // sequence start, id 0
+    bytes.extend(sequence_end_with_id(3));
+    assert_eq!(
+        decode(&bytes),
+        [Event::SequenceBegin(0), Event::SequenceEnd]
+    );
+}
+
+#[test]
+fn seq_end_id_at_id_max_is_discarded() {
+    let mut bytes = vec![0x06];
+    bytes.extend(sequence_end_with_id(sofab::ID_MAX as u64));
+    assert_eq!(
+        decode(&bytes),
+        [Event::SequenceBegin(0), Event::SequenceEnd]
+    );
+}
+
+#[test]
+fn seq_end_id_above_id_max_is_discarded() {
+    // The F-0054 isolate verbatim: `76 87 80 80 80 40`. Id 14 opened as a
+    // sequence, closed by an end marker whose id is 2^31 — one past `ID_MAX`.
+    // §4.9 requires this to decode as an ordinary sequence end, not `INVALID`.
+    let bytes = [0x76, 0x87, 0x80, 0x80, 0x80, 0x40];
+    assert_eq!(
+        decode(&bytes),
+        [Event::SequenceBegin(14), Event::SequenceEnd]
+    );
+
+    // And the id it carries is genuinely discarded rather than truncated into
+    // the decoder's current id: the field that follows still binds to its own.
+    let mut framed = bytes.to_vec();
+    framed.extend([0x30, 0x2A]); // unsigned id 6 = 42
+    assert_eq!(
+        decode(&framed),
+        [
+            Event::SequenceBegin(14),
+            Event::SequenceEnd,
+            Event::Unsigned(6, 42),
+        ]
+    );
+}
+
+#[test]
+fn id_above_max_on_sequence_start_is_invalid() {
+    // The carve-out is for the end marker only: sequence *start* is
+    // value-bearing (its id names the field), so the ceiling still binds it.
+    let mut bytes = Vec::new();
+    push_varint(&mut bytes, ((sofab::ID_MAX as u64 + 1) << 3) | 0x06);
+    let mut rec = Recorder::new();
+    let mut is = IStream::new();
+    assert_eq!(is.feed(&bytes, &mut rec), Err(Error::InvalidMsg));
+}
+
+#[test]
+fn id_above_max_inside_open_sequence_is_invalid() {
+    // §6.5's recurring defect class — a guard relaxed on one surface leaking to
+    // another. An over-`ID_MAX` *unsigned* header must stay `INVALID` nested
+    // inside a sequence, exactly as it is at the top level.
+    let mut bytes = vec![0x06]; // sequence start, id 0
+    push_varint(&mut bytes, (sofab::ID_MAX as u64 + 1) << 3); // type tag 0 = unsigned
+    bytes.push(0x00); // value
+    let mut rec = Recorder::new();
+    let mut is = IStream::new();
+    assert_eq!(is.feed(&bytes, &mut rec), Err(Error::InvalidMsg));
+}
+
 #[test]
 fn id_above_max_is_invalid() {
     // Craft a header whose id field is ID_MAX + 1, type unsigned.
