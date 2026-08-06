@@ -2,10 +2,11 @@
 //!
 //! [`IStream`] is a byte-at-a-time state machine. Feed it arbitrary chunks with
 //! [`IStream::feed`]; it parses field headers and pushes decoded fields to your
-//! [`Visitor`]. Scalars and floats are delivered whole; string/blob payloads are
-//! delivered in chunks (so they may exceed RAM); array elements are announced
-//! with [`Visitor::array_begin`] and then delivered through the scalar/float
-//! callbacks.
+//! [`Visitor`]. Scalars and floats are delivered whole; a scalar fixlen field is
+//! announced at its length word with [`Visitor::fixlen_begin`] and its
+//! string/blob payload then delivered in chunks (so it may exceed RAM); array
+//! elements are announced with [`Visitor::array_begin`] and then delivered
+//! through the scalar/float callbacks.
 //!
 //! Unlike the C decoder there is no per-field "bind a destination" step and no
 //! explicit skip bookkeeping: a [`Visitor`] simply ignores fields it does not
@@ -58,6 +59,28 @@ pub trait Visitor {
     /// A chunk of a blob field. See [`Visitor::string`] for the chunking model.
     #[cfg(feature = "fixlen")]
     fn blob(&mut self, id: Id, total: usize, offset: usize, chunk: &[u8]) {}
+
+    /// Start of a scalar fixlen field, announced after its length word is read
+    /// and validated and **before** any payload byte. Fired exactly **once** per
+    /// field, `total == 0` included, and never for an array element (an array is
+    /// announced through [`Visitor::array_begin`] instead).
+    ///
+    /// This is the scalar twin of `array_begin`, and exists for the same reason:
+    /// a schema bound established by the length word alone — a string/blob whose
+    /// `total` exceeds a `maxlen` — must be latchable *at the word*. CORELIB_PLAN
+    /// §5.2 makes INVALID dominate INCOMPLETE, so a message truncated exactly at
+    /// the length word cannot be allowed to degrade to INCOMPLETE while the same
+    /// bytes read whole are INVALID; without this callback the only event
+    /// carrying `total` is [`Visitor::string`] / [`Visitor::blob`], which cannot
+    /// fire for a message that ends there. Raising from this callback is what a
+    /// consumer uses to turn the field INVALID at the word.
+    ///
+    /// `subtype` is the subtype actually on the wire (string / blob / fp32 /
+    /// fp64): the corelib knows what *arrived*, not what was *declared*, so a
+    /// consumer whose field expects a different subtype treats this as a §7.3
+    /// skip rather than measuring `total` against that field's bound.
+    #[cfg(feature = "fixlen")]
+    fn fixlen_begin(&mut self, id: Id, subtype: FixlenType, total: usize) {}
 
     /// Start of an array field with `count` elements of the given `kind`. The
     /// elements follow via the scalar / float callbacks with the same `id`.
@@ -549,13 +572,24 @@ impl IStream {
             return Ok(());
         }
 
+        // A `fixlen_word` declaring any other length for fp32 / fp64 is
+        // malformed and must be rejected here, before the header hook fires or
+        // any payload byte is consumed or waited for (§4.6, §5.2).
+        if width != 0 && !legal_float {
+            return Err(Error::InvalidMsg);
+        }
+
+        // Announce the scalar field at its length word — after the word is read
+        // and validated, before any payload byte — so a schema `maxlen`
+        // violation is latchable *here* (CORELIB_PLAN §5.2, and see
+        // [`Visitor::fixlen_begin`]): a message that ends exactly at this word
+        // must stay INVALID rather than degrade to INCOMPLETE. This is the
+        // scalar twin of the `array_begin` above; the array case has already
+        // returned, so this fires once per scalar fixlen field, `total == 0`
+        // included.
+        visitor.fixlen_begin(self.id, subtype, length);
+
         if width != 0 {
-            // A `fixlen_word` declaring any other length for fp32 / fp64 is
-            // malformed and must be rejected here, before any payload byte is
-            // consumed or waited for (§4.6, §5.2).
-            if !legal_float {
-                return Err(Error::InvalidMsg);
-            }
             self.core.state = State::FixlenVal;
             return Ok(());
         }
