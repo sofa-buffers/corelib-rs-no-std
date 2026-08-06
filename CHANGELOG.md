@@ -3,6 +3,30 @@
 All notable changes to this crate. Versions follow semver with the 0.x rule that
 a **minor** bump may break API or wire output.
 
+## Unreleased
+
+### Added
+
+- **`Visitor::fixlen_begin(id, subtype, total)`** — a scalar fixlen field is now
+  announced at its **length word**, after the word is read and validated and
+  before any payload byte, exactly as an array is announced at its count word
+  through `array_begin` (issue #68, CORELIB_PLAN §5.2). It fires once per scalar
+  fixlen field, `total == 0` included, and never for an array element.
+
+  This closes an ordering gap: the only event carrying a string/blob `total` was
+  `Visitor::string` / `Visitor::blob` on the payload path, which cannot fire for
+  a message truncated exactly at the length word. A `maxlen` violation is fully
+  established by that word, and §5.2 makes **INVALID dominate INCOMPLETE** — so
+  without this hook `[1a, 52]` (tag + length word for an over-bound string, no
+  payload) degraded to INCOMPLETE, while the same bytes read whole are INVALID, a
+  chunk-boundary-dependent verdict §6.4/§7.2 forbid. The hook lets generated code
+  latch the violation at the word.
+
+  Additive and non-breaking: a default-empty trait method (like `array_begin`),
+  monomorphized away for any visitor that does not override it, so it costs a
+  `no_std` consumer nothing it does not already opt into. No existing visitor
+  changes behavior; no wire output changes.
+
 ## 0.10.0 - 2026-08-01
 
 ### Breaking — API
