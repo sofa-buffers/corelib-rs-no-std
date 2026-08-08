@@ -115,7 +115,8 @@ let mut out = Vec::new();                     // or a UART / socket / flash page
 {
     let mut os = OStream::with_flush(&mut scratch, 0, |chunk: &[u8]| {
         out.extend_from_slice(chunk);         // called every time the window fills
-    });
+    })
+    .unwrap();                                // rejects a window below MIN_OUTPUT_BUFFER
     for i in 0..1000u32 {
         os.write_unsigned(i, i as u64).unwrap();
     }
@@ -306,6 +307,24 @@ nothing is ever boxed — no allocation in either direction.**
 - **Encode ([`OStream`])** — writes into the caller's `&mut [u8]`, borrowed for
   the stream's lifetime; each `write_*` copies into it immediately. Buffer full
   → `Error::BufferFull`, or drained via the [`Flush`] sink.
+- **`MIN_OUTPUT_BUFFER` = 1** — the smallest buffer this port accepts **for
+  streaming**, i.e. one installed *together with* a `Flush` sink. Every byte goes
+  through a single-byte push primitive that flushes and resumes on its own, so no
+  atomic unit has to land contiguously: a message of any size streams through a
+  one-byte window and produces bytes identical to the one-shot encoding. The
+  constant binds `OStream::with_flush` and `OStream::buffer_set`, which require
+  `buffer.len() - offset >= MIN_OUTPUT_BUFFER` and return `Error::Argument`
+  **where the buffer is handed over**, never partway through a message. An
+  out-of-range `offset` is rejected the same way on every installation path,
+  including `OStream::with_offset`.
+- **A buffer installed without a sink is subject to no minimum.** No flush can
+  occur, so the buffer either holds the message or reports `Error::BufferFull` —
+  size it from your message's worst case and it stays exact (a two-byte message
+  encodes into a two-byte buffer).
+- **No pass-through.** This port never hands a sink memory that is not the
+  installed output buffer; a `string`/`blob` run is copied through the buffer
+  like anything else, so a sink may assume every slice it receives points into
+  the buffer it installed.
 - **Decode ([`IStream`] + [`Visitor`])** — reads the caller's `&[u8]`, borrowed
   only for the `feed` call; values are delivered **by value** the instant they
   decode (so destinations need not be address-stable). A string/blob

@@ -71,6 +71,54 @@ impl Flush for NoFlush {
 #[cfg(feature = "sequence")]
 pub const LAZY_SEQ_DEPTH: usize = 8;
 
+/// Smallest output buffer this port accepts **for streaming** — a buffer
+/// installed together with a [`Flush`] sink (CORELIB_PLAN §5.1).
+///
+/// **This port declares `1`**, the strictest value the spec allows and the one
+/// it calls "the right choice for a footprint profile". Every byte this encoder
+/// produces goes through a single-byte push primitive that flushes and resumes
+/// on its own, so **no atomic unit has to land contiguously** — not a field
+/// header, not a `fixlen_word`, not a float element. A caller can therefore
+/// stream a message of any size through a one-byte window, and the bytes are
+/// identical to the one-shot encoding (asserted in `tests/api_tests.rs`, over a
+/// payload far longer than the window).
+///
+/// The constant binds a buffer handed to [`OStream::with_flush`] or
+/// [`OStream::buffer_set`]: such a buffer **MUST** satisfy
+/// `buffer.len() - offset >= MIN_OUTPUT_BUFFER` and is rejected with
+/// [`Error::Argument`] **where it is handed over**, never partway through a
+/// message.
+///
+/// **A buffer installed without a sink is subject to no minimum.** No flush can
+/// occur, so nothing can be split and the constant has nothing to say: the
+/// buffer either holds the message or reports [`Error::BufferFull`]. That is the
+/// case a caller sizes from a generated `MAX_SIZE`, and it stays exact — a
+/// message that encodes to two bytes encodes into a two-byte buffer.
+pub const MIN_OUTPUT_BUFFER: usize = 1;
+
+/// Validate a buffer/offset pair at the point it is handed to the encoder
+/// (CORELIB_PLAN §5.1).
+///
+/// Two independent conditions, both reported as [`Error::Argument`]:
+///
+/// * **the offset is in range** — `offset > buffer.len()` is an out-of-range
+///   offset on *every* installation path, sink or not. Left unchecked it is not
+///   merely a bad argument: the first write sees `offset >= len`, flushes the
+///   whole stale buffer downstream as if those bytes were message content, and
+///   resumes at 0 — silently prepending garbage to the message;
+/// * **the streaming minimum** — only when a sink is installed, per §5.1.
+#[inline]
+fn check_install(len: usize, offset: usize, sinks: bool) -> Result<()> {
+    let room = match len.checked_sub(offset) {
+        Some(room) => room,
+        None => return Err(Error::Argument),
+    };
+    if sinks && room < MIN_OUTPUT_BUFFER {
+        return Err(Error::Argument);
+    }
+    Ok(())
+}
+
 /// Streaming Sofab encoder writing into a caller-provided buffer.
 pub struct OStream<'a, F: Flush = NoFlush> {
     buffer: &'a mut [u8],
@@ -95,26 +143,26 @@ pub struct OStream<'a, F: Flush = NoFlush> {
 impl<'a> OStream<'a, NoFlush> {
     /// Create an encoder over `buffer` with no flush sink. Writing past the end
     /// of the buffer returns [`Error::BufferFull`].
+    ///
+    /// Infallible: the cursor starts at `0`, which is in range for every buffer
+    /// including an empty one, and no sink means no [`MIN_OUTPUT_BUFFER`]
+    /// (§5.1). Use [`OStream::with_offset`] to reserve header room.
     #[inline]
     pub fn new(buffer: &'a mut [u8]) -> Self {
-        Self::with_offset(buffer, 0)
+        OStream::install(buffer, 0, NoFlush)
     }
 
     /// Like [`OStream::new`] but begin writing at `offset` bytes into the
     /// buffer, reserving space for a lower-layer protocol header.
+    ///
+    /// Returns [`Error::Argument`] if `offset` lies past the end of `buffer`.
+    /// No minimum applies — a buffer installed without a sink can be any size
+    /// (§5.1), so `offset == buffer.len()` is accepted and simply leaves no room
+    /// (the first write reports [`Error::BufferFull`]).
     #[inline]
-    pub fn with_offset(buffer: &'a mut [u8], offset: usize) -> Self {
-        OStream {
-            buffer,
-            offset,
-            flush: NoFlush,
-            #[cfg(feature = "sequence")]
-            depth: 0,
-            #[cfg(feature = "sequence")]
-            pending: [0; LAZY_SEQ_DEPTH],
-            #[cfg(feature = "sequence")]
-            npending: 0,
-        }
+    pub fn with_offset(buffer: &'a mut [u8], offset: usize) -> Result<Self> {
+        check_install(buffer.len(), offset, NoFlush::SINKS)?;
+        Ok(OStream::install(buffer, offset, NoFlush))
     }
 }
 
@@ -122,12 +170,25 @@ impl<'a, F: Flush> OStream<'a, F> {
     /// Create an encoder with a flush `sink`, starting at `offset`. When the
     /// buffer fills, the accumulated bytes are passed to `sink` and writing
     /// resumes at the start of the buffer.
+    ///
+    /// The buffer is checked **here**, where it is handed over, rather than
+    /// partway through a message (§5.1): [`Error::Argument`] if `offset` lies
+    /// past the end of `buffer`, or if the remaining room
+    /// `buffer.len() - offset` is below [`MIN_OUTPUT_BUFFER`].
     #[inline]
-    pub fn with_flush(buffer: &'a mut [u8], offset: usize, sink: F) -> Self {
+    pub fn with_flush(buffer: &'a mut [u8], offset: usize, sink: F) -> Result<Self> {
+        check_install(buffer.len(), offset, F::SINKS)?;
+        Ok(OStream::install(buffer, offset, sink))
+    }
+
+    /// Build the stream once the buffer/offset pair has been accepted. Private,
+    /// so the checks above are the only way in.
+    #[inline]
+    fn install(buffer: &'a mut [u8], offset: usize, flush: F) -> Self {
         OStream {
             buffer,
             offset,
-            flush: sink,
+            flush,
             #[cfg(feature = "sequence")]
             depth: 0,
             #[cfg(feature = "sequence")]
@@ -150,18 +211,38 @@ impl<'a, F: Flush> OStream<'a, F> {
         // `F::SINKS` is a compile-time constant: for a `NoFlush` encoder the
         // whole body folds away and this is just `self.offset`.
         if used > 0 && F::SINKS {
-            self.flush.flush(&self.buffer[..used]);
+            // `min` proves the slice end in-bounds. `check_install` already
+            // guarantees `offset <= len` on every installation path and
+            // `push_byte` only advances the cursor into a slot it obtained, so
+            // the clamp never fires — spelling it this way is what keeps
+            // `core::panicking` out of the image (README "Footprint") rather
+            // than resting the no-panic property on that reasoning.
+            let end = used.min(self.buffer.len());
+            self.flush.flush(&self.buffer[..end]);
             self.offset = 0;
         }
         used
     }
 
-    /// Replace the active buffer (typically called from within a flush sink),
-    /// resuming writes at `offset` in the new buffer.
+    /// Replace the active buffer, resuming writes at `offset` in the new buffer.
+    ///
+    /// Checked exactly as the installing constructors are, because it *is* an
+    /// installation (§5.1): [`Error::Argument`] if `offset` lies past the end of
+    /// `buffer`, or — when this stream has a flush sink — if the remaining room
+    /// is below [`MIN_OUTPUT_BUFFER`]. On an error the previous buffer stays
+    /// installed untouched, so a rejected swap cannot strand the encoder.
+    ///
+    /// The start offset belongs to the **installation**, not to the buffer: this
+    /// call's `offset` is consumed once, and any later flush that returns
+    /// without a new installation resumes at `0`. Passing the *same* buffer is a
+    /// new installation like any other — that is how a caller re-arms header
+    /// room for the next unit.
     #[inline]
-    pub fn buffer_set(&mut self, buffer: &'a mut [u8], offset: usize) {
+    pub fn buffer_set(&mut self, buffer: &'a mut [u8], offset: usize) -> Result<()> {
+        check_install(buffer.len(), offset, F::SINKS)?;
         self.buffer = buffer;
         self.offset = offset;
+        Ok(())
     }
 
     // --- primitives ---------------------------------------------------------
