@@ -433,3 +433,197 @@ fn empty_input_is_complete() {
     // Zero bytes end (trivially) exactly at a field boundary.
     assert_eq!(outcome(&[]), Ok(()));
 }
+
+// --- §7.2 item 5: the id ceiling binds *every* header ------------------------
+
+#[test]
+fn oversized_id_on_a_sequence_end_header_is_invalid() {
+    // §6.2 admits no exception: `ID_MAX` bounds the id of every field header,
+    // the value-bearing ones and the **sequence-end** marker alike. That a
+    // sequence end's id is discarded rather than used (§4.9) does not exempt it
+    // — the ceiling is stated over headers, not over headers whose id a decoder
+    // happens to consult.
+    //
+    // The spec calls this case out by name because an implementation that
+    // validates the id only in the branches that *use* it passes
+    // `id_above_max_is_invalid` above and fails exactly here.
+    let mut bytes = vec![0x06]; // sequence start, id 0 — so the end is balanced
+    push_varint(&mut bytes, ((sofab::ID_MAX as u64 + 1) << 3) | 0x07);
+    assert_eq!(outcome(&bytes), Err(Error::InvalidMsg));
+}
+
+// --- §7.2 item 5b: tolerance — non-canonical but well-formed -----------------
+//
+// The mirror of the malformed-input tests: input a decoder must NOT reject.
+// These are the cases a majority-vote conformance check cannot catch, since
+// every implementation may be uniformly too strict. Each one must decode to the
+// value it denotes **and** re-encode canonically (§4.1, §4.9).
+
+/// Re-encode a recorded event stream, so "decodes to the value it denotes and
+/// re-encodes canonically" is asserted rather than argued. Covers only the
+/// event kinds the tolerance tests below produce.
+///
+/// Sequences close with `write_sequence_end_keep`: these frames were *on the
+/// wire*, so the frame itself carries information and must survive the
+/// round-trip. `write_sequence_end` would drop a contentless one, which is the
+/// MESSAGE_SPEC §2 omission of an all-default sequence *field* — a schema
+/// property, not a property of these bytes.
+fn reencode(events: &[Event]) -> Vec<u8> {
+    let mut buf = [0u8; 128];
+    let used = {
+        let mut os = sofab::OStream::new(&mut buf);
+        let mut i = 0;
+        while i < events.len() {
+            match &events[i] {
+                Event::Unsigned(id, v) => os.write_unsigned(*id, *v).unwrap(),
+                Event::Signed(id, v) => os.write_signed(*id, *v).unwrap(),
+                Event::Fp32(id, bits) => os.write_fp32(*id, f32::from_bits(*bits)).unwrap(),
+                Event::SequenceBegin(id) => os.write_sequence_begin_lazy(*id).unwrap(),
+                Event::SequenceEnd => os.write_sequence_end_keep().unwrap(),
+                Event::ArrayBegin(id, ArrayKind::Unsigned, count) => {
+                    // The elements follow as their own events; take them here so
+                    // the array is written as one field.
+                    let elems: Vec<u64> = events[i + 1..i + 1 + count]
+                        .iter()
+                        .map(|e| match e {
+                            Event::Unsigned(_, v) => *v,
+                            other => panic!("unsigned array element expected, got {other:?}"),
+                        })
+                        .collect();
+                    os.write_array_unsigned(*id, &elems).unwrap();
+                    i += count;
+                }
+                other => panic!("reencode: unsupported event {other:?}"),
+            }
+            i += 1;
+        }
+        os.bytes_used()
+    };
+    buf[..used].to_vec()
+}
+
+/// Assert that `noncanonical` decodes exactly like `canonical` and re-encodes
+/// to it — never `INVALID`.
+fn tolerated(noncanonical: &[u8], canonical: &[u8]) {
+    assert_eq!(
+        outcome(noncanonical),
+        Ok(()),
+        "non-canonical but well-formed input must not be rejected",
+    );
+    let events = decode(noncanonical);
+    assert_eq!(events, decode(canonical), "must decode to the same value");
+    assert_eq!(reencode(&events), canonical, "must re-encode canonically");
+}
+
+#[test]
+fn a_non_minimal_field_header_is_tolerated() {
+    // `0x80 0x00` is id 0 / type 0 spelled in two bytes. §4.1: minimality is
+    // required on encode, tolerated on decode.
+    tolerated(&[0x80, 0x00, 0x00], &[0x00, 0x00]);
+}
+
+#[test]
+fn a_non_minimal_fixlen_word_is_tolerated() {
+    // fp32, length 4, subtype 0 — word `0x20` spelled as `0xA0 0x00`.
+    let payload = [0x00, 0x00, 0x80, 0x3F]; // 1.0f32, little-endian
+    let mut noncanonical = vec![0x02, 0xA0, 0x00];
+    noncanonical.extend_from_slice(&payload);
+    let mut canonical = vec![0x02, 0x20];
+    canonical.extend_from_slice(&payload);
+    tolerated(&noncanonical, &canonical);
+}
+
+#[test]
+fn a_non_minimal_element_count_is_tolerated() {
+    // Unsigned array, count 1 spelled `0x81 0x00`, one element = 42.
+    tolerated(&[0x03, 0x81, 0x00, 0x2A], &[0x03, 0x01, 0x2A]);
+}
+
+#[test]
+fn a_sequence_end_id_that_is_non_zero_but_in_range_is_tolerated() {
+    // §4.9: the marker closes the innermost open sequence **whatever the id
+    // says**. `0x0F` is id 1 / type 7 — an ordinary sequence end that must
+    // re-emit as `0x07`. Rejecting it is the "uniformly too strict" failure
+    // this item exists to catch.
+    tolerated(&[0x06, 0x0F], &[0x06, 0x07]);
+
+    // The same id at the top of its range, to pin that the tolerance is the
+    // whole range and not a special case for small ids.
+    let mut bytes = vec![0x06];
+    push_varint(&mut bytes, ((sofab::ID_MAX as u64) << 3) | 0x07);
+    tolerated(&bytes, &[0x06, 0x07]);
+}
+
+#[test]
+fn a_non_minimally_spelled_sequence_end_is_tolerated() {
+    // `0x87 0x00` — id 0, type 7, two bytes. Both tolerances at once.
+    tolerated(&[0x06, 0x87, 0x00], &[0x06, 0x07]);
+}
+
+// --- §7.2 item 6: no partial evaluation of a varint --------------------------
+
+#[test]
+fn a_fixlen_word_cut_after_a_reserved_subtype_byte_is_incomplete() {
+    // §4.1: a varint has **no value** until its final byte. The low 3 bits of
+    // any varint are settled by its first byte — so after `0x84` the subtype
+    // `0x4` (reserved) is already arithmetically fixed and no continuation byte
+    // can change it. A decoder MUST NOT act on it: the word is unfinished, so
+    // the message is INCOMPLETE, not INVALID.
+    //
+    // Nothing else in the malformed/truncation suites exercises this rule — a
+    // dangling `0x80` carries no settled sub-field to peek at, and
+    // `reserved_fixlen_subtype_is_invalid` above feeds the *complete* word.
+    assert_eq!(outcome(&[0x02, 0x84]), Err(Error::Incomplete));
+    assert_eq!(outcome(&[0x02, 0x8C]), Err(Error::Incomplete)); // subtype 0x5
+    assert_eq!(outcome(&[0x02, 0xB4]), Err(Error::Incomplete)); // subtype 0x4, longer
+
+    // Completing the same word settles it — and *then* the reserved subtype is
+    // INVALID. The two outcomes differ only in where the bytes stop, which is
+    // the whole point.
+    assert_eq!(outcome(&[0x02, 0x84, 0x00]), Err(Error::InvalidMsg));
+
+    // The same for a fixlen array's second word, reached after the count.
+    assert_eq!(outcome(&[0x05, 0x01, 0x84]), Err(Error::Incomplete));
+}
+
+// --- §7.2 item 4: a fed chunk is borrowed only for the duration of `feed` ----
+
+#[test]
+fn a_fed_chunk_may_be_overwritten_the_moment_feed_returns() {
+    // §6 chunk lifetime: once `feed` returns, the caller may reuse, overwrite or
+    // free that memory and the decoded message MUST NOT be affected. Every chunk
+    // is scrubbed with a fill byte immediately after the call, and — because the
+    // same scratch buffer is reused for all of them — a decoder that kept a
+    // slice into a fed chunk reads back the fill pattern. Nothing else in the
+    // suite would notice.
+    let text = "a string long enough to straddle several chunk boundaries";
+    let blob: Vec<u8> = (0..64u16).map(|i| i as u8).collect();
+
+    let mut buf = [0u8; 256];
+    let used = {
+        let mut os = sofab::OStream::new(&mut buf);
+        os.write_unsigned(1, 300).unwrap();
+        os.write_str(2, text).unwrap();
+        os.write_blob(3, &blob).unwrap();
+        os.write_signed(4, -7).unwrap();
+        os.bytes_used()
+    };
+    let wire = buf[..used].to_vec();
+    let want = decode(&wire);
+
+    for chunk_size in [1usize, 5, 7, 16] {
+        let mut rec = Recorder::new();
+        let mut is = IStream::new();
+        let mut scratch = [0u8; 16];
+        for piece in wire.chunks(chunk_size) {
+            let n = piece.len();
+            scratch[..n].copy_from_slice(piece);
+            match is.feed(&scratch[..n], &mut rec) {
+                Ok(()) | Err(Error::Incomplete) => {}
+                Err(e) => panic!("chunked decode (chunk={chunk_size}): {e:?}"),
+            }
+            scratch.fill(0xAA); // the caller reuses the buffer straight away
+        }
+        assert_eq!(rec.events, want, "chunk size {chunk_size}");
+    }
+}
