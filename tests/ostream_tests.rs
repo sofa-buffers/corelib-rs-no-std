@@ -413,7 +413,7 @@ fn a_committed_run_survives_a_flush_boundary() {
     let mut out: Vec<u8> = Vec::new();
     let mut buf = [0u8; 3]; // smaller than the message: at least one flush lands
     {
-        let mut os = sofab::OStream::with_flush(&mut buf, 0, |d: &[u8]| out.extend_from_slice(d));
+        let mut os = sofab::OStream::with_flush(&mut buf, 0, |d: &[u8]| out.extend_from_slice(d)).unwrap();
         writes(&mut os);
         os.flush();
     }
@@ -473,7 +473,7 @@ fn a_cut_run_keeps_the_ids_it_did_not_emit() {
             );
             let used_small = os.bytes_used();
             // Documented recovery: hand the encoder a fresh buffer and retry.
-            os.buffer_set(&mut big, 0);
+            os.buffer_set(&mut big, 0).unwrap();
             os.write_unsigned(0, 42).unwrap();
             for _ in 0..3 {
                 os.write_sequence_end().unwrap();
@@ -518,7 +518,7 @@ fn a_cut_run_recovers_through_end_keep_too() {
                 "room = {room}"
             );
             let used_small = os.bytes_used();
-            os.buffer_set(&mut big, 0);
+            os.buffer_set(&mut big, 0).unwrap();
             // Retrying the failed closer picks the run up where it was cut; the
             // depth budget was never spent, so all three still close.
             for _ in 0..3 {
@@ -839,7 +839,8 @@ fn flush_sink_streams_large_message() {
     {
         let mut os = OStream::with_flush(&mut buf, 0, |chunk: &[u8]| {
             collected.extend_from_slice(chunk);
-        });
+        })
+        .unwrap();
         for i in 0..10u32 {
             os.write_unsigned(i, i as u64).unwrap();
         }

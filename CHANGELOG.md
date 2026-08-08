@@ -5,6 +5,60 @@ a **minor** bump may break API or wire output.
 
 ## Unreleased
 
+### Fixed
+
+- **A stale output buffer could be flushed downstream as message content.**
+  `OStream::with_flush` / `buffer_set` accepted an `offset` past the end of the
+  buffer. The first write then saw `offset >= len`, handed the buffer's entire
+  previous content to the sink as if those bytes were part of the message, and
+  resumed at 0 — silently prepending garbage. Installing a 4-byte buffer at
+  offset 9 produced `ee ee ee ee 08 2a` where the one-shot encoding is `08 2a`.
+- **`OStream::flush()` could panic.** With a sink and `offset > buffer.len()` it
+  sliced past the buffer (`range end index 9 out of range for slice of length
+  4`). A reachable panic contradicts this crate's `#![forbid(unsafe_code)]` /
+  no-`core::panicking` footprint guarantee, and on bare metal it is a hard fault.
+  The slice is now clamped as well as unreachable.
+
+Both had one root cause: no installation path validated the buffer/offset pair.
+
+### Added
+
+- **`MIN_OUTPUT_BUFFER` (= `1`)** — the smallest buffer this port accepts *for
+  streaming*, now declared, documented and enforced as CORELIB_PLAN §5.1
+  requires. This encoder splits every atomic unit (one single-byte push
+  primitive that flushes and resumes on its own), so it declares the strictest
+  value the spec allows — the footprint-profile choice — and imposes no
+  requirement on its caller beyond a non-empty window.
+
+  It binds a buffer installed **with a flush sink**, at installation and at
+  every mid-stream buffer-set, and **nothing else**: a buffer installed without
+  a sink is subject to no minimum, since no flush can occur and the buffer
+  either holds the message or reports `BufferFull`. Both halves are covered by
+  the §7.2 item 4 tests (`tests/api_tests.rs`), including an encode through a
+  window of exactly `MIN_OUTPUT_BUFFER` asserted byte-identical to the one-shot
+  output over a payload far longer than the window.
+
+### Changed
+
+**Breaking** — the buffer-installation paths are now fallible, which is what
+§5.1 means by "rejected where it is handed over, by the same mechanism the port
+uses for an out-of-range offset":
+
+| before | after |
+|---|---|
+| `OStream::with_offset(buf, off) -> Self` | `-> Result<Self>` |
+| `OStream::with_flush(buf, off, sink) -> Self` | `-> Result<Self>` |
+| `OStream::buffer_set(buf, off) -> ()` | `-> Result<()>` |
+
+All three return `Error::Argument` for an `offset` past the end of the buffer;
+the two sink-carrying ones also reject `buffer.len() - offset <
+MIN_OUTPUT_BUFFER`. A rejected `buffer_set` is a no-op — the previous buffer
+stays installed, so a refused swap cannot strand the encoder or lose written
+bytes. `OStream::new` is unchanged and stays infallible: its cursor starts at 0,
+which is in range for every buffer, and it installs no sink.
+
+Migration is a `?` or `.unwrap()` at each call site; no wire output changes.
+
 ### Added
 
 - **`Visitor::fixlen_begin(id, subtype, total)`** — a scalar fixlen field is now
