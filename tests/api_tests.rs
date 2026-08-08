@@ -107,7 +107,10 @@ fn an_offset_past_the_end_is_rejected_on_every_installation_path() {
     let mut sink = |_: &[u8]| {};
 
     let mut buf = [0u8; 4];
-    assert_eq!(OStream::with_offset(&mut buf, 5).err(), Some(Error::Argument));
+    assert_eq!(
+        OStream::with_offset(&mut buf, 5).err(),
+        Some(Error::Argument)
+    );
 
     let mut buf = [0u8; 4];
     assert_eq!(

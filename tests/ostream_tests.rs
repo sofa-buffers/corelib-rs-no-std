@@ -413,7 +413,8 @@ fn a_committed_run_survives_a_flush_boundary() {
     let mut out: Vec<u8> = Vec::new();
     let mut buf = [0u8; 3]; // smaller than the message: at least one flush lands
     {
-        let mut os = sofab::OStream::with_flush(&mut buf, 0, |d: &[u8]| out.extend_from_slice(d)).unwrap();
+        let mut os =
+            sofab::OStream::with_flush(&mut buf, 0, |d: &[u8]| out.extend_from_slice(d)).unwrap();
         writes(&mut os);
         os.flush();
     }
