@@ -43,6 +43,21 @@ a **minor** bump may break API or wire output.
 
 Both had one root cause: no installation path validated the buffer/offset pair.
 
+- **A mid-stream `buffer_set` under a flush sink discarded the buffered bytes.**
+  `OStream::buffer_set` overwrote the buffer pointer and the cursor without
+  draining, so with a sink installed everything written since the last flush was
+  dropped: it never reached the sink, the caller no longer owned the buffer it
+  was in, and the call still returned `Ok(())`. Writing field 1, swapping
+  buffers, writing field 2 emitted `10 07` where the one-shot encoding is
+  `08 2a 10 07` — a silently truncated message, which CORELIB_PLAN §5.1 forbids
+  ("MUST produce output byte-identical to the one-shot path"). The swap now
+  drains to the sink first, after the buffer/offset check so a rejected swap
+  stays a no-op, and writing resumes at the new installation's `offset`.
+  `Flush::SINKS` is a compile-time constant, so a `NoFlush` encoder folds the
+  drain away entirely: with no sink the caller still owns the old buffer and the
+  `BufferFull` recovery path (install a bigger buffer, retry the failed write) is
+  unchanged, byte for byte. No new allocation, no new panic path.
+
 ### Added
 
 - **`MIN_OUTPUT_BUFFER` (= `1`)** — the smallest buffer this port accepts *for

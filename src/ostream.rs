@@ -237,9 +237,25 @@ impl<'a, F: Flush> OStream<'a, F> {
     /// without a new installation resumes at `0`. Passing the *same* buffer is a
     /// new installation like any other — that is how a caller re-arms header
     /// room for the next unit.
+    ///
+    /// **With a sink installed, the outgoing buffer is drained first.** The bytes
+    /// written since the last flush live in the buffer being replaced, and the
+    /// swap consumes that buffer, so they are handed to the sink here: a
+    /// mid-stream swap keeps the emitted stream byte-identical to the one-shot
+    /// encoding instead of dropping everything buffered since the last flush.
+    /// [`Flush::SINKS`] is a compile-time constant, so a [`NoFlush`] encoder
+    /// folds this away entirely — with no sink there is nothing to drain to, the
+    /// caller still owns the buffer it handed over, and the documented
+    /// [`Error::BufferFull`] recovery (install a bigger buffer, retry the failed
+    /// write) is unchanged.
     #[inline]
     pub fn buffer_set(&mut self, buffer: &'a mut [u8], offset: usize) -> Result<()> {
         check_install(buffer.len(), offset, F::SINKS)?;
+        // After the check, never before it: a rejected swap must leave the
+        // encoder exactly as it was, buffered bytes included.
+        if F::SINKS {
+            self.flush();
+        }
         self.buffer = buffer;
         self.offset = offset;
         Ok(())
