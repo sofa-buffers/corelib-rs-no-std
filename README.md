@@ -159,6 +159,14 @@ means the bytes are malformed regardless of what follows. There is no
 `finish`/`finalize` step — end-of-input is the caller's own framing decision, so a
 whole-message caller simply requires the final outcome to be `Ok(())`.
 
+`InvalidMsg` is **terminal and latched**: an `IStream` that has reported it reports
+it again from every later `feed`, without consuming the chunk or delivering another
+field to your visitor. That is what makes the verdict independent of where the chunk
+boundaries fall — a malformed prefix followed by a well-formed field is `INVALID`
+whether the two arrive in one `feed` or in two. To decode again after a malformed
+message, start a fresh decoder (`IStream::new()`); where to resynchronize the byte
+stream is a framing decision only the caller can make.
+
 ```rust
 use sofab::{IStream, Visitor, Id, Error};
 
@@ -467,18 +475,18 @@ are zero and flash equals `.text`:
 
 | Configuration | Cortex-M0 | Cortex-M4F | RISC-V 32 |
 |---------------|----------:|-----------:|----------:|
-| **MIN** — integers only, 32-bit (`default-features = false`) | **626 B** | **638 B** | **780 B** |
-| integers only, 64-bit (`value64`) | 804 B | 826 B | 952 B |
-| `+ sequence` (64-bit) | 1 128 B | 1 142 B | 1 442 B |
-| `+ array` (64-bit) | 1 100 B | 1 100 B | 1 260 B |
-| `+ fixlen` (fp32 / str / blob, 64-bit) | 1 161 B | 1 191 B | 1 433 B |
-| all wire types, 32-bit | 1 931 B | 1 911 B | 2 501 B |
-| **MAX** — all wire types, 64-bit (default) | **2 201 B** | **2 131 B** | **2 797 B** |
-| generated-shape visitor (MAX) | 4 283 B | 4 199 B | 5 293 B |
+| **MIN** — integers only, 32-bit (`default-features = false`) | **630 B** | **642 B** | **784 B** |
+| integers only, 64-bit (`value64`) | 804 B | 830 B | 956 B |
+| `+ sequence` (64-bit) | 1 140 B | 1 142 B | 1 452 B |
+| `+ array` (64-bit) | 1 104 B | 1 116 B | 1 292 B |
+| `+ fixlen` (fp32 / str / blob, 64-bit) | 1 161 B | 1 191 B | 1 445 B |
+| all wire types, 32-bit | 1 927 B | 1 907 B | 2 505 B |
+| **MAX** — all wire types, 64-bit (default) | **2 209 B** | **2 131 B** | **2 785 B** |
+| generated-shape visitor (MAX) | 4 259 B | 4 207 B | 5 293 B |
 
 The `sequence` rows carry the lazy-framing machinery of MESSAGE_SPEC §2 (the
-hold-back run, [above](#sequence-framing-and-the-hold-back-window)): 226 B of
-flash on Cortex-M0 over an eager `begin`/`end` pair (1 128 B against the 902 B
+hold-back run, [above](#sequence-framing-and-the-hold-back-window)): 238 B of
+flash on Cortex-M0 over an eager `begin`/`end` pair (1 140 B against the 902 B
 the same row measured before lazy framing), plus the pending array's RAM in the
 table below. About 60 B of that is `commit_pending` tracking how much
 of the run reached the buffer so a `BufferFull` in the middle of one keeps the

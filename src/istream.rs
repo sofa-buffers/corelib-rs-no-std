@@ -120,6 +120,21 @@ pub trait Visitor {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum State {
     Idle,
+    /// Terminal: the bytes consumed so far are malformed. `INVALID` is terminal
+    /// (§5.2) — no continuation can make them valid — and most of the conditions
+    /// that produce it (a dangling sequence end, an overlong varint, an
+    /// over-maximum id) leave the machine at an otherwise clean field boundary,
+    /// so the verdict has to be *remembered* rather than recomputed: without
+    /// this state the next `feed` would parse on and report `COMPLETE` for a
+    /// message the decoder itself has already rejected.
+    ///
+    /// It lives in `state` rather than in a flag of its own precisely because
+    /// this is a state the machine never leaves: an extra byte in `Core` would
+    /// be free in the struct's padding but not in flash — it perturbs the
+    /// initializer image `IStream::new` stores, which on a 64-bit-value build
+    /// costs ~180 B of `.text`, an order of magnitude more than reusing the
+    /// state byte.
+    Invalid,
     VarintUnsigned,
     VarintSigned,
     #[cfg(feature = "fixlen")]
@@ -309,11 +324,23 @@ impl IStream {
     /// * [`Err(Error::InvalidMsg)`](Error::InvalidMsg) — **`INVALID`**: the
     ///   bytes are malformed regardless of what follows (varint overflow, bad
     ///   type tag, oversized length/count, nesting past `MAX_DEPTH`, dangling
-    ///   sequence end). Terminal.
+    ///   sequence end). **Terminal**, and latched: no continuation can make
+    ///   these bytes valid, so every later `feed` on this decoder returns
+    ///   `InvalidMsg` again without consuming the chunk or delivering a single
+    ///   further field to the visitor. Decoding another message means a fresh
+    ///   [`IStream::new`] — where to resynchronize the byte stream is the
+    ///   caller's framing decision, not the decoder's.
     ///
     /// Decoding can continue across many `feed` calls; the decoder keeps all
-    /// state internally.
+    /// state internally. Because the verdict is latched, it does not depend on
+    /// where the chunk boundaries fall: feeding a stream one byte at a time
+    /// yields the same outcome as feeding it whole.
     pub fn feed<V: Visitor>(&mut self, data: &[u8], visitor: &mut V) -> Result<()> {
+        // §5.2: `INVALID` is terminal. This is what keeps the next chunk from
+        // being parsed as if the message were still intact.
+        if self.core.state == State::Invalid {
+            return Err(Error::InvalidMsg);
+        }
         let mut i = 0;
         while i < data.len() {
             // Fast path: stream string/blob payloads in bulk rather than
@@ -330,7 +357,7 @@ impl IStream {
                 match self.core.fixlen_type {
                     FixlenType::Str => visitor.string(self.id, self.fixlen_total, offset, chunk),
                     FixlenType::Blob => visitor.blob(self.id, self.fixlen_total, offset, chunk),
-                    _ => return Err(Error::InvalidMsg),
+                    _ => return Err(self.latch(Error::InvalidMsg)),
                 }
                 self.fixlen_remaining -= take;
                 i += take;
@@ -340,7 +367,9 @@ impl IStream {
                 continue;
             }
 
-            self.step(data[i], visitor)?;
+            if let Err(e) = self.step(data[i], visitor) {
+                return Err(self.latch(e));
+            }
             i += 1;
         }
 
@@ -356,6 +385,26 @@ impl IStream {
         } else {
             Err(Error::Incomplete)
         }
+    }
+
+    /// Enter the terminal [`State::Invalid`] and hand the error straight back,
+    /// so every site that produces one is a single `return Err(self.latch(e))`.
+    ///
+    /// Only [`Error::InvalidMsg`] latches: it is the one outcome §5.2 declares
+    /// terminal. `Incomplete` never reaches here — it is computed from the state
+    /// after the loop, never returned by a step — and must not be latched even
+    /// if it ever did: feeding more bytes is exactly how it is resolved.
+    ///
+    /// `cold` + `inline(never)`: this runs once per broken message, on the way
+    /// out, and keeping it out of the per-byte loop's body leaves the loop (and
+    /// its register allocation) as it was.
+    #[cold]
+    #[inline(never)]
+    fn latch(&mut self, e: Error) -> Error {
+        if e == Error::InvalidMsg {
+            self.core.state = State::Invalid;
+        }
+        e
     }
 
     /// True when the decoder sits **exactly** at a top-level field boundary: no
@@ -410,9 +459,11 @@ impl IStream {
             State::FixlenLen => self.on_fixlen_len(value, visitor),
             #[cfg(feature = "array")]
             State::ArrayCount => self.on_array_count(value, visitor),
-            // Handled before the varint decode (`FixlenVal`) or in `feed`
-            // (`FixlenRaw`); these arms just keep the match exhaustive without a
-            // panicking `unreachable!`.
+            // Handled before the varint decode (`FixlenVal`), in `feed`'s bulk
+            // path (`FixlenRaw`), or never reached at all because `feed` returns
+            // at its first byte (`Invalid`); these arms just keep the match
+            // exhaustive without a panicking `unreachable!`.
+            State::Invalid => Ok(()),
             #[cfg(feature = "fixlen")]
             State::FixlenVal | State::FixlenRaw => Ok(()),
         }

@@ -627,3 +627,143 @@ fn a_fed_chunk_may_be_overwritten_the_moment_feed_returns() {
         assert_eq!(rec.events, want, "chunk size {chunk_size}");
     }
 }
+
+// --- §5.2: INVALID is terminal ----------------------------------------------
+//
+// The decode-outcome table's last column says it for `INVALID`: "can more bytes
+// change it? — no, terminal". Once a decoder has determined that the bytes it
+// consumed are malformed *regardless of what follows*, no continuation can undo
+// that, so every later `feed` must keep reporting `INVALID` — and must not push
+// further fields to the visitor. Without that latch the verdict depends on where
+// the chunk boundary falls, which §7.2 item 4 forbids: feeding a malformed
+// prefix and a well-formed field in one call reports INVALID, while feeding them
+// as two calls reports INVALID and then COMPLETE, delivering a field out of a
+// message already proven broken.
+
+/// Every `INVALID` condition of the §5.2 table that this port can be driven
+/// into, as (name, malformed prefix). Each one is already asserted INVALID on
+/// its own above; here they are the *precondition* of the terminal-ness tests.
+fn invalid_prefixes() -> Vec<(&'static str, Vec<u8>)> {
+    let mut cases: Vec<(&'static str, Vec<u8>)> = Vec::new();
+
+    // A varint past the 64-bit bound (§4.1).
+    cases.push((
+        "overlong varint",
+        vec![
+            0x00, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80,
+        ],
+    ));
+
+    // An id above ID_MAX (§6.2).
+    let mut id_over = Vec::new();
+    push_varint(&mut id_over, (sofab::ID_MAX as u64 + 1) << 3);
+    cases.push(("id above ID_MAX", id_over));
+
+    // A sequence-end marker with no open sequence (§4.9).
+    cases.push(("dangling sequence end", vec![0x07]));
+
+    // Nesting past MAX_DEPTH = 255 (§4.9). Note this one *does* deliver events
+    // (255 sequence starts) before it fails.
+    cases.push(("nesting past MAX_DEPTH", vec![0x06; 256]));
+
+    // A count above ARRAY_MAX (§6.2).
+    let mut count_over = vec![0x03];
+    push_varint(&mut count_over, 1u64 << 31);
+    cases.push(("array count above ARRAY_MAX", count_over));
+
+    // A fixlen length above its maximum (§6.2).
+    let mut len_over = vec![0x02];
+    push_varint(&mut len_over, (1u64 << 31) << 3);
+    cases.push(("fixlen length above maximum", len_over));
+
+    // A reserved fixlen subtype (§4.6).
+    cases.push(("reserved fixlen subtype", vec![0x02, 0x04]));
+
+    // An fp32 whose declared length is not 4 (§4.6).
+    cases.push(("fp32 of the wrong width", vec![0x02, 2 << 3]));
+
+    cases
+}
+
+/// A well-formed field: unsigned id 1 = 42. Whatever follows a malformed prefix,
+/// it must never reach the visitor.
+const GOOD_FIELD: [u8; 2] = [0x08, 0x2a];
+
+#[test]
+fn invalid_stays_invalid_on_every_later_feed() {
+    for (name, prefix) in invalid_prefixes() {
+        let mut rec = Recorder::new();
+        let mut is = IStream::new();
+        assert_eq!(
+            is.feed(&prefix, &mut rec),
+            Err(Error::InvalidMsg),
+            "{name}: the prefix itself must be INVALID",
+        );
+        let after_error = rec.events.len();
+
+        // A well-formed field, an empty chunk, and a second well-formed field:
+        // none of them may resurrect the message.
+        assert_eq!(
+            is.feed(&GOOD_FIELD, &mut rec),
+            Err(Error::InvalidMsg),
+            "{name}: a valid field after the error must stay INVALID",
+        );
+        assert_eq!(
+            is.feed(&[], &mut rec),
+            Err(Error::InvalidMsg),
+            "{name}: an empty feed after the error must stay INVALID",
+        );
+        assert_eq!(
+            is.feed(&GOOD_FIELD, &mut rec),
+            Err(Error::InvalidMsg),
+            "{name}: still INVALID on the third feed",
+        );
+        assert_eq!(
+            rec.events.len(),
+            after_error,
+            "{name}: no field may be delivered out of a message proven malformed",
+        );
+    }
+}
+
+#[test]
+fn the_chunked_verdict_matches_the_one_shot_verdict_for_malformed_input() {
+    // §7.2 item 4: feeding a stream one byte at a time must be indistinguishable
+    // from feeding it whole. For malformed input that means the *final* outcome
+    // and the delivered events agree — and that no intermediate feed reports
+    // anything but INVALID once the malformed byte has been consumed.
+    for (name, prefix) in invalid_prefixes() {
+        let mut wire = prefix.clone();
+        wire.extend_from_slice(&GOOD_FIELD);
+
+        let mut one_shot = Recorder::new();
+        let mut is = IStream::new();
+        let whole = is.feed(&wire, &mut one_shot);
+        assert_eq!(whole, Err(Error::InvalidMsg), "{name}: one-shot");
+
+        let mut chunked = Recorder::new();
+        let mut is = IStream::new();
+        let mut seen_invalid = false;
+        let mut last = Ok(());
+        for byte in &wire {
+            last = is.feed(&[*byte], &mut chunked);
+            if seen_invalid {
+                assert_eq!(
+                    last,
+                    Err(Error::InvalidMsg),
+                    "{name}: a feed after the malformed byte reported {last:?}",
+                );
+            }
+            seen_invalid |= last == Err(Error::InvalidMsg);
+        }
+        assert!(
+            seen_invalid,
+            "{name}: byte-at-a-time never reported INVALID"
+        );
+        assert_eq!(last, whole, "{name}: final outcome differs from one-shot");
+        assert_eq!(
+            chunked.events, one_shot.events,
+            "{name}: byte-at-a-time delivered different fields",
+        );
+    }
+}
