@@ -556,7 +556,10 @@ impl<'a, F: Flush, H: Handoff<'a>> OStream<'a, F, H> {
         }
     }
 
-    #[cfg_attr(not(feature = "fixlen"), allow(dead_code))]
+    /// Write `data` verbatim. Every caller is a fixlen payload (float bytes,
+    /// string/blob bytes), so the helper is `fixlen`-gated outright rather than
+    /// compiled into a build that has no fixlen and then silenced as dead code.
+    #[cfg(feature = "fixlen")]
     fn push_raw(&mut self, data: &[u8]) -> Result<()> {
         for &b in data {
             self.push_byte(b)?;
@@ -564,17 +567,21 @@ impl<'a, F: Flush, H: Handoff<'a>> OStream<'a, F, H> {
         Ok(())
     }
 
+    /// Emit `value` as a minimal base-128 varint (§4.1).
+    ///
+    /// "Is this the last byte?" is `value == 0` after the shift, asked **once**
+    /// per byte: the terminating byte is written by its own `return`, and every
+    /// other one carries the continuation flag unconditionally. It used to be
+    /// asked twice — once to decide whether to set the flag, again to decide
+    /// whether to loop — with the flag folded in through a conditional OR.
     fn write_varint(&mut self, mut value: Unsigned) -> Result<()> {
         loop {
-            let mut b = (value as u8) & 0x7F;
+            let b = (value as u8) & 0x7F;
             value >>= 7;
-            if value != 0 {
-                b |= 0x80;
-            }
-            self.push_byte(b)?;
             if value == 0 {
-                return Ok(());
+                return self.push_byte(b);
             }
+            self.push_byte(b | 0x80)?;
         }
     }
 

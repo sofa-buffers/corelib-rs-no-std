@@ -6,16 +6,8 @@
 
 mod common;
 
-use common::{push_varint, Event, Recorder};
-use sofab::{ArrayKind, Error, IStream};
-
-/// Decode `bytes` in one shot and return the recorded events.
-fn decode(bytes: &[u8]) -> Vec<Event> {
-    let mut rec = Recorder::new();
-    let mut is = IStream::new();
-    is.feed(bytes, &mut rec).expect("decode failed");
-    rec.events
-}
+use common::{decode, push_varint, Event, Recorder};
+use sofab::{ArrayKind, Error, IStream, Unsigned};
 
 #[test]
 fn decode_unsigned() {
@@ -290,6 +282,50 @@ fn max_u64_varint_is_accepted() {
     let mut is = IStream::new();
     assert_eq!(is.feed(&bytes, &mut rec), Ok(()));
     assert_eq!(rec.events, [Event::Unsigned(6, u64::MAX)]);
+}
+
+#[test]
+fn last_varint_byte_accepts_exactly_the_bits_that_fit() {
+    // §4.1/§6.3 at its exact boundary, for whichever value width this build
+    // has. `shift` only moves in steps of 7 from 0, so *both* ways a varint can
+    // overrun the width — one more continuation byte, or a payload bit above
+    // the width — can only show up in a single byte position: the last one that
+    // can still carry payload (the 10th byte of a 64-bit varint, the 5th of a
+    // 32-bit one). The decoder folds them into the one test that fires there,
+    // so walk every one of the 256 possible bytes in that position and pin
+    // accept/reject for each — the fold must not widen or narrow what is legal.
+    let width = Unsigned::BITS;
+    let groups = width / 7; // full 7-bit groups before the last byte
+    let carried = groups * 7; // payload bits they hold
+    let room = width - carried; // payload bits left for the last byte
+
+    for terminator in 0u16..=0xFF {
+        let terminator = terminator as u8;
+        let mut bytes = vec![0x30]; // VARINT_UNSIGNED, id 6
+        bytes.extend(std::iter::repeat(0xFFu8).take(groups as usize)); // 0x80 | 0x7f
+        bytes.push(terminator);
+
+        let mut rec = Recorder::new();
+        let mut is = IStream::new();
+        let outcome = is.feed(&bytes, &mut rec);
+
+        // Legal iff it terminates the varint and sets no bit above the width.
+        if terminator & 0x80 == 0 && u32::from(terminator) >> room == 0 {
+            let expected = (!(0 as Unsigned) >> room) | ((terminator as Unsigned) << carried);
+            assert_eq!(
+                outcome,
+                Ok(()),
+                "terminator {terminator:#04x} fits in {width} bits and must decode",
+            );
+            assert_eq!(rec.events, [Event::Unsigned(6, expected)]);
+        } else {
+            assert_eq!(
+                outcome,
+                Err(Error::InvalidMsg),
+                "terminator {terminator:#04x} overruns {width} bits and must be INVALID",
+            );
+        }
+    }
 }
 
 #[test]

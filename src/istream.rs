@@ -210,12 +210,26 @@ pub struct IStream {
     acc_lo: u32,
 }
 
+/// What one byte did to the varint being decoded — the result of [`Core::push`].
+///
+/// Flat on purpose. The obvious spelling is `Result<Option<Unsigned>>`, but a
+/// two-level enum is an aggregate that no ABI hands back in registers: `push` is
+/// `inline(never)` and sits on the path of **every decoded byte**, so that
+/// spelling made it write its answer through a caller-provided stack slot
+/// (`sret`) which the caller then reloaded and re-tagged. Flattened, the same
+/// three states are a tag+payload pair returned in registers.
+enum Push {
+    /// The varint is not finished; feed the next byte.
+    More,
+    /// A complete value (the accumulator has been reset).
+    Value(Unsigned),
+    /// The varint runs past the value width (§4.1) — `INVALID`.
+    Overlong,
+}
+
 impl Core {
-    /// Feed one byte into the varint currently being decoded.
-    ///
-    /// * `Ok(Some(v))` — a complete value was decoded (state auto-resets).
-    /// * `Ok(None)` — more bytes are needed.
-    /// * `Err(InvalidMsg)` — the varint is longer than the value type allows.
+    /// Feed one byte into the varint currently being decoded, reporting what it
+    /// did as a [`Push`].
     ///
     /// `inline(never)`: this is the per-byte prologue of every decoder state,
     /// reached from the monomorphized [`IStream::step`]. Left to LTO it gets
@@ -225,23 +239,30 @@ impl Core {
     /// and visitors, and borrowing only `Core` (not the whole `IStream`) leaves
     /// the surrounding fields promotable to registers.
     #[inline(never)]
-    fn push(&mut self, byte: u8) -> Result<Option<Unsigned>> {
+    fn push(&mut self, byte: u8) -> Push {
         // Reject an overlong (>value-width) varint before it silently truncates
-        // (§4.1/§6.3). On the final byte that fills the value, only the low
-        // `room` payload bits fit below the value width; any higher bit is a
-        // >64-bit overflow. This matches corelib-c-cpp (`istream.c`),
-        // corelib-rs (`varint.rs`) and corelib-zig — where this port previously
-        // discarded the spilling bits and returned a corrupted value.
+        // (§4.1/§6.3): a value must not spill past the value width, whether by
+        // continuing for another byte or by setting a payload bit above it.
+        // This matches corelib-c-cpp (`istream.c`), corelib-rs (`varint.rs`)
+        // and corelib-zig.
         //
         // The shift is kept as a byte in `Core` (it has to fit the tail padding
         // there) but computed in the machine's natural width, so the arithmetic
         // costs no repeated byte-truncation.
         let shift = u32::from(self.shift);
         let room = u32::from(VALUE_BITS) - shift; // payload bits below the width
-        if room < 7 && u32::from(byte & 0x7F) >> room != 0 {
-            self.acc = 0;
-            self.shift = 0;
-            return Err(Error::InvalidMsg);
+
+        // `shift` only ever moves in steps of 7 from 0, so `room < 7` picks out
+        // exactly one byte position: the last one that can still carry payload
+        // (the 10th byte of a 64-bit varint, the 5th of a 32-bit one). *Both*
+        // ways a varint can overrun the value width live there — continuing for
+        // another byte, or setting a payload bit above the width — so the whole
+        // overlong check is this one branch. The separate "continuation bit set
+        // but no room left" test the loop used to carry after the terminator
+        // check was unreachable for the same reason, and is gone.
+        if room < 7 && (byte & 0x80 != 0 || u32::from(byte & 0x7F) >> room != 0) {
+            self.reset_varint();
+            return Push::Overlong;
         }
 
         // OR in the 7 payload bits at the current position.
@@ -250,19 +271,19 @@ impl Core {
 
         if byte & 0x80 == 0 {
             let v = self.acc;
-            self.acc = 0;
-            self.shift = 0;
-            return Ok(Some(v));
+            self.reset_varint();
+            return Push::Value(v);
         }
 
-        // Continuation bit set but no more room -> overflow.
-        if shift + 7 >= u32::from(VALUE_BITS) {
-            self.acc = 0;
-            self.shift = 0;
-            return Err(Error::InvalidMsg);
-        }
+        Push::More
+    }
 
-        Ok(None)
+    /// Clear the varint accumulator, so the next value starts from zero and
+    /// `shift == 0` marks a clean field boundary again.
+    #[inline]
+    fn reset_varint(&mut self) {
+        self.acc = 0;
+        self.shift = 0;
     }
 }
 
@@ -436,9 +457,10 @@ impl IStream {
             return self.step_fixlen_val(byte, visitor);
         }
 
-        let value = match self.core.push(byte)? {
-            Some(v) => v,
-            None => return Ok(()),
+        let value = match self.core.push(byte) {
+            Push::Value(v) => v,
+            Push::More => return Ok(()),
+            Push::Overlong => return Err(Error::InvalidMsg),
         };
 
         match self.core.state {

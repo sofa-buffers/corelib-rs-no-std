@@ -28,20 +28,12 @@
 
 mod common;
 
-use common::{Event, Recorder};
+use common::{hex_to_bytes, Event, Recorder};
 use serde_json::Value;
 use sofab::{Error, FixlenType, IStream, OStream};
 
 /// The shared vectors, embedded from the verbatim asset copy.
 const VECTORS_JSON: &str = include_str!("../assets/test_vectors.json");
-
-fn hex_to_bytes(hex: &str) -> Vec<u8> {
-    assert!(hex.len() % 2 == 0, "odd hex length");
-    (0..hex.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).expect("hex byte"))
-        .collect()
-}
 
 /// The shared `invalid_utf8` negative vectors (tracks corelib-c-cpp#97).
 fn invalid_utf8_vectors() -> Vec<Value> {

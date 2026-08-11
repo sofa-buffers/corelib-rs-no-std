@@ -567,26 +567,25 @@ are zero and flash equals `.text`:
 
 | Configuration | Cortex-M0 | Cortex-M4F | RISC-V 32 |
 |---------------|----------:|-----------:|----------:|
-| **MIN** — integers only, 32-bit (`default-features = false`) | **630 B** | **642 B** | **784 B** |
-| integers only, 64-bit (`value64`) | 804 B | 830 B | 956 B |
-| `+ sequence` (64-bit) | 1 148 B | 1 150 B | 1 460 B |
-| `+ array` (64-bit) | 1 104 B | 1 116 B | 1 292 B |
-| `+ fixlen` (fp32 / str / blob, 64-bit) | 1 161 B | 1 191 B | 1 445 B |
-| all wire types, 32-bit | 1 935 B | 1 911 B | 2 513 B |
-| **MAX** — all wire types, 64-bit (default) | **2 217 B** | **2 139 B** | **2 793 B** |
-| generated-shape visitor (MAX) | 4 263 B | 4 203 B | 5 297 B |
+| **MIN** — integers only, 32-bit (`default-features = false`) | **614 B** | **624 B** | **802 B** |
+| integers only, 64-bit (`value64`) | 762 B | 808 B | 978 B |
+| `+ sequence` (64-bit) | 1 098 B | 1 128 B | 1 474 B |
+| `+ array` (64-bit) | 1 046 B | 1 074 B | 1 312 B |
+| `+ fixlen` (fp32 / str / blob, 64-bit) | 1 131 B | 1 173 B | 1 433 B |
+| all wire types, 32-bit | 1 903 B | 1 905 B | 2 501 B |
+| **MAX** — all wire types, 64-bit (default) | **2 191 B** | **2 109 B** | **2 777 B** |
+| generated-shape visitor (MAX) | 4 217 B | 4 185 B | 5 281 B |
 
 The `sequence` rows carry the lazy-framing machinery of MESSAGE_SPEC §2 (the
-hold-back run, [above](#sequence-framing-and-the-hold-back-window)): 246 B of
-flash on Cortex-M0 over an eager `begin`/`end` pair (1 148 B against the 902 B
-the same row measured before lazy framing), plus the pending array's RAM in the
-table below. About 60 B of that is `commit_pending` tracking how much
-of the run reached the buffer so a `BufferFull` in the middle of one keeps the
-ids it did not emit ([above](#sequence-framing-and-the-hold-back-window)) — the
-price of not emitting a `SEQUENCE_END` whose `SEQUENCE_START` was dropped.
+hold-back run, [above](#sequence-framing-and-the-hold-back-window)): about 200 B
+of flash on Cortex-M0 over an eager `begin`/`end` pair, plus the pending array's
+RAM in the table below. Roughly 60 B of that is `commit_pending` tracking how
+much of the run reached the buffer so a `BufferFull` in the middle of one keeps
+the ids it did not emit ([above](#sequence-framing-and-the-hold-back-window)) —
+the price of not emitting a `SEQUENCE_END` whose `SEQUENCE_START` was dropped.
 
 The codec spans **≈0.6 KiB** (integer-only, 32-bit) to **≈2.1 KiB** (every wire
-type, 64-bit) of flash on Cortex-M0; disabling `value64` removes ~12% of the code
+type, 64-bit) of flash on Cortex-M0; disabling `value64` removes ~13% of the code
 by deleting the 64-bit shift helpers and halving every varint operation. The decoder carries no panic paths (all bounds are proven in-bounds),
 so the whole codec links without `core::panicking` — which is what keeps the
 RISC-V builds, lacking Thumb-2's density, close behind Cortex-M.
