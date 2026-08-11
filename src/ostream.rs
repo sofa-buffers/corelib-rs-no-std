@@ -165,8 +165,14 @@ pub struct Handover<'a> {
 
 impl<'a> Handover<'a> {
     /// Create an empty channel.
+    ///
+    /// Not a `const fn`: the slots hold `&mut [u8]`, and a mutable reference in
+    /// a constant function is stable only from Rust 1.83, well past this
+    /// crate's MSRV. It compiles to two null pointers either way — and a
+    /// `Handover` is a stack value that lives beside the encoder, not a
+    /// `static`, since its buffers are borrowed rather than owned.
     #[inline]
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Handover {
             next: Cell::new(None),
             retired: Cell::new(None),
