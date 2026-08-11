@@ -5,6 +5,65 @@ a **minor** bump may break API or wire output.
 
 ## Unreleased
 
+### Tests
+
+Line coverage (`cargo llvm-cov --all-features`, what the **Coverage** badge
+reports) rises from **93.83%** to **97.00%**. No library code changed; the new
+suites cover spec obligations that had no test, and the UTF-8 one was checked
+against a deliberately broken corelib before being kept.
+
+- **`tests/utf8_chunk_offset_tests.rs` — the `chunkOffset >= total` hole in the
+  shared vectors.** The `invalid_utf8` vectors (corelib-c-cpp#97) put the
+  `string` field first in the message, so every `Visitor::string` callback they
+  produce arrives at `offset == 0` with `chunk.len() == total`: a consumer whose
+  validation is offset-sensitive — one handed a length where an exclusive end
+  index was required — replays the whole shared corpus while accepting *every*
+  invalid input. The new suite feeds the same payloads with the field placed
+  behind 200 bytes of ballast and the invalid sequence arriving alone in a later
+  chunk, at a field offset past both that chunk and the whole final feed, and
+  sweeps every split point plus the one-byte-at-a-time feed. It also pins the
+  three §6.4 cross-chunk rules that decide *when* a verdict may be reported: a
+  multi-byte sequence split at an end-of-chunk is `INCOMPLETE` (never `INVALID`,
+  never a dropped string), one truncated at end-of-payload is `INVALID`, and a
+  byte that can neither begin nor continue a sequence is reported at payload
+  completion and not before. Plus §6.4's "skipped fields are never validated".
+
+- **`tests/buffer_full_tests.rs` — every writer, at every cut.** A sink-less
+  encoder is prefix-exact on failure: what reached the buffer is exactly the
+  first *n* bytes of the one-shot encoding, which is what makes the documented
+  recovery (install a bigger buffer, retry the failed write) reconstruct the
+  message. Each writer — scalars, `string`/`blob`/`fp32`/`fp64`, all four array
+  kinds, and a framed sequence — is now driven through *every* truncation of its
+  own encoding rather than one hand-picked one, so cuts land inside the header
+  varint, inside the length/count word and inside the payload alike. Also: the
+  lazy opener's out-of-range id check, and the one opener that emits bytes (the
+  `LAZY_SEQ_DEPTH + 1`-th, which commits the held-back run and frames itself
+  eagerly) meeting the end of the buffer at each position inside the run and at
+  its own eager header, with the retry-after-`buffer_set` recovery for both.
+
+- **`tests/visitor_default_tests.rs` — skip-by-not-handling.** This port has no
+  explicit skip call: a consumer simply leaves a callback at its default body.
+  A message using every wire type is decoded by a consumer that implements
+  nothing (`COMPLETE`, whole and one byte at a time) and by one that implements
+  only `unsigned` — whose fields, including array elements and the child of a
+  sequence nobody announced, must be exactly what a full consumer sees.
+
+- **`tests/api_tests.rs`**: `OStream::with_handover` joins the offset-range and
+  `MIN_OUTPUT_BUFFER` sweep of "every installation path" (it was the one path
+  not checked, and the only one whose sink can take the buffer), and the
+  `Handover` `Debug` impl is formatted from *inside* a flush callback between the
+  installation and the reclaim — it has to take both `Cell`s to print them, and a
+  put-back it got wrong would swallow the replacement buffer and leave the
+  encoder writing into storage the sink handed to its transport.
+
+The 13 lines still uncovered are deliberate: the no-op `NoFlush::flush` and
+`NoHandoff::installed`/`retire` (both folded out at compile time by
+`SINKS`/`TAKES == false`, so nothing ever calls them), the `None` arms of the
+`get`/`get_mut` spellings that keep `core::panicking` out of the image, the
+match arms that keep `IStream::step` exhaustive without an `unreachable!`, and
+the unknown-wire-type arm, which is reachable only in a build with wire types
+compiled out — not in the `--all-features` run coverage is measured on.
+
 ### Performance
 
 Three changes to the two hot loops, each kept only because it paid on **both**

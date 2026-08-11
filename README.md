@@ -492,8 +492,9 @@ cargo build --lib --all-features --target thumbv7em-none-eabihf
 Integration tests live in `tests/`: `vectors_tests.rs` (replays the shared
 `assets/test_vectors.json`, feature-aware), `ostream_tests.rs`,
 `istream_tests.rs`, `roundtrip_tests.rs`, `api_tests.rs`, `config_tests.rs`,
-`utf8_tests.rs`, `fixlen_header_tests.rs`, `fixlen_array_header_tests.rs`,
-`no_elision_tests.rs`, `bench_tools_tests.rs`, and `readme_tests.rs`.
+`utf8_tests.rs`, `utf8_chunk_offset_tests.rs`, `fixlen_header_tests.rs`,
+`fixlen_array_header_tests.rs`, `no_elision_tests.rs`, `buffer_full_tests.rs`,
+`visitor_default_tests.rs`, `bench_tools_tests.rs`, and `readme_tests.rs`.
 Line coverage is measured by CI on every push with
 `cargo llvm-cov --all-features` and reported by the **Coverage** badge above —
 that badge is the current figure; no number is repeated here, where it would go
