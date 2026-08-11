@@ -811,6 +811,56 @@ fn closing_a_sequence_returns_the_depth_budget() {
     }
 }
 
+/// An unbalanced close is a caller bug, and the encoder has to say so rather than
+/// emit a bare `0x07`: "a sequence-end marker with no open sequence" is one of the
+/// `INVALID` conditions of CORELIB_PLAN §5.2, so returning `Ok` here would hand
+/// the caller a success status together with a message this crate's own decoder
+/// must reject (§5.1: never produce output the caller did not ask for). The state
+/// to detect it is the same `depth` counter that already guards the open side.
+///
+/// Both closers, at depth 0 and once again after a balanced nest — and the bytes
+/// written before the rejected close must still decode.
+#[test]
+fn closing_with_no_open_sequence_is_an_argument_error() {
+    for closer in 0..2 {
+        let mut buf = [0u8; 32];
+        let used = {
+            let mut os = OStream::new(&mut buf);
+            let close = |os: &mut OStream| {
+                if closer == 0 {
+                    os.write_sequence_end()
+                } else {
+                    os.write_sequence_end_keep()
+                }
+            };
+
+            // Nothing was ever opened.
+            assert_eq!(close(&mut os), Err(Error::Argument), "closer {closer}");
+            assert_eq!(os.bytes_used(), 0, "closer {closer} emitted bytes");
+
+            // A balanced nest, then one closer too many.
+            os.write_sequence_begin_lazy(1).unwrap();
+            os.write_unsigned(2, 7).unwrap();
+            close(&mut os).unwrap();
+            let used = os.bytes_used();
+            assert_eq!(close(&mut os), Err(Error::Argument), "closer {closer}");
+            assert_eq!(
+                os.bytes_used(),
+                used,
+                "closer {closer} emitted an unbalanced end marker"
+            );
+            used
+        };
+
+        // What did reach the buffer is a message the decoder accepts.
+        let mut rec = common::Recorder::new();
+        let mut is = sofab::IStream::new();
+        is.feed(&buf[..used], &mut rec).unwrap_or_else(|e| {
+            panic!("closer {closer}: encoder emitted undecodable bytes: {e:?}")
+        });
+    }
+}
+
 /// The drop path on its own: repeatedly opening and closing a contentless
 /// sequence must neither emit bytes nor consume depth, however often it happens.
 #[test]

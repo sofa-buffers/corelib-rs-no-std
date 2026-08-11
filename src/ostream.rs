@@ -860,17 +860,27 @@ impl<'a, F: Flush, H: Handoff<'a>> OStream<'a, F, H> {
     /// `struct`/`union` field, and an array field whose declared `default` is the
     /// empty collection (MESSAGE_SPEC §2). Where the frame must be visible, close
     /// with [`OStream::write_sequence_end_keep`] instead.
+    ///
+    /// Closing with nothing open is [`Error::Argument`]: an end marker with no
+    /// open sequence is `INVALID` on the wire (§5.2), so emitting one would report
+    /// success while producing a message this crate's own decoder must reject
+    /// (§5.1). Nothing is written and no state changes.
     #[cfg(feature = "sequence")]
     #[inline]
     pub fn write_sequence_end(&mut self) -> Result<()> {
+        // Same counter that guards the open side, read before anything is touched
+        // so a rejected close leaves the encoder exactly as it was.
+        if self.depth == 0 {
+            return Err(Error::Argument);
+        }
         if self.npending != 0 {
             // The innermost open sequence is the last held-back one: drop it.
             self.npending -= 1;
-            self.depth = self.depth.saturating_sub(1);
+            self.depth -= 1;
             return Ok(());
         }
         self.write_id_type(0, T_SEQUENCE_END)?;
-        self.depth = self.depth.saturating_sub(1);
+        self.depth -= 1;
         Ok(())
     }
 
@@ -894,13 +904,22 @@ impl<'a, F: Flush, H: Handoff<'a>> OStream<'a, F, H> {
     /// choice when in doubt: using it where [`OStream::write_sequence_end`] would
     /// do costs one non-canonical empty frame that a decoder normalizes away, while
     /// the reverse silently changes an array's length.
+    ///
+    /// Closing with nothing open is [`Error::Argument`], for the same reason as in
+    /// [`OStream::write_sequence_end`]: a bare end marker is `INVALID` on the wire
+    /// (§5.2). Nothing is written and no state changes.
     #[cfg(feature = "sequence")]
     #[inline]
     pub fn write_sequence_end_keep(&mut self) -> Result<()> {
+        // Checked before the write, not after: the held-back run must not be
+        // committed on behalf of a close that is rejected.
+        if self.depth == 0 {
+            return Err(Error::Argument);
+        }
         // The held-back run is committed by `write_id_type` itself — this closer
         // is an ordinary write, so it needs no commit of its own.
         self.write_id_type(0, T_SEQUENCE_END)?;
-        self.depth = self.depth.saturating_sub(1);
+        self.depth -= 1;
         Ok(())
     }
 }

@@ -41,6 +41,21 @@ a **minor** bump may break API or wire output.
 
 ### Fixed
 
+- **An unbalanced sequence close reported success and emitted a message the
+  decoder rejects.** `write_sequence_end` / `write_sequence_end_keep` with no
+  open sequence returned `Ok(())` and wrote a bare `0x07`, papering the depth
+  underflow over with `saturating_sub`. A sequence-end marker with no open
+  sequence is one of the `INVALID` conditions of CORELIB_PLAN §5.2, so those
+  bytes fed back into this crate's own `IStream` were `Err(InvalidMsg)` — the
+  encoder produced, with a success status, output the caller had not asked for
+  (§5.1). Both closers now return `Error::Argument` when nothing is open,
+  writing nothing and leaving the encoder untouched; the depth counter is the
+  same one that already gated the open side, so this is one comparison on a cold
+  path — no new state, no allocation, no panic path, RAM unchanged in every
+  configuration and **+8 B of flash** on the `sequence`-enabled rows (±4 B on the
+  generated-shape visitor row). The README footprint table is regenerated
+  accordingly.
+
 - **A message proven malformed could still deliver fields.** The `INVALID`
   decode outcome is terminal (CORELIB_PLAN §5.2), but `IStream` kept no record
   of having returned `Error::InvalidMsg`: it recomputed the verdict from the
