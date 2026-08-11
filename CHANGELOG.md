@@ -5,7 +5,78 @@ a **minor** bump may break API or wire output.
 
 ## Unreleased
 
+### Performance
+
+Three changes to the two hot loops, each kept only because it paid on **both**
+axes this profile is measured on — `tools/footprint.sh` flash and
+`benches/run_callgrind.sh` instructions per op. No behaviour, wire output or API
+changed; every shared vector and the whole suite pass unchanged. RAM
+(`size_of::<IStream>() + size_of::<OStream>()`) is untouched, and the library
+still defines no statics, so `.data`/`.bss` stay zero.
+
+- **The incremental varint decoder no longer returns through memory.**
+  `Core::push` — outlined on purpose, and on the path of every decoded byte —
+  returned `Result<Option<Unsigned>>`. That is a two-level enum, an aggregate no
+  ABI hands back in registers, so each byte cost a store to a caller-provided
+  stack slot (`sret`) plus a reload and re-tag on the way out. The same three
+  states are now one flat `enum Push { More, Value(Unsigned), Overlong }`,
+  returned as a tag+payload pair in registers: **−7.3%** Ir/op on the array
+  decode, **−8%** on the typical message, and 12–38 B less flash in every
+  configuration.
+
+- **The overlong-varint guard is one branch instead of three.** `shift` only ever
+  moves in steps of 7 from 0, so both ways a varint can overrun the value width —
+  one more continuation byte, or a payload bit above the width — can only appear
+  in a single byte position: the last one that can still carry payload (byte 10
+  of a 64-bit varint, byte 5 of a 32-bit one). The two checks are folded into the
+  one test that fires there, and the separate "continuation bit set but no room
+  left" test that followed the terminator check turns out to have been
+  unreachable for the same reason. **−6.2%** Ir/op on the array decode on top of
+  the above, and 4–8 B less flash. The bound itself is unchanged, and is now
+  pinned byte-exhaustively: `last_varint_byte_accepts_exactly_the_bits_that_fit`
+  walks all 256 possible bytes in that position, at whichever value width the
+  build has, and asserts accept/reject for each.
+
+- **`write_varint` asks "is this the last byte?" once per byte.** It asked twice —
+  once to decide whether to OR in the continuation flag, again to decide whether
+  to loop — and folded the flag in through a conditional OR. The terminating byte
+  is now written by its own `return` and every other one carries the flag
+  unconditionally: **−34.2%** Ir/op encoding a 1000-element `u64` array
+  (135 882 → 89 456), −3.6% on the typical message.
+
+Net, on the reference workloads: encode **−34.2%** / **−3.6%** Ir/op, decode
+**−13.1%** / **−8.8%**. Flash on Cortex-M0 falls in every configuration
+(MIN 630 → 614 B, MAX 2 217 → 2 191 B, generated-shape visitor 4 263 → 4 217 B),
+as it does on Cortex-M4F. On RV32IMC the decoder changes shrink every row, but
+the `write_varint` rewrite costs that target 12–44 B, so its four smallest
+configurations end 14–22 B larger while the four fuller ones — including the
+generated-shape visitor row — end 4–16 B smaller. The README's footprint table
+carries the measured figures for all three targets.
+
+Two further candidates were measured and **rejected** rather than merged: hoisting
+the per-byte state test out of `step` into `feed` (+64 B flash at MAX, +100 B
+32-bit, and no instructions saved), and decoding a whole varint per call from a
+slice instead of a byte at a time (−33% Ir on the 1000-element array, but **+48%**
+on the typical small message and +92 B flash, +164 B on the generated-shape row).
+
+### Internal
+
+- **`OStream::push_raw` is `fixlen`-gated** instead of compiled into a build
+  with no fixlen support and then silenced with `allow(dead_code)`. Every caller
+  is a fixlen payload, so the gate is exact.
+
+- **The copy-pasted test helpers are gone.** `hex_to_bytes` existed twice
+  (`vectors_tests`, `utf8_tests`), the one-shot `decode` twice (`istream_tests`,
+  `vectors_tests`), the byte-at-a-time decode and the outcome-plus-events `feed`
+  once each in a suite that needed them elsewhere too, and `fixlen_header_tests`
+  carried a verbatim second copy of `push_varint` inside a local `mod common`
+  that shadowed the real one. All six now live in `tests/common/mod.rs`, next to
+  the `Recorder` they are built on.
+
 ### Documentation
+
+- **The README's footprint table is re-measured** for all three bare-metal
+  targets after the changes above.
 
 - **The README no longer states a line-coverage percentage in prose.** It claimed
   "~92%" while `cargo llvm-cov --all-features` measured 96.68% — a hand-maintained

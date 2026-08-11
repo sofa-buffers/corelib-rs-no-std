@@ -29,7 +29,7 @@
 
 mod common;
 
-use common::{Event, Recorder};
+use common::{decode, decode_one_byte_at_a_time, hex_to_bytes, Event};
 use serde_json::Value;
 #[cfg(feature = "array")]
 use sofab::ArrayKind;
@@ -101,14 +101,6 @@ fn to_unsigned(v: u64) -> Unsigned {
 #[allow(clippy::unnecessary_cast)]
 fn to_signed(v: i64) -> Signed {
     v as Signed
-}
-
-fn hex_to_bytes(hex: &str) -> Vec<u8> {
-    assert!(hex.len() % 2 == 0, "odd hex length");
-    (0..hex.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).expect("hex byte"))
-        .collect()
 }
 
 fn bytes_to_hex(b: &[u8]) -> String {
@@ -367,27 +359,6 @@ fn expected_events_with_skip(fields: &[Value], skip: &[Id]) -> Vec<Event> {
 }
 
 // --- decode -----------------------------------------------------------------
-
-fn decode(bytes: &[u8]) -> Vec<Event> {
-    let mut rec = Recorder::new();
-    let mut is = IStream::new();
-    is.feed(bytes, &mut rec).expect("decode");
-    rec.events
-}
-
-fn decode_one_byte_at_a_time(bytes: &[u8]) -> Vec<Event> {
-    let mut rec = Recorder::new();
-    let mut is = IStream::new();
-    for &b in bytes {
-        // Chunks that end mid-field report INCOMPLETE (§7) — expected while
-        // streaming byte-by-byte; only a genuine INVALID is a failure here.
-        match is.feed(&[b], &mut rec) {
-            Ok(()) | Err(Error::Incomplete) => {}
-            Err(e) => panic!("chunked decode: {e:?}"),
-        }
-    }
-    rec.events
-}
 
 /// A [`Visitor`] modelling a receiver that ignores a set of field `skip_ids`.
 /// Scalars/arrays with a skipped id are dropped; a skipped `sequence_begin`

@@ -1,5 +1,6 @@
-//! Shared test helpers: a recording [`Visitor`] and a tiny manual varint
-//! encoder for crafting malformed inputs.
+//! Shared test helpers: a recording [`Visitor`], the decode entry points built
+//! on it, a tiny manual varint encoder for crafting malformed inputs, and a hex
+//! reader for the shared vector file.
 //!
 //! Test vectors throughout the test suite are taken verbatim from the C
 //! reference test suite (`test/c/test_ostream.c`).
@@ -12,7 +13,7 @@
 
 #[cfg(feature = "array")]
 use sofab::ArrayKind;
-use sofab::{Id, Signed, Unsigned, Visitor};
+use sofab::{Error, IStream, Id, Signed, Unsigned, Visitor};
 
 /// One decoded event, recorded in order by [`Recorder`].
 #[derive(Debug, Clone, PartialEq)]
@@ -107,6 +108,49 @@ impl Visitor for Recorder {
     fn sequence_end(&mut self) {
         self.events.push(Event::SequenceEnd);
     }
+}
+
+/// Feed `bytes` in one shot; return the three-valued outcome (§7) *and* every
+/// event the visitor saw. Both halves matter to a suite asserting what was
+/// announced before the bytes ran out.
+pub fn feed(bytes: &[u8]) -> (Result<(), Error>, Vec<Event>) {
+    let mut rec = Recorder::new();
+    let mut is = IStream::new();
+    let outcome = is.feed(bytes, &mut rec);
+    (outcome, rec.events)
+}
+
+/// Decode `bytes` in one shot and return the recorded events, insisting the
+/// outcome is `COMPLETE`.
+pub fn decode(bytes: &[u8]) -> Vec<Event> {
+    let (outcome, events) = feed(bytes);
+    outcome.expect("decode failed");
+    events
+}
+
+/// Decode `bytes` one byte per `feed` call and return the recorded events.
+///
+/// Chunks that end mid-field report INCOMPLETE (§7) — expected while streaming
+/// byte-by-byte; only a genuine INVALID is a failure.
+pub fn decode_one_byte_at_a_time(bytes: &[u8]) -> Vec<Event> {
+    let mut rec = Recorder::new();
+    let mut is = IStream::new();
+    for &b in bytes {
+        match is.feed(&[b], &mut rec) {
+            Ok(()) | Err(Error::Incomplete) => {}
+            Err(e) => panic!("chunked decode: {e:?}"),
+        }
+    }
+    rec.events
+}
+
+/// Read a lowercase hex string (as the shared vector file stores wire bytes).
+pub fn hex_to_bytes(hex: &str) -> Vec<u8> {
+    assert!(hex.len() % 2 == 0, "odd hex length");
+    (0..hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).expect("hex byte"))
+        .collect()
 }
 
 /// Append a base-128 varint of `value` to `out` (for crafting raw test inputs).

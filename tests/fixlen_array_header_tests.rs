@@ -32,18 +32,8 @@
 
 mod common;
 
-use common::{push_varint, Event, Recorder};
+use common::{feed, push_varint, Event, Recorder};
 use sofab::{ArrayKind, Error, IStream, OStream};
-
-/// Feed `bytes` in one shot; return the three-valued outcome (§7) *and* every
-/// event the visitor saw. Both halves matter here: several vectors are about
-/// what was announced before the bytes ran out.
-fn feed(bytes: &[u8]) -> (Result<(), Error>, Vec<Event>) {
-    let mut rec = Recorder::new();
-    let mut is = IStream::new();
-    let outcome = is.feed(bytes, &mut rec);
-    (outcome, rec.events)
-}
 
 /// Wrap `body` in the finding's frame: sequence 100 (`arrays`) → sequence 10
 /// (`nested`) → `body` → two sequence-ends.

@@ -20,6 +20,8 @@
 
 #![cfg(feature = "fixlen")]
 
+mod common;
+
 use sofab::{Error, FixlenType, IStream, Id, Visitor};
 
 /// One header/payload event, recorded in order. A dedicated visitor (rather than
@@ -78,23 +80,6 @@ fn string_field(len: usize) -> Vec<u8> {
     common::push_varint(&mut v, ((len as u64) << 3) | 0x2);
     v.resize(v.len() + len, b'x');
     v
-}
-
-// A tiny local varint helper so this file needs no `mod common` machinery.
-mod common {
-    pub fn push_varint(out: &mut Vec<u8>, mut value: u64) {
-        loop {
-            let mut b = (value as u8) & 0x7F;
-            value >>= 7;
-            if value != 0 {
-                b |= 0x80;
-            }
-            out.push(b);
-            if value == 0 {
-                break;
-            }
-        }
-    }
 }
 
 // --- the primary vector: truncated exactly at the length word ----------------
