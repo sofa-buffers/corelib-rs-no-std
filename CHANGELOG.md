@@ -5,6 +5,74 @@ a **minor** bump may break API or wire output.
 
 ## Unreleased
 
+### Benchmarks
+
+The three tools now run **all four** BENCH_SPEC datasets. `bench` grew from four
+rows to ten: the `blob 1MB` message (one-shot, streaming and chunked-decode) and
+the `composite` message (encode, decode, decode-skipping-everything) join the
+`u64 array (1000)` and `typical message` rows it already had, in the spec's row
+order and format. `benches/run_callgrind.sh` measures the same ten. No library
+code changed.
+
+- **`blob 1MB` — one unbounded `blob` field, 1,000,000 payload bytes.** The three
+  rows are driven exactly as the spec prescribes, against the API as it stands
+  after the buffer-installation work: the one-shot row into a hand-sized
+  1,000,005-byte buffer with **no** sink, the streaming row through a **4096**-byte
+  caller buffer with a `Flush` sink that consumes and discards (pass-through is not
+  granted — this port implements none, so BENCH_SPEC's optional
+  `blob 1MB passthrough` row is omitted rather than faked), and the decode row fed
+  in 4096-byte chunks, resuming the payload run across every chunk boundary.
+
+- **`composite` — 956 bytes of everything the flat datasets miss:** a 64-element
+  wrapper array (element ids straddling the one-byte header boundary), 320 bytes of
+  1-, 2-, 3- and 4-byte UTF-8, nesting at depth 3 (inside the `LAZY_SEQ_DEPTH`
+  hold-back window), a field equal to its declared default so the encoder must
+  *omit* it — the hold-back's discard path, which nothing else in the suite
+  exercises — and the suite's only two-byte field header. `decode: composite
+  skip-all` walks the same bytes with a `Visitor` that overrides nothing, which is
+  what "skip everything" means in a push port.
+
+- **What the new rows say.** Under `Ir/op` the `blob` one-shot/streaming gap is the
+  widest thing in the suite — **219 139** against **11 001 075** Ir for the same
+  1,000,005 bytes, ~0.2 instructions per byte against ~11 — and it is codegen
+  rather than flush logic: with no sink the payload loop has one exit condition and
+  LLVM turns it into a `memcpy`, while the streaming loop's per-byte "is the buffer
+  full?" test (the same test that lets `MIN_OUTPUT_BUFFER` be 1) keeps it
+  byte-at-a-time. In MB/s that mostly disappears (~1.9 GB/s against ~1.2 GB/s): the
+  one-shot row is bandwidth-bound while the streaming row works inside a
+  cache-resident 4 KB window. `composite` costs 24 046 Ir to encode and 12 390 to
+  decode against 11 698 to skip — 5.6% — so on this port walking a message is
+  nearly all of the cost of reading one, which is what a router would pay.
+
+- **Every row is checked, not just printed.** A benchmark row prints a number
+  whatever happens, and every way these workloads can degenerate makes them look
+  *faster*: a chunked decode that goes INVALID on chunk 1 walks 244 chunks of
+  nothing, a streaming encode whose sink is never called is an encode into a 4 KB
+  buffer, and an encoder that frames the all-default field still prints a
+  `composite` row. The datasets therefore moved into `benches/support/workloads.rs`,
+  shared with a new `tests/bench_workloads_tests.rs` that asserts them in the
+  ordinary test job — the parity sizes (170 / 1,000,005 / 956 bytes, the
+  cross-port checks BENCH_SPEC states outright, now also enforced by `perf` and
+  `bench` themselves, which exit non-zero when they miss), the `blob` header and
+  `fixlen_word` bytes, that the streaming encode emits the one-shot bytes with no
+  flush wider than the buffer, that the chunked decode ends COMPLETE with the
+  payload copied out intact (also one byte at a time), and that `composite` carries
+  its 65 strings, four sequences — field 4 omitted — depth-3 scalars and both
+  multi-byte headers. The bench binary re-runs the same self-check before it times
+  anything, and `bench_tools_tests.rs` pins the ten workload names across
+  `run_callgrind.sh`, the `match` in `bench.rs` and the `run_*` toggle symbols.
+
+- **`decode: blob 1MB` copies the payload out.** This decoder lends the visitor a
+  slice of the fed chunk and copies nothing itself, so a sink that only added
+  `chunk.len()` left the row reporting ~677 GB/s — 245 slice hand-offs, not a
+  megabyte of work. It now writes into a destination buffer, like the C++ port's
+  row and like generated `no_std` code does.
+
+- **The `bench`/`perf` label is `Rust (no_std)`,** as `run_callgrind.sh` already
+  printed. Both tools said `Rust`, which is the label `corelib-rs` prints: two
+  ports landing in one row of a cross-language table is exactly what BENCH_SPEC's
+  label capture is meant to prevent.
+
 ### Tests
 
 Line coverage (`cargo llvm-cov --all-features`, what the **Coverage** badge

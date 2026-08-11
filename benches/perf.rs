@@ -1,4 +1,4 @@
-//! SofaBuffers Rust — combined per-operation cost benchmark.
+//! SofaBuffers Rust (no_std) — combined per-operation cost benchmark.
 //!
 //! Mirror of `bench/c/perf.c` and `bench/cpp/perf.cpp`: encodes/decodes the
 //! identical message (same field ids, types and values) through the streaming
@@ -86,6 +86,12 @@ const PERF_DELTAS: [i32; 8] = [
     -100_000, -200_000, -300_000, -400_000, -500_000, -600_000, -700_000, -800_000,
 ];
 const PERF_FP64: [f64; 4] = [3.14159265, 6.28318530, 9.42477795, 12.56637060];
+
+/// Encoded size of the `perf` message — **170 bytes on every implementation**,
+/// and BENCH_SPEC's quick parity check: a port that prints a different message
+/// size has diverged on the encoding, and its cycles/op is then measuring
+/// different work rather than the same work faster.
+const PERF_SIZE: usize = 170;
 
 fn perf_encode(buf: &mut [u8]) -> usize {
     let mut os = OStream::new(buf);
@@ -361,11 +367,15 @@ fn selected(name: &str) -> bool {
 fn main() {
     let mut buffer = [0u8; 512];
 
-    println!("=== SofaBuffers Rust per-op cost (cycles/op + throughput MB/s) ===");
+    println!("=== SofaBuffers Rust (no_std) per-op cost (cycles/op + throughput MB/s) ===");
 
     // The message is always encoded once, so the decode workloads have their
     // input even when the encode workload is not the one being measured.
     let mut msg_size = perf_encode(&mut buffer);
+    if msg_size != PERF_SIZE {
+        eprintln!("perf: message size {msg_size} != {PERF_SIZE} — the encoding has diverged");
+        std::process::exit(1);
+    }
     if selected("encode") {
         // `black_box` on the destination buffer, mirroring the one on the decode
         // input: the encoded bytes are the same every iteration, so without it

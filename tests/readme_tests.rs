@@ -121,3 +121,36 @@ fn benchmarks_section_documents_all_three_tools() {
         );
     }
 }
+
+/// …and so does every dataset those tools run (§10: the benchmark spec owns the
+/// workloads, and a reader comparing this port with another needs to know which
+/// ones it covers). A dataset that lands in `benches/` but not in the README is
+/// how the section quietly comes to describe an older tool than the one shipped.
+#[test]
+fn benchmarks_section_names_every_dataset() {
+    let body = section(BENCH_HEADING);
+    for dataset in [
+        "u64 array (1000)",
+        "typical message",
+        "blob 1MB",
+        "composite",
+    ] {
+        assert!(
+            body.contains(dataset),
+            "the `{BENCH_HEADING}` section never mentions the `{dataset}` dataset"
+        );
+    }
+}
+
+/// The parity sizes are the cheapest cross-port check there is, and they are only
+/// useful if a reader knows to look at them.
+#[test]
+fn benchmarks_section_states_the_parity_sizes() {
+    let body = section(BENCH_HEADING);
+    for size in ["170", "1,000,005", "956"] {
+        assert!(
+            body.contains(size),
+            "the `{BENCH_HEADING}` section does not state the {size}-byte parity size"
+        );
+    }
+}

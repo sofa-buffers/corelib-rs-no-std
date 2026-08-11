@@ -37,16 +37,53 @@ fn libtest_flags_are_not_workloads() {
     );
 }
 
+/// Every workload `benches/run_callgrind.sh` asks for, in the order its table
+/// prints them (BENCH_SPEC's row order). Kept here so the two lists cannot drift:
+/// a name the script passes and the binary does not know exits 2, and the script
+/// then prints a dash where an instruction count belongs.
+const WORKLOADS: [&str; 10] = [
+    "encode_u64_array",
+    "encode_typical",
+    "encode_blob_oneshot",
+    "encode_blob_streaming",
+    "encode_composite",
+    "decode_u64_array",
+    "decode_typical",
+    "decode_blob",
+    "decode_composite",
+    "decode_composite_skip",
+];
+
 /// `run_callgrind.sh` invokes the binary directly as `bench <workload>`.
 #[test]
 fn bare_workload_name_is_selected() {
-    for w in [
-        "encode_u64_array",
-        "encode_typical",
-        "decode_u64_array",
-        "decode_typical",
-    ] {
+    for w in WORKLOADS {
         assert_eq!(workload_arg(args(&["bench", w])), Some(w.to_string()));
+    }
+}
+
+/// The script and the binary agree on the workload names.
+///
+/// `run_callgrind.sh` is a shell script, so nothing but this test connects its
+/// `WORKLOADS` array to the `match` in `benches/bench.rs` — and a mismatch is
+/// silent in the place it matters least (a dash in a table) and loud nowhere.
+#[test]
+fn callgrind_script_and_binary_agree_on_the_workloads() {
+    let script = include_str!("../benches/run_callgrind.sh");
+    let bench = include_str!("../benches/bench.rs");
+    for w in WORKLOADS {
+        assert!(
+            script.contains(&format!("\n    {w}\n")),
+            "benches/run_callgrind.sh does not run the {w} workload"
+        );
+        assert!(
+            bench.contains(&format!("\"{w}\" =>")),
+            "benches/bench.rs does not implement the {w} workload"
+        );
+        assert!(
+            bench.contains(&format!("pub fn run_{w}(")),
+            "benches/bench.rs has no run_{w} symbol for --toggle-collect"
+        );
     }
 }
 

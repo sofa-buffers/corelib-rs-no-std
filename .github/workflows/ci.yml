@@ -180,9 +180,14 @@ jobs:
       # §10/§13 require the perf and bench tools to be present *and runnable*.
       # Both are `harness = false` bench targets, so cargo appends its own
       # `--bench` flag to every run — which once made the documented invocation
-      # exit 2 without anything in CI noticing. Each tool finishes in seconds
-      # (~1 s CPU-time loop per workload); the numbers are not asserted, only
-      # that the documented commands run to completion.
+      # exit 2 without anything in CI noticing. Each tool runs a ~1 s CPU-time
+      # loop per workload, so `bench` takes ~11 s for BENCH_SPEC's ten rows.
+      # The numbers are not asserted here, but the tools are not merely started
+      # either: both fail the step if their message sizes miss the cross-port
+      # parity checks (170 / 1,000,005 / 956 bytes), and `bench` additionally
+      # self-checks each workload's shape before timing anything. The datasets
+      # themselves are asserted in the `test` job
+      # (`tests/bench_workloads_tests.rs`).
       - name: Throughput table (cargo bench --bench bench)
         run: cargo bench --bench bench
 
@@ -199,7 +204,9 @@ jobs:
               | grep -o '"executable":"[^"]*/bench-[^"]*"' | head -1 \
               | sed 's/.*"executable":"//;s/"$//')"
           test -x "$BIN" || { echo "bench binary not found"; exit 1; }
-          for w in encode_u64_array encode_typical decode_u64_array decode_typical; do
+          for w in encode_u64_array encode_typical encode_blob_oneshot \
+                   encode_blob_streaming encode_composite decode_u64_array \
+                   decode_typical decode_blob decode_composite decode_composite_skip; do
             out="$("$BIN" "$w" 2>&1 >/dev/null)"
             echo "$w -> $out"
             case "$out" in BYTES=[0-9]*) ;; *) echo "workload $w did not run"; exit 1;; esac
