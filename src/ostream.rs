@@ -6,6 +6,8 @@
 //! RAM) can be streamed out. With no sink, a full buffer yields
 //! [`Error::BufferFull`].
 
+use core::cell::Cell;
+
 use crate::error::{Error, Result};
 use crate::types::*;
 use crate::varint::zigzag_encode;
@@ -15,6 +17,19 @@ use crate::{Id, Signed, Unsigned};
 ///
 /// Any `FnMut(&[u8])` closure implements this trait, so callbacks can be passed
 /// directly. Implement it manually to avoid a closure capture on bare-metal.
+///
+/// A sink either **copies** the bytes it was handed or **takes** the buffer
+/// (queues it for a transport, hands it to DMA), and the encoder cannot tell the
+/// two apart — the contract rests on what the callback does before it returns
+/// (CORELIB_PLAN §5.1):
+///
+/// * returning **without** installing a buffer means it copied: the active
+///   buffer stays active and the encoder resumes writing into it at offset `0`;
+/// * a sink that **takes** the buffer **MUST** install a replacement before
+///   returning. That is what [`Handover`] is for — a stream built with
+///   [`OStream::with_handover`] passes the channel to the sink, which calls
+///   [`Handover::install`] from inside the callback and picks the buffer it took
+///   back up with [`Handover::taken`].
 pub trait Flush {
     /// Whether this sink actually drains the buffer. `true` for a real sink (a
     /// full buffer flushes and writing resumes); [`NoFlush`] overrides it to
@@ -44,6 +59,179 @@ impl Flush for NoFlush {
     const SINKS: bool = false;
     #[inline]
     fn flush(&mut self, _data: &[u8]) {}
+}
+
+/// Where the encoder looks for a replacement buffer once a [`Flush`] callback
+/// has returned, and where it drops the buffer that callback took.
+///
+/// The two implementations are the whole story: [`NoHandoff`] — the default,
+/// zero-sized, `TAKES == false`, so a stream that cannot be handed a replacement
+/// compiles the take-and-replace path away entirely and keeps
+/// `size_of::<OStream>()` exactly what it was — and `&`[`Handover`], the channel
+/// a taking sink writes into. It is a trait rather than a plain field so the
+/// choice costs nothing when it is not used, which is what a footprint profile
+/// needs: an unconditional `Option<&Handover>` field would add a pointer to
+/// **every** encoder, including the one-shot `NoFlush` one that can never flush.
+pub trait Handoff<'a> {
+    /// Whether a sink on this stream can install a replacement buffer.
+    /// A compile-time constant, so `false` folds the whole handover path out of
+    /// the flush path (no field access, no branch, no dead code).
+    const TAKES: bool = true;
+
+    /// The buffer a sink installed during the callback that just returned, with
+    /// the offset writing resumes at. `None` means the sink copied.
+    fn installed(&self) -> Option<(&'a mut [u8], usize)>;
+
+    /// Hand the buffer the sink took back to it — the encoder has stopped
+    /// writing into it and gives up its borrow here.
+    fn retire(&self, buffer: &'a mut [u8]);
+}
+
+/// The [`Handoff`] of a stream whose sink cannot install a replacement buffer:
+/// zero-sized, and every flush resumes at `0` in the active buffer.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NoHandoff;
+
+impl<'a> Handoff<'a> for NoHandoff {
+    const TAKES: bool = false;
+    #[inline]
+    fn installed(&self) -> Option<(&'a mut [u8], usize)> {
+        None
+    }
+    #[inline]
+    fn retire(&self, _buffer: &'a mut [u8]) {}
+}
+
+/// The take-and-replace channel between a [`Flush`] sink and its encoder
+/// (CORELIB_PLAN §5.1).
+///
+/// A sink that **takes** the buffer it was handed — passes it to a transport,
+/// queues it for an asynchronous write, hands it to DMA — **MUST** install a
+/// replacement before returning, or the encoder would keep writing into storage
+/// the transport now owns. Inside the callback the encoder is mutably borrowed
+/// by the very call that invoked the sink, so [`OStream::buffer_set`] is out of
+/// reach; the sink installs through this channel instead, which the caller
+/// creates, hands to [`OStream::with_handover`], and shares with the sink:
+///
+/// ```
+/// use sofab::{Handover, OStream};
+///
+/// let mut first = [0u8; 32];
+/// let mut spare = [0u8; 32];
+/// let mut pool: Vec<&mut [u8]> = vec![&mut spare];
+/// let mut packets: Vec<Vec<u8>> = Vec::new();
+/// let handover = Handover::new();
+/// {
+///     let mut os = OStream::with_handover(
+///         &mut first,
+///         4, // framing-header room, re-armed by every installation
+///         |packet: &[u8]| {
+///             packets.push(packet.to_vec()); // or: start the DMA on it
+///             // Took it: install a replacement before returning.
+///             handover.install(pool.pop().expect("pool"), 4).unwrap();
+///             // The buffer taken at the previous handover is ours again.
+///             if let Some(done) = handover.taken() {
+///                 pool.push(done);
+///             }
+///         },
+///         &handover,
+///     )
+///     .unwrap();
+///     os.write_unsigned(1, 42).unwrap();
+///     os.flush();
+/// }
+/// ```
+///
+/// **What the encoder does with an installation.** After the callback returns,
+/// the buffer it installed becomes the active one and writing resumes at *that
+/// call's* offset — the offset belongs to the installation, so this is also how
+/// a sink re-arms framing-header room in every flushed unit. The buffer it
+/// replaced is handed back through [`Handover::taken`], which is what lets a
+/// pool recycle it: until the encoder gives up that borrow, nobody else can
+/// touch the storage. Reclaim it in every callback — the channel holds one
+/// retired buffer, and retiring another drops the first (only the borrow ends;
+/// the storage itself is untouched and returns to its owner when the stream
+/// does).
+///
+/// A callback that installs nothing leaves the channel empty, which is the
+/// copy-and-continue shape: same buffer, resume at `0`.
+#[derive(Default)]
+pub struct Handover<'a> {
+    /// The replacement a sink installed during the current callback.
+    next: Cell<Option<(&'a mut [u8], usize)>>,
+    /// The buffer the encoder stopped writing into, waiting to be reclaimed.
+    retired: Cell<Option<&'a mut [u8]>>,
+}
+
+impl<'a> Handover<'a> {
+    /// Create an empty channel.
+    #[inline]
+    pub const fn new() -> Self {
+        Handover {
+            next: Cell::new(None),
+            retired: Cell::new(None),
+        }
+    }
+
+    /// Install `buffer` as the encoder's next output buffer, resuming writes at
+    /// `offset` in it. Call this from inside a [`Flush`] callback that took the
+    /// buffer it was handed.
+    ///
+    /// Checked exactly as every other installation is, and **where it is handed
+    /// over** rather than partway through a message (§5.1): [`Error::Argument`]
+    /// if `offset` lies past the end of `buffer`, or if the remaining room
+    /// `buffer.len() - offset` is below [`MIN_OUTPUT_BUFFER`] — a channel only
+    /// exists on a stream that has a sink, so the streaming minimum always
+    /// applies. A rejected buffer is **not** installed and the channel keeps
+    /// whatever it held, so the encoder simply carries on in the active buffer;
+    /// the sink learns of the rejection here, in time to install another one.
+    ///
+    /// Installing twice in one callback keeps the **last** buffer.
+    pub fn install(&self, buffer: &'a mut [u8], offset: usize) -> Result<()> {
+        check_install(buffer.len(), offset, true)?;
+        self.next.set(Some((buffer, offset)));
+        Ok(())
+    }
+
+    /// Take back the buffer the encoder stopped writing into after this sink
+    /// installed a replacement — the buffer this sink took, now free to be
+    /// recycled, scrubbed or re-queued. `None` if nothing was retired since the
+    /// last call.
+    #[inline]
+    pub fn taken(&self) -> Option<&'a mut [u8]> {
+        self.retired.take()
+    }
+}
+
+/// Written by hand rather than derived: the slots hold `&mut [u8]`, which a
+/// `Cell` cannot lend out for printing, and the buffers are not this type's
+/// business anyway — what a caller wants to see is whether the channel is armed.
+impl core::fmt::Debug for Handover<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        // Take-and-put-back: a `Cell` has no shared read, and both slots are
+        // restored before this returns, so the channel is left as it was found.
+        let next = self.next.take();
+        let armed = next.is_some();
+        self.next.set(next);
+        let retired = self.retired.take();
+        let pending = retired.is_some();
+        self.retired.set(retired);
+        f.debug_struct("Handover")
+            .field("installed", &armed)
+            .field("retired", &pending)
+            .finish()
+    }
+}
+
+impl<'a> Handoff<'a> for &'a Handover<'a> {
+    #[inline]
+    fn installed(&self) -> Option<(&'a mut [u8], usize)> {
+        self.next.take()
+    }
+    #[inline]
+    fn retire(&self, buffer: &'a mut [u8]) {
+        self.retired.set(Some(buffer));
+    }
 }
 
 /// How many nested sequence headers can be held back at once (see
@@ -120,13 +308,17 @@ fn check_install(len: usize, offset: usize, sinks: bool) -> Result<()> {
 }
 
 /// Streaming Sofab encoder writing into a caller-provided buffer.
-pub struct OStream<'a, F: Flush = NoFlush> {
+pub struct OStream<'a, F: Flush = NoFlush, H: Handoff<'a> = NoHandoff> {
     buffer: &'a mut [u8],
     offset: usize,
     /// The flush sink. Whether it drains a full buffer or errors is decided at
     /// compile time by [`Flush::SINKS`]; [`NoFlush`] is zero-sized and folds the
     /// flush branch away, so a no-sink encoder carries no runtime sink state.
     flush: F,
+    /// Where a sink hands a replacement buffer back (§5.1 take-and-replace).
+    /// [`NoHandoff`] is zero-sized with `TAKES == false`, so a stream without a
+    /// [`Handover`] carries no state for it and no branch either.
+    handoff: H,
     /// Currently-open nested-sequence depth, capped at [`MAX_DEPTH`].
     #[cfg(feature = "sequence")]
     depth: u32,
@@ -149,7 +341,7 @@ impl<'a> OStream<'a, NoFlush> {
     /// (§5.1). Use [`OStream::with_offset`] to reserve header room.
     #[inline]
     pub fn new(buffer: &'a mut [u8]) -> Self {
-        OStream::install(buffer, 0, NoFlush)
+        OStream::install(buffer, 0, NoFlush, NoHandoff)
     }
 
     /// Like [`OStream::new`] but begin writing at `offset` bytes into the
@@ -162,11 +354,11 @@ impl<'a> OStream<'a, NoFlush> {
     #[inline]
     pub fn with_offset(buffer: &'a mut [u8], offset: usize) -> Result<Self> {
         check_install(buffer.len(), offset, NoFlush::SINKS)?;
-        Ok(OStream::install(buffer, offset, NoFlush))
+        Ok(OStream::install(buffer, offset, NoFlush, NoHandoff))
     }
 }
 
-impl<'a, F: Flush> OStream<'a, F> {
+impl<'a, F: Flush> OStream<'a, F, NoHandoff> {
     /// Create an encoder with a flush `sink`, starting at `offset`. When the
     /// buffer fills, the accumulated bytes are passed to `sink` and writing
     /// resumes at the start of the buffer.
@@ -175,20 +367,52 @@ impl<'a, F: Flush> OStream<'a, F> {
     /// partway through a message (§5.1): [`Error::Argument`] if `offset` lies
     /// past the end of `buffer`, or if the remaining room
     /// `buffer.len() - offset` is below [`MIN_OUTPUT_BUFFER`].
+    ///
+    /// The sink of such a stream **copies**: it has no channel to install a
+    /// replacement buffer through, so every flush resumes at `0` in the same
+    /// buffer. A sink that wants to *take* the buffer builds the stream with
+    /// [`OStream::with_handover`] instead.
     #[inline]
     pub fn with_flush(buffer: &'a mut [u8], offset: usize, sink: F) -> Result<Self> {
         check_install(buffer.len(), offset, F::SINKS)?;
-        Ok(OStream::install(buffer, offset, sink))
+        Ok(OStream::install(buffer, offset, sink, NoHandoff))
     }
+}
 
+impl<'a, F: Flush> OStream<'a, F, &'a Handover<'a>> {
+    /// Create an encoder with a flush `sink` that may **take** the buffer it is
+    /// handed, installing a replacement through `handover` before it returns
+    /// (§5.1, the take-and-replace half of the returning-callback contract).
+    ///
+    /// `buffer` and `offset` are checked exactly as in [`OStream::with_flush`],
+    /// and so is every buffer the sink later installs. The sink and this stream
+    /// share the same [`Handover`]: pass `&handover` to both.
+    ///
+    /// A callback that installs nothing still means "I copied" — a handover
+    /// stream is a superset of a copying one, and costs one pointer of encoder
+    /// state for the channel.
+    #[inline]
+    pub fn with_handover(
+        buffer: &'a mut [u8],
+        offset: usize,
+        sink: F,
+        handover: &'a Handover<'a>,
+    ) -> Result<Self> {
+        check_install(buffer.len(), offset, F::SINKS)?;
+        Ok(OStream::install(buffer, offset, sink, handover))
+    }
+}
+
+impl<'a, F: Flush, H: Handoff<'a>> OStream<'a, F, H> {
     /// Build the stream once the buffer/offset pair has been accepted. Private,
     /// so the checks above are the only way in.
     #[inline]
-    fn install(buffer: &'a mut [u8], offset: usize, flush: F) -> Self {
+    fn install(buffer: &'a mut [u8], offset: usize, flush: F, handoff: H) -> Self {
         OStream {
             buffer,
             offset,
             flush,
+            handoff,
             #[cfg(feature = "sequence")]
             depth: 0,
             #[cfg(feature = "sequence")]
@@ -211,17 +435,51 @@ impl<'a, F: Flush> OStream<'a, F> {
         // `F::SINKS` is a compile-time constant: for a `NoFlush` encoder the
         // whole body folds away and this is just `self.offset`.
         if used > 0 && F::SINKS {
-            // `min` proves the slice end in-bounds. `check_install` already
-            // guarantees `offset <= len` on every installation path and
-            // `push_byte` only advances the cursor into a slot it obtained, so
-            // the clamp never fires — spelling it this way is what keeps
-            // `core::panicking` out of the image (README "Footprint") rather
-            // than resting the no-panic property on that reasoning.
-            let end = used.min(self.buffer.len());
-            self.flush.flush(&self.buffer[..end]);
-            self.offset = 0;
+            self.drain();
         }
         used
+    }
+
+    /// Hand the buffered bytes to the sink and re-establish where writing
+    /// continues — the one place the returning-callback contract of §5.1 is
+    /// implemented, shared by [`Self::flush`] and [`Self::push_byte`].
+    ///
+    /// The callback decides which of the two shapes is in effect, and the
+    /// encoder does not guess:
+    ///
+    /// * it installed nothing → it **copied**. The active buffer stays active
+    ///   and writing resumes at offset `0`;
+    /// * it installed a replacement → it **took** the buffer. The replacement
+    ///   becomes active at *its* offset (which is how each flushed unit re-arms
+    ///   its own framing-header room), and the buffer it took is handed back
+    ///   through the channel so the sink can recycle it — the encoder gives up
+    ///   its borrow there and never writes into it again.
+    ///
+    /// [`Handoff::TAKES`] is a compile-time constant, so on the default
+    /// [`NoHandoff`] stream everything after the callback folds down to
+    /// `self.offset = 0`.
+    ///
+    /// Only ever called with a sink installed (`F::SINKS`).
+    #[inline]
+    fn drain(&mut self) {
+        // `min` proves the slice end in-bounds. `check_install` already
+        // guarantees `offset <= len` on every installation path and `push_byte`
+        // only advances the cursor into a slot it obtained, so the clamp never
+        // fires — spelling it this way is what keeps `core::panicking` out of
+        // the image (README "Footprint") rather than resting the no-panic
+        // property on that reasoning.
+        let end = self.offset.min(self.buffer.len());
+        self.flush.flush(&self.buffer[..end]);
+        self.offset = 0;
+        if H::TAKES {
+            if let Some((next, offset)) = self.handoff.installed() {
+                // `check_install` ran inside `Handover::install`, where the
+                // buffer was handed over — never partway through a message.
+                let taken = core::mem::replace(&mut self.buffer, next);
+                self.handoff.retire(taken);
+                self.offset = offset;
+            }
+        }
     }
 
     /// Replace the active buffer, resuming writes at `offset` in the new buffer.
@@ -248,6 +506,12 @@ impl<'a, F: Flush> OStream<'a, F> {
     /// caller still owns the buffer it handed over, and the documented
     /// [`Error::BufferFull`] recovery (install a bigger buffer, retry the failed
     /// write) is unchanged.
+    ///
+    /// On a stream with a [`Handover`] the drain is an ordinary flush, so the
+    /// sink may take the outgoing buffer and install a replacement from inside
+    /// it — that buffer is then **superseded by this call's**, which is the last
+    /// installation and wins. Drive the swap from one side or the other, not
+    /// both at once.
     #[inline]
     pub fn buffer_set(&mut self, buffer: &'a mut [u8], offset: usize) -> Result<()> {
         check_install(buffer.len(), offset, F::SINKS)?;
@@ -271,11 +535,7 @@ impl<'a, F: Flush> OStream<'a, F> {
             if !F::SINKS {
                 return Err(Error::BufferFull);
             }
-            // `min` proves the slice end in-bounds (offset == len here in
-            // normal use), so no panicking bounds check is emitted.
-            let used = self.offset.min(self.buffer.len());
-            self.flush.flush(&self.buffer[..used]);
-            self.offset = 0;
+            self.drain();
         }
         // `get_mut` folds the buffer-full guard and the store into one checked
         // access: `None` only for a zero-length buffer, reported as `BufferFull`

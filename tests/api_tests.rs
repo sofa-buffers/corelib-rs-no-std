@@ -227,6 +227,238 @@ fn a_buffer_set_without_a_sink_still_leaves_the_bytes_with_the_caller() {
     assert_eq!(got, [0x08, 0x2A, 0x10, 0x07]);
 }
 
+// --- the returning-callback handover contract (§5.1, §7.2 item 4) -----------
+//
+// A sink either **copies** the bytes it was handed — returns without installing
+// anything, and the encoder resumes in the same buffer at 0 — or **takes** the
+// buffer, in which case it MUST install a replacement before returning. Both
+// halves are tested here, against the same message, and both must produce
+// exactly the one-shot bytes.
+//
+// The take-and-replace channel is opt-in and must stay free for the streams
+// that do not use it: a footprint port cannot pay a pointer of encoder state
+// per `OStream` for a capability a one-shot encode never reaches. `NoHandoff`
+// being zero-sized is what makes `size_of::<OStream<NoFlush>>()` — the number
+// `tools/footprint.sh` reports as encoder RAM — independent of it.
+const _: () = assert!(
+    core::mem::size_of::<sofab::NoHandoff>() == 0,
+    "the default handoff must cost no encoder state"
+);
+
+#[test]
+fn a_taking_sink_installs_a_replacement_buffer_from_inside_the_callback() {
+    // §7.2 item 4, the zero-copy half: a flush callback that installs a
+    // *different* buffer on every call and scrubs the one it was handed before
+    // returning. An encoder that kept writing into the buffer it gave away
+    // reads back the fill pattern; a port on which the callback cannot install
+    // at all cannot express the DMA / packet hand-off §5.1 exists for.
+    const TEXT: &str = "a string payload much longer than the output buffer";
+
+    let mut one_shot = [0u8; 128];
+    let n = {
+        let mut os = OStream::new(&mut one_shot);
+        os.write_unsigned(1, 300).unwrap();
+        os.write_str(2, TEXT).unwrap();
+        os.write_signed(3, -7).unwrap();
+        os.bytes_used()
+    };
+
+    // A pool of distinct replacement buffers, each prefilled with a pattern
+    // that is not part of the message.
+    let mut storage: Vec<[u8; 4]> = vec![[0xAA; 4]; 64];
+    let mut pool: Vec<&mut [u8]> = storage.iter_mut().map(|b| &mut b[..]).collect();
+    let mut first = [0xAAu8; 4];
+
+    let mut streamed: Vec<u8> = Vec::new();
+    let mut handovers = 0usize;
+    let mut reclaimed = 0usize;
+    // Address range of the buffer installed at the previous handover: what the
+    // encoder must be writing into now.
+    let mut expected: Option<(usize, usize)> = None;
+    let handover = sofab::Handover::new();
+    {
+        let mut os = OStream::with_handover(
+            &mut first,
+            0,
+            |chunk: &[u8]| {
+                if let Some((base, len)) = expected {
+                    let at = chunk.as_ptr() as usize;
+                    assert!(
+                        at >= base && at + chunk.len() <= base + len,
+                        "the encoder must write into the buffer the sink installed"
+                    );
+                }
+                streamed.extend_from_slice(chunk);
+                // Take the buffer: install a replacement before returning.
+                let next = pool.pop().expect("pool exhausted");
+                expected = Some((next.as_ptr() as usize, next.len()));
+                handover
+                    .install(next, 0)
+                    .expect("a pool buffer is a legal installation");
+                handovers += 1;
+                // The buffer the encoder gave up at the previous handover is
+                // ours now: scrub it, so an encoder that kept writing into a
+                // buffer it handed away shows up in the emitted bytes.
+                if let Some(old) = handover.taken() {
+                    old.fill(0xAA);
+                    reclaimed += 1;
+                }
+            },
+            &handover,
+        )
+        .unwrap();
+        os.write_unsigned(1, 300).unwrap();
+        os.write_str(2, TEXT).unwrap();
+        os.write_signed(3, -7).unwrap();
+        os.flush();
+    }
+
+    assert!(handovers > 1, "the window must have flushed repeatedly");
+    assert_eq!(
+        reclaimed,
+        handovers - 1,
+        "every installation retires the buffer the sink took"
+    );
+    assert_eq!(streamed, one_shot[..n]);
+}
+
+#[test]
+fn a_copying_sink_returns_without_installing_and_resumes_at_zero() {
+    // The other half of the same contract: returning **without** installing
+    // means the sink copied, the active buffer stays active, and the encoder
+    // resumes writing into it at offset 0 — the same bytes, over a stream that
+    // *could* have taken the buffer.
+    let mut one_shot = [0u8; 64];
+    let n = {
+        let mut os = OStream::new(&mut one_shot);
+        os.write_unsigned(1, 300).unwrap();
+        os.write_str(2, "copied, not taken").unwrap();
+        os.bytes_used()
+    };
+
+    let mut window = [0u8; 4];
+    let mut streamed: Vec<u8> = Vec::new();
+    let handover = sofab::Handover::new();
+    {
+        let mut os = OStream::with_handover(
+            &mut window,
+            0,
+            |chunk: &[u8]| streamed.extend_from_slice(chunk),
+            &handover,
+        )
+        .unwrap();
+        os.write_unsigned(1, 300).unwrap();
+        os.write_str(2, "copied, not taken").unwrap();
+        os.flush();
+    }
+    assert_eq!(streamed, one_shot[..n]);
+    assert!(
+        handover.taken().is_none(),
+        "nothing was taken, so nothing is retired"
+    );
+}
+
+#[test]
+fn every_installed_replacement_re_arms_its_own_header_room() {
+    // §5.1: the start offset belongs to the **installation**, not to the
+    // buffer, and that is how a taking sink gets framing-header room in *every*
+    // flushed unit — one header per packet. Two buffers ping-pong through the
+    // channel: the one the encoder gives up comes back at the next handover and
+    // is installed again, at its own offset.
+    const RESERVED: usize = 3;
+
+    let mut one_shot = [0u8; 64];
+    let n = {
+        let mut os = OStream::new(&mut one_shot);
+        os.write_unsigned(1, 300).unwrap();
+        os.write_str(2, "two buffers, one header each").unwrap();
+        os.bytes_used()
+    };
+
+    let mut a = [0xAAu8; 8];
+    let mut b = [0xAAu8; 8];
+    let mut pool: Vec<&mut [u8]> = vec![&mut b[..]];
+    let mut units: Vec<Vec<u8>> = Vec::new();
+    let handover = sofab::Handover::new();
+    {
+        let mut os = OStream::with_handover(
+            &mut a,
+            RESERVED,
+            |packet: &[u8]| {
+                units.push(packet.to_vec());
+                // Recycle the buffer given up at the previous handover, then
+                // take this one and install a replacement with fresh header
+                // room.
+                if let Some(done) = handover.taken() {
+                    pool.push(done);
+                }
+                handover
+                    .install(pool.pop().expect("ping-pong pool"), RESERVED)
+                    .unwrap();
+            },
+            &handover,
+        )
+        .unwrap();
+        os.write_unsigned(1, 300).unwrap();
+        os.write_str(2, "two buffers, one header each").unwrap();
+        os.flush();
+    }
+
+    assert!(units.len() > 2, "the window must have flushed repeatedly");
+    let mut payload: Vec<u8> = Vec::new();
+    for unit in &units {
+        assert_eq!(
+            &unit[..RESERVED],
+            &[0xAA; RESERVED],
+            "every unit carries its own untouched header room"
+        );
+        payload.extend_from_slice(&unit[RESERVED..]);
+    }
+    assert_eq!(payload, one_shot[..n]);
+}
+
+#[test]
+fn a_replacement_below_the_minimum_is_rejected_where_it_is_handed_over() {
+    // A buffer installed from inside the callback is an installation like any
+    // other (§5.1): it is checked *there*, not partway through the message, and
+    // a rejected one leaves the active buffer in place so the encode still
+    // produces the one-shot bytes.
+    let mut one_shot = [0u8; 32];
+    let n = {
+        let mut os = OStream::new(&mut one_shot);
+        os.write_unsigned(1, 300).unwrap();
+        os.write_unsigned(2, 7).unwrap();
+        os.bytes_used()
+    };
+
+    let mut window = [0u8; 2];
+    let mut too_small = [0u8; MIN_OUTPUT_BUFFER - 1];
+    let mut undersized: Option<&mut [u8]> = Some(&mut too_small[..]);
+    let mut streamed: Vec<u8> = Vec::new();
+    let mut rejected = 0usize;
+    let handover = sofab::Handover::new();
+    {
+        let mut os = OStream::with_handover(
+            &mut window,
+            0,
+            |chunk: &[u8]| {
+                streamed.extend_from_slice(chunk);
+                if let Some(bad) = undersized.take() {
+                    assert_eq!(handover.install(bad, 0).err(), Some(Error::Argument));
+                    rejected += 1;
+                }
+            },
+            &handover,
+        )
+        .unwrap();
+        os.write_unsigned(1, 300).unwrap();
+        os.write_unsigned(2, 7).unwrap();
+        os.flush();
+    }
+    assert_eq!(rejected, 1);
+    assert_eq!(streamed, one_shot[..n]);
+}
+
 #[test]
 fn a_sink_never_receives_bytes_the_encoder_did_not_write() {
     // Regression: a stale buffer installed with a sink used to have its whole
