@@ -5,6 +5,27 @@ a **minor** bump may break API or wire output.
 
 ## Unreleased
 
+### Breaking — API
+
+- **Removed `trim_tail`, `trim_tail_f32` and `trim_tail_f64`** (and the `trim`
+  module behind them). They implemented the trailing-default elision that
+  MESSAGE_SPEC §3 now forbids: under the count-is-capacity amendment a `count: N`
+  array carries `0..N` elements, the count prefix on the wire **is** the length,
+  and the encoder writes every element the field holds. Nothing fills an array
+  back up to `N` on decode, so dropping the tail does not produce a compact
+  spelling of the same value — it produces a different, shorter one.
+  `trim_tail(&[1, 2, 3, 0, 0], 0)` yielded `[1, 2, 3]`, and encoding that turned
+  a five-element array into a three-element array on the wire: silent data loss,
+  documented as the canonical form. Generated code has not called them for
+  several releases; a hand-written caller that did should pass the array
+  **unmodified** to `write_array_unsigned` / `write_array_signed` /
+  `write_array_fp32` / `write_array_fp64`, which is both correct and less work.
+
+  The rule is now pinned by tests (`tests/no_elision_tests.rs`): every array
+  flavour keeps its trailing defaults on the wire and through a round-trip — the
+  shared vector `array_unsigned_trailing_defaults` covers the same ground — and
+  the crate surface is checked to expose no such helper again.
+
 ### Added
 
 - **A `Flush` sink can now take the buffer it was handed and install a
