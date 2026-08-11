@@ -216,6 +216,11 @@ that every decoder normalizes away, while the reverse silently changes an
 array's decoded length. So "always framed" is false for a **field** and still
 true for an **element**.
 
+Both closers require a sequence to actually be open: closing one too many is
+`Error::Argument`, writes nothing and changes no state. An end marker with no
+open sequence is `INVALID` on the wire (§5.2), so reporting success for it would
+hand back a message this crate's own decoder must reject.
+
 ```rust
 let mut buf = [0u8; 32];
 let mut os = sofab::OStream::new(&mut buf);
@@ -534,16 +539,16 @@ are zero and flash equals `.text`:
 |---------------|----------:|-----------:|----------:|
 | **MIN** — integers only, 32-bit (`default-features = false`) | **630 B** | **642 B** | **784 B** |
 | integers only, 64-bit (`value64`) | 804 B | 830 B | 956 B |
-| `+ sequence` (64-bit) | 1 140 B | 1 142 B | 1 452 B |
+| `+ sequence` (64-bit) | 1 148 B | 1 150 B | 1 460 B |
 | `+ array` (64-bit) | 1 104 B | 1 116 B | 1 292 B |
 | `+ fixlen` (fp32 / str / blob, 64-bit) | 1 161 B | 1 191 B | 1 445 B |
-| all wire types, 32-bit | 1 927 B | 1 907 B | 2 505 B |
-| **MAX** — all wire types, 64-bit (default) | **2 209 B** | **2 131 B** | **2 785 B** |
-| generated-shape visitor (MAX) | 4 259 B | 4 207 B | 5 293 B |
+| all wire types, 32-bit | 1 935 B | 1 911 B | 2 513 B |
+| **MAX** — all wire types, 64-bit (default) | **2 217 B** | **2 139 B** | **2 793 B** |
+| generated-shape visitor (MAX) | 4 263 B | 4 203 B | 5 297 B |
 
 The `sequence` rows carry the lazy-framing machinery of MESSAGE_SPEC §2 (the
-hold-back run, [above](#sequence-framing-and-the-hold-back-window)): 238 B of
-flash on Cortex-M0 over an eager `begin`/`end` pair (1 140 B against the 902 B
+hold-back run, [above](#sequence-framing-and-the-hold-back-window)): 246 B of
+flash on Cortex-M0 over an eager `begin`/`end` pair (1 148 B against the 902 B
 the same row measured before lazy framing), plus the pending array's RAM in the
 table below. About 60 B of that is `commit_pending` tracking how much
 of the run reached the buffer so a `BufferFull` in the middle of one keeps the
