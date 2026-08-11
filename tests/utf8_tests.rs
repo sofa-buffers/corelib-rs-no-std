@@ -7,8 +7,12 @@
 //!
 //! * **Encode** is strict *by construction* — [`OStream::write_str`] takes
 //!   `&str`, which the Rust type system already guarantees is valid UTF-8, so a
-//!   `string` field can never carry invalid bytes. There is nothing to check and
-//!   no way to construct a counter-example.
+//!   `string` field can never carry invalid bytes. That holds for the *whole*
+//!   API, not just for `write_str`: the byte-taking primitive
+//!   [`OStream::write_fixlen`] refuses [`FixlenType::Str`] with
+//!   `Error::Argument`, so there is no second door to a `string` field and no
+//!   counter-example to construct (the encode half of these vectors, at the
+//!   bottom of this file).
 //! * **Decode** — the corelib delivers a `string` field's *raw bytes* to the
 //!   [`Visitor::string`] callback and never builds a `str`/`String` itself.
 //!   Strictness is enforced by **generated code**, which materializes the field
@@ -26,7 +30,7 @@ mod common;
 
 use common::{Event, Recorder};
 use serde_json::Value;
-use sofab::{Error, IStream, OStream};
+use sofab::{Error, FixlenType, IStream, OStream};
 
 /// The shared vectors, embedded from the verbatim asset copy.
 const VECTORS_JSON: &str = include_str!("../assets/test_vectors.json");
@@ -178,4 +182,93 @@ fn embedded_nul_roundtrips() {
 
     // The overlong NUL (C0 80) is a different thing and stays rejected.
     assert!(core::str::from_utf8(&hex_to_bytes("c080")).is_err());
+}
+
+// --- encode: the `string` subtype is unreachable from the byte primitive -----
+//
+// "Strict by construction" is a claim about the whole encode API, not about
+// `write_str` alone: §6.4 exempts Unicode-string targets from a runtime check
+// *because* their API cannot accept non-UTF-8 bytes for a `string` field. The
+// byte-taking primitive `write_fixlen` therefore refuses `FixlenType::Str`
+// outright — `Error::Argument`, no bytes emitted — and `write_str` is the only
+// door to a `string` field. The other subtypes stay reachable, which is what
+// the primitive is for.
+
+/// Encode `f` into a fresh buffer; return the result and the bytes produced.
+fn encode_attempt<F: FnOnce(&mut OStream) -> Result<(), Error>>(
+    f: F,
+) -> (Result<(), Error>, Vec<u8>) {
+    let mut buf = [0u8; 64];
+    let (res, used) = {
+        let mut os = OStream::new(&mut buf);
+        let res = f(&mut os);
+        (res, os.bytes_used())
+    };
+    (res, buf[..used].to_vec())
+}
+
+#[test]
+fn write_fixlen_str_rejects_the_shared_invalid_utf8_payloads() {
+    // The shared vectors already state the encode verdict: `encode_outcome ==
+    // "invalid_argument"`. Exercise it against the byte-taking primitive, the
+    // only API on this port that can present those bytes as a `string`.
+    for v in invalid_utf8_vectors() {
+        let name = v["name"].as_str().unwrap();
+        let id = v["id"].as_u64().unwrap() as sofab::Id;
+        let raw = hex_to_bytes(v["string_hex"].as_str().unwrap());
+
+        let (res, bytes) = encode_attempt(|os| os.write_fixlen(id, &raw, FixlenType::Str));
+        assert_eq!(res, Err(Error::Argument), "[{name}] encode must be refused");
+        assert!(
+            bytes.is_empty(),
+            "[{name}] a refused write must emit no bytes, got {bytes:02x?}",
+        );
+    }
+}
+
+#[test]
+fn write_fixlen_str_is_refused_for_valid_utf8_too() {
+    // The refusal is the subtype, not a UTF-8 verdict: no validator is linked
+    // in on this profile. Valid bytes go through `write_str`, which produces
+    // exactly the bytes the primitive would have.
+    let (res, bytes) = encode_attempt(|os| os.write_fixlen(0, b"Hello Couch!", FixlenType::Str));
+    assert_eq!(res, Err(Error::Argument));
+    assert!(bytes.is_empty());
+
+    let (res, bytes) = encode_attempt(|os| os.write_str(0, "Hello Couch!"));
+    assert_eq!(res, Ok(()));
+    assert_eq!(
+        bytes,
+        [0x02, 0x62, 0x48, 0x65, 0x6C, 0x6C, 0x6F, 0x20, 0x43, 0x6F, 0x75, 0x63, 0x68, 0x21]
+    );
+}
+
+#[test]
+fn write_fixlen_keeps_the_byte_subtypes() {
+    // fp32 / fp64 / blob are what the primitive exists for and are untouched.
+    let (res, bytes) = encode_attempt(|os| os.write_fixlen(0, &[0x01, 0x02], FixlenType::Blob));
+    assert_eq!(res, Ok(()));
+    assert_eq!(bytes, [0x02, 0x13, 0x01, 0x02]);
+
+    let (res, bytes) =
+        encode_attempt(|os| os.write_fixlen(0, &1.0f32.to_le_bytes(), FixlenType::Fp32));
+    assert_eq!(res, Ok(()));
+    assert_eq!(bytes, [0x02, 0x20, 0x00, 0x00, 0x80, 0x3F]);
+}
+
+#[test]
+fn a_refused_str_write_leaves_the_stream_usable() {
+    // Refused before a single byte reaches the buffer, so the field that
+    // follows encodes exactly as if the bad call had never happened.
+    let (res, bytes) = encode_attempt(|os| {
+        assert_eq!(
+            os.write_fixlen(1, &[0xFF, 0xFE], FixlenType::Str),
+            Err(Error::Argument)
+        );
+        os.write_str(1, "ok")
+    });
+    assert_eq!(res, Ok(()));
+
+    let (_, expected) = encode_attempt(|os| os.write_str(1, "ok"));
+    assert_eq!(bytes, expected);
 }
