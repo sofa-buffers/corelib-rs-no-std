@@ -329,6 +329,17 @@ nothing is ever boxed — no allocation in either direction.**
   occur, so the buffer either holds the message or reports `Error::BufferFull` —
   size it from your message's worst case and it stays exact (a two-byte message
   encodes into a two-byte buffer).
+- **A mid-stream `buffer_set` drains the outgoing buffer first — when a sink is
+  installed.** The swap consumes the buffer being replaced, so the bytes written
+  into it since the last flush are handed to the sink at the swap, before the new
+  buffer takes over: swapping buffers between fields emits exactly the one-shot
+  bytes, and a taking sink that installs a replacement never loses the tail of
+  the unit it took. The new installation's `offset` is where writing resumes, so
+  each unit re-arms its own framing-header room. **With no sink nothing is
+  drained** — there is nowhere to drain to, the caller still owns the buffer it
+  handed over and concatenates the pieces itself, which is what the documented
+  `Error::BufferFull` recovery (install a bigger buffer, retry the failed write)
+  relies on.
 - **No pass-through.** This port never hands a sink memory that is not the
   installed output buffer; a `string`/`blob` run is copied through the buffer
   like anything else, so a sink may assume every slice it receives points into

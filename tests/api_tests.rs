@@ -150,6 +150,84 @@ fn a_rejected_buffer_set_leaves_the_previous_buffer_installed() {
 }
 
 #[test]
+fn a_mid_stream_buffer_set_drains_the_pending_bytes_to_the_sink() {
+    // §5.1: the bytes written since the last flush sit in the buffer that is
+    // being replaced, and the caller does not get that buffer back — the swap
+    // consumes it. With a sink installed they therefore have to reach the sink
+    // at the swap, or the emitted message silently loses everything written
+    // since the previous flush while every call still reports `Ok`.
+    let mut one_shot = [0u8; 16];
+    let n = {
+        let mut os = OStream::new(&mut one_shot);
+        os.write_unsigned(1, 42).unwrap();
+        os.write_unsigned(2, 7).unwrap();
+        os.bytes_used()
+    };
+
+    let mut collected: Vec<u8> = Vec::new();
+    let mut a = [0u8; 16];
+    let mut b = [0u8; 16];
+    {
+        let mut os =
+            OStream::with_flush(&mut a, 0, |c: &[u8]| collected.extend_from_slice(c)).unwrap();
+        os.write_unsigned(1, 42).unwrap();
+        assert_eq!(os.bytes_used(), 2, "buffered, not yet flushed");
+        os.buffer_set(&mut b, 0).unwrap();
+        assert_eq!(os.bytes_used(), 0, "the swap drained what was pending");
+        os.write_unsigned(2, 7).unwrap();
+        os.flush();
+    }
+    assert_eq!(collected, one_shot[..n]);
+}
+
+#[test]
+fn a_drained_buffer_set_resumes_at_its_own_offset() {
+    // The drain happens **once**, at the swap, and the new installation's offset
+    // is what the cursor resumes at (§5.1: the offset belongs to the
+    // installation) — the packet pattern, where every flushed unit re-arms its
+    // own framing-header room.
+    let mut units: Vec<Vec<u8>> = Vec::new();
+    let mut a = [0u8; 16];
+    let mut b = [0xAAu8; 16]; // the reserved header room, prefilled by the caller
+    {
+        let mut os = OStream::with_flush(&mut a, 0, |c: &[u8]| units.push(c.to_vec())).unwrap();
+        os.write_unsigned(1, 42).unwrap();
+        os.buffer_set(&mut b, 3).unwrap();
+        assert_eq!(os.bytes_used(), 3, "resumes at this call's offset");
+        os.write_unsigned(2, 7).unwrap();
+        os.flush();
+    }
+    assert_eq!(
+        units.len(),
+        2,
+        "one unit per flush, and the swap is one of them"
+    );
+    assert_eq!(units[0], [0x08, 0x2A]); // drained at the swap, exactly once
+    assert_eq!(units[1], [0xAA, 0xAA, 0xAA, 0x10, 0x07]); // header room + payload
+}
+
+#[test]
+fn a_buffer_set_without_a_sink_still_leaves_the_bytes_with_the_caller() {
+    // The converse: with no sink there is nothing to drain to, the caller still
+    // owns the buffer it handed over, and the recovery path (install a bigger
+    // buffer, retry the failed write) must keep working byte for byte.
+    let mut small = [0u8; 2];
+    let mut big = [0u8; 16];
+    let (used_small, used_big) = {
+        let mut os = OStream::new(&mut small);
+        os.write_unsigned(1, 42).unwrap();
+        assert_eq!(os.write_unsigned(2, 7), Err(Error::BufferFull));
+        let used_small = os.bytes_used();
+        os.buffer_set(&mut big, 0).unwrap();
+        os.write_unsigned(2, 7).unwrap();
+        (used_small, os.bytes_used())
+    };
+    let mut got = small[..used_small].to_vec();
+    got.extend_from_slice(&big[..used_big]);
+    assert_eq!(got, [0x08, 0x2A, 0x10, 0x07]);
+}
+
+#[test]
 fn a_sink_never_receives_bytes_the_encoder_did_not_write() {
     // Regression: a stale buffer installed with a sink used to have its whole
     // previous content flushed downstream ahead of the message.
