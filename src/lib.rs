@@ -42,8 +42,13 @@
 //!
 //! * **Encode is strict by construction.** [`OStream::write_str`] takes `&str`,
 //!   already guaranteed valid UTF-8 by the type system, so a `string` field can
-//!   never carry invalid bytes — no runtime check is possible or needed.
-//!   Arbitrary bytes go in a `blob` via [`OStream::write_blob`].
+//!   never carry invalid bytes — no runtime check, and no UTF-8 validator
+//!   linked into the image. That exemption rests on the *whole* encode API
+//!   refusing bytes for a `string`, so the byte-taking primitive
+//!   [`OStream::write_fixlen`] — the way in for `fp32` / `fp64` / `blob` —
+//!   rejects [`FixlenType::Str`] with [`Error::Argument`] instead of emitting an
+//!   unchecked `string` field. Arbitrary bytes go in a `blob` via
+//!   [`OStream::write_blob`].
 //! * **Decode strictness lives in generated code.** The corelib delivers a
 //!   `string` field's **raw bytes** to [`Visitor::string`] and never builds a
 //!   `str`/`String`. Generated code materializes it with `core::str::from_utf8`;

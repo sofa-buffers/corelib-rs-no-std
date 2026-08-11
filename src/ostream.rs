@@ -699,8 +699,32 @@ impl<'a, F: Flush, H: Handoff<'a>> OStream<'a, F, H> {
 
     /// Write a fixed-length field: header, `(len << 3) | subtype` varint, then
     /// the raw `data` bytes (already in wire/little-endian order for floats).
+    ///
+    /// This is the primitive for the **byte-shaped** subtypes — `fp32`, `fp64`
+    /// and `blob`, whose payload is opaque bytes by definition.
+    ///
+    /// [`FixlenType::Str`] is **refused** with [`Error::Argument`], before a
+    /// single byte reaches the buffer. A `string` payload is UTF-8
+    /// (MESSAGE_SPEC §8) and this port's strictness (CORELIB_PLAN §6.4) rests on
+    /// the encode API never accepting *bytes* for one, so
+    /// [`OStream::write_str`] and its `&str` are the only door to a `string`
+    /// field. Holding bytes you know are text? Validate them once with
+    /// `core::str::from_utf8` and pass the `&str` — that keeps the UTF-8
+    /// validator out of firmware with no use for it. Bytes that are *not* text
+    /// belong in a `blob` ([`OStream::write_blob`]).
     #[cfg(feature = "fixlen")]
     pub fn write_fixlen(&mut self, id: Id, data: &[u8], subtype: FixlenType) -> Result<()> {
+        if matches!(subtype, FixlenType::Str) {
+            return Err(Error::Argument);
+        }
+        self.write_fixlen_raw(id, data, subtype)
+    }
+
+    /// The unchecked body of [`Self::write_fixlen`]. Private, so the subtype
+    /// check above is the only way into a `string` field from outside the
+    /// crate — and it does not lead there.
+    #[cfg(feature = "fixlen")]
+    fn write_fixlen_raw(&mut self, id: Id, data: &[u8], subtype: FixlenType) -> Result<()> {
         self.write_id_type(id, T_FIXLEN)?;
         self.write_varint(((data.len() as Unsigned) << 3) | subtype as Unsigned)?;
         self.push_raw(data)
@@ -710,34 +734,37 @@ impl<'a, F: Flush, H: Handoff<'a>> OStream<'a, F, H> {
     #[cfg(feature = "fixlen")]
     #[inline]
     pub fn write_fp32(&mut self, id: Id, value: f32) -> Result<()> {
-        self.write_fixlen(id, &value.to_le_bytes(), FixlenType::Fp32)
+        self.write_fixlen_raw(id, &value.to_le_bytes(), FixlenType::Fp32)
     }
 
     /// Write a 64-bit float field.
     #[cfg(feature = "fp64")]
     #[inline]
     pub fn write_fp64(&mut self, id: Id, value: f64) -> Result<()> {
-        self.write_fixlen(id, &value.to_le_bytes(), FixlenType::Fp64)
+        self.write_fixlen_raw(id, &value.to_le_bytes(), FixlenType::Fp64)
     }
 
     /// Write a string field (raw UTF-8 bytes, no NUL on the wire).
     ///
-    /// The input is `&str`, so it is **already valid UTF-8** by the type system
-    /// — encode is strict by construction and can never emit non-UTF-8 bytes
-    /// (MESSAGE_SPEC §8, CORELIB_PLAN §6.4). For arbitrary bytes use
-    /// [`OStream::write_blob`]. Embedded `U+0000` is permitted and written
-    /// verbatim (the wire is length-framed, no NUL terminator).
+    /// **The only way to write a `string` field.** The input is `&str`, so it is
+    /// already valid UTF-8 by the type system — encode is strict by
+    /// construction and can never emit non-UTF-8 bytes (MESSAGE_SPEC §8,
+    /// CORELIB_PLAN §6.4); the byte-taking [`OStream::write_fixlen`] refuses the
+    /// `string` subtype so this stays true of the whole API, not just of this
+    /// method. For arbitrary bytes use [`OStream::write_blob`]. Embedded
+    /// `U+0000` is permitted and written verbatim (the wire is length-framed, no
+    /// NUL terminator).
     #[cfg(feature = "fixlen")]
     #[inline]
     pub fn write_str(&mut self, id: Id, text: &str) -> Result<()> {
-        self.write_fixlen(id, text.as_bytes(), FixlenType::Str)
+        self.write_fixlen_raw(id, text.as_bytes(), FixlenType::Str)
     }
 
     /// Write a binary blob field.
     #[cfg(feature = "fixlen")]
     #[inline]
     pub fn write_blob(&mut self, id: Id, data: &[u8]) -> Result<()> {
-        self.write_fixlen(id, data, FixlenType::Blob)
+        self.write_fixlen_raw(id, data, FixlenType::Blob)
     }
 
     // --- array writers ------------------------------------------------------

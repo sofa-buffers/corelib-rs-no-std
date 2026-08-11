@@ -61,8 +61,15 @@ expose (only byte-container targets need one):
 
 - **Encode is strict by construction.** `OStream::write_str` takes `&str`, which
   is already guaranteed valid UTF-8 by the type system, so a `string` field can
-  never carry invalid bytes — no runtime check is possible or needed. Put
-  arbitrary bytes in a `blob` (`write_blob`).
+  never carry invalid bytes — no runtime check, and no UTF-8 validator in the
+  image. The §6.4 exemption is about the *API*, not one method, so `write_str`
+  is the **only** door to a `string` field: the byte-taking primitive
+  `write_fixlen(id, bytes, subtype)` — which exists for `fp32` / `fp64` /
+  `blob` — refuses `FixlenType::Str` with `Error::Argument`, before a byte
+  reaches the buffer, rather than emit an unchecked `string`. Holding bytes you
+  know are text? Validate them once yourself with `core::str::from_utf8` and
+  pass the `&str`; that leaves the validator out of firmware that has no use for
+  it. Put bytes that are *not* text in a `blob` (`write_blob`).
 - **Decode strictness lives in generated code.** The corelib hands a `string`
   field's **raw bytes** to `Visitor::string` and never builds a `str`/`String`;
   generated code materializes it with `core::str::from_utf8`, turning invalid
@@ -72,8 +79,11 @@ expose (only byte-container targets need one):
   (subsumes generator #80).
 
 The shared `invalid_utf8` negative vectors in `assets/test_vectors.json`
-(tracking corelib-c-cpp#97) are exercised by `tests/utf8_tests.rs` (needs the
-default `fixlen` feature).
+(tracking corelib-c-cpp#97) are exercised by `tests/utf8_tests.rs` in both
+directions (needs the default `fixlen` feature): their `decode_outcome`
+(`invalid`) against the decode path, and their `encode_outcome`
+(`invalid_argument`) against `write_fixlen(.., FixlenType::Str)`, the only call
+on this port that could have presented those bytes as a `string`.
 
 ## Usage
 

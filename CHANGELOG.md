@@ -41,6 +41,31 @@ a **minor** bump may break API or wire output.
 
 ### Fixed
 
+- **`write_fixlen(id, bytes, FixlenType::Str)` emitted an unchecked non-UTF-8
+  `string` field.** This port declares itself pinned to the ON state of
+  `SOFAB_STRICT_UTF8` (CORELIB_PLAN §6.4) and exposes no validator, on the
+  strength of §6.4's exemption for Unicode-string targets — an exemption that
+  rests on the encode *API* being unable to accept bytes for a `string` field.
+  `write_str` honoured that, but it was a wrapper over the public, byte-taking
+  `write_fixlen`, whose `FixlenType::Str` arm handed arbitrary bytes straight to
+  the wire: `write_fixlen(1, &[0xFF, 0xFE], FixlenType::Str)` returned `Ok(())`
+  and produced `0a 12 ff fe`, a `string` field that this family's own strict
+  decoders reject as `INVALID`. `write_fixlen` now refuses `FixlenType::Str`
+  with `Error::Argument` **before a byte reaches the buffer** — the encoder is
+  untouched, so the next write encodes exactly as if the call had not been made
+  — and stays the primitive for the byte-shaped subtypes `fp32` / `fp64` /
+  `blob`. `write_str` and its `&str` are the only door to a `string` field,
+  which is what makes "strict by construction" true of the whole API rather than
+  of one method.
+
+  **Breaking** only for a hand-written caller that passed bytes for a `string`:
+  validate them once with `core::str::from_utf8` and call `write_str`, or use
+  `write_blob` if they are not text. Generated code is unaffected — the Rust
+  backend emits `write_str`. The check is one comparison on a subtype the
+  internal callers pass as a constant, so it folds away for them; flash and RAM
+  are **unchanged on every footprint row** and there is no allocation, no panic
+  path and no UTF-8 validator pulled into the image.
+
 - **An unbalanced sequence close reported success and emitted a message the
   decoder rejects.** `write_sequence_end` / `write_sequence_end_keep` with no
   open sequence returned `Ok(())` and wrote a bare `0x07`, papering the depth
