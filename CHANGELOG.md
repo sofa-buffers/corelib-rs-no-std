@@ -5,6 +5,40 @@ a **minor** bump may break API or wire output.
 
 ## Unreleased
 
+### Added
+
+- **A `Flush` sink can now take the buffer it was handed and install a
+  replacement.** CORELIB_PLAN §5.1 makes both shapes of the returning-callback
+  contract expressible — return without installing (the sink *copied*, the
+  encoder resumes at `0` in the same buffer), or take the buffer and install a
+  replacement before returning — and only the first existed here. A callback
+  receives `&mut self` and a borrowed `&[u8]` with no handle on the stream (the
+  stream is mutably borrowed by the very call that invoked it), so
+  `OStream::buffer_set` was unreachable from inside it and the zero-copy
+  hand-off the buffer-set operation exists for — encode straight into the
+  packet, hand the packet on, encode the next into another — could not be built
+  on this port at all. Neither could a per-packet framing-header reservation,
+  since the start offset belongs to the installation.
+
+  The new `Handover` channel carries the replacement instead: the caller creates
+  it, hands it to the new `OStream::with_handover(buffer, offset, sink,
+  &handover)`, and shares it with the sink, which calls `handover.install(next,
+  offset)` from inside the callback and picks the buffer it took back up with
+  `handover.taken()` — the encoder gives up that borrow when it installs the
+  replacement, which is what lets a pool recycle it. `install` is checked
+  exactly like every other installation (offset in range,
+  `len - offset >= MIN_OUTPUT_BUFFER`, `Error::Argument` **where the buffer is
+  handed over**), and a rejected buffer leaves the active one in place.
+
+  **Free where it is not used.** `OStream` gained a third type parameter for the
+  channel, defaulted to the zero-sized `NoHandoff` whose `TAKES` is a
+  compile-time `false`, so `OStream::new` / `with_flush` streams fold the whole
+  take-and-replace path away: `size_of::<OStream>()` is unchanged in every
+  configuration and the Cortex-M0 flash figures are byte-identical to the
+  previous release on all eight footprint rows. Existing code is unaffected —
+  the parameter is defaulted, `Flush` is untouched, and generic code written as
+  `OStream<'_, F>` still names the same type.
+
 ### Fixed
 
 - **A message proven malformed could still deliver fields.** The `INVALID`

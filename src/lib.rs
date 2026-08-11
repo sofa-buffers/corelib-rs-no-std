@@ -95,7 +95,7 @@ mod varint;
 
 pub use error::{Error, Result};
 pub use istream::{IStream, Visitor};
-pub use ostream::{Flush, NoFlush, OStream, MIN_OUTPUT_BUFFER};
+pub use ostream::{Flush, Handoff, Handover, NoFlush, NoHandoff, OStream, MIN_OUTPUT_BUFFER};
 pub use trim::{trim_tail, trim_tail_f32, trim_tail_f64};
 pub use types::{Id, Signed, Unsigned, API_VERSION, ID_MAX};
 

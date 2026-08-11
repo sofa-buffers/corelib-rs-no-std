@@ -340,10 +340,56 @@ nothing is ever boxed — no allocation in either direction.**
   handed over and concatenates the pieces itself, which is what the documented
   `Error::BufferFull` recovery (install a bigger buffer, retry the failed write)
   relies on.
+- **A returning callback says whether it copied or took the buffer.** Returning
+  **without** installing anything means the sink copied: the active buffer stays
+  active and the encoder resumes writing into it at offset `0`. A sink that
+  **takes** the buffer — hands it to a transport, queues it for an asynchronous
+  write, gives it to DMA — must install a replacement before it returns, or the
+  encoder would keep writing into storage the transport now owns. Inside a
+  callback the encoder is mutably borrowed by the call that invoked the sink, so
+  `buffer_set` is out of reach; the sink installs through a **`Handover`**
+  channel instead, which the caller creates, passes to `OStream::with_handover`
+  and shares with the sink:
+
+  ```rust
+  use sofab::{Handover, OStream};
+
+  let mut first = [0u8; 64];
+  let mut spare = [0u8; 64];
+  let mut pool: Vec<&mut [u8]> = vec![&mut spare];
+  let handover = Handover::new();
+  {
+      let mut os = OStream::with_handover(&mut first, 4, |packet: &[u8]| {
+          transport.start_send(packet);                    // takes the buffer
+          handover.install(pool.pop().unwrap(), 4).unwrap();// replacement + header room
+          if let Some(done) = handover.taken() {           // the one we took
+              pool.push(done);                             // recycle it
+          }
+      }, &handover).unwrap();
+      os.write_unsigned(1, 42).unwrap();
+      os.flush();
+  }
+  ```
+
+  `Handover::install` is checked exactly like every other installation — offset
+  in range, `buffer.len() - offset >= MIN_OUTPUT_BUFFER`, `Error::Argument`
+  **where the buffer is handed over** — and the installed buffer's `offset` is
+  where writing resumes, so each flushed unit re-arms its own framing-header
+  room. `Handover::taken()` hands back the buffer the encoder stopped writing
+  into, which is what lets a pool recycle it: until the encoder gives up that
+  borrow, nobody else can touch the storage. The channel holds one retired
+  buffer, so reclaim it in every callback.
+
+  Nothing about this costs anything on the streams that do not use it:
+  `OStream::with_flush` (and the sink-less `OStream::new`) keeps a zero-sized
+  `NoHandoff`, so `size_of::<OStream>()` and the whole flash footprint are
+  unchanged — the take-and-replace path compiles away.
 - **No pass-through.** This port never hands a sink memory that is not the
   installed output buffer; a `string`/`blob` run is copied through the buffer
   like anything else, so a sink may assume every slice it receives points into
-  the buffer it installed.
+  the buffer it installed. Pass-through and the buffer-set operation are
+  mutually exclusive (§5.1), and since this port never passes through, a sink
+  may always install.
 - **Decode ([`IStream`] + [`Visitor`])** — reads the caller's `&[u8]`, borrowed
   only for the `feed` call; values are delivered **by value** the instant they
   decode (so destinations need not be address-stable). A string/blob
