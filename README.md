@@ -494,7 +494,8 @@ Integration tests live in `tests/`: `vectors_tests.rs` (replays the shared
 `istream_tests.rs`, `roundtrip_tests.rs`, `api_tests.rs`, `config_tests.rs`,
 `utf8_tests.rs`, `utf8_chunk_offset_tests.rs`, `fixlen_header_tests.rs`,
 `fixlen_array_header_tests.rs`, `no_elision_tests.rs`, `buffer_full_tests.rs`,
-`visitor_default_tests.rs`, `bench_tools_tests.rs`, and `readme_tests.rs`.
+`visitor_default_tests.rs`, `bench_tools_tests.rs`, `bench_workloads_tests.rs`,
+and `readme_tests.rs`.
 Line coverage is measured by CI on every push with
 `cargo llvm-cov --all-features` and reported by the **Coverage** badge above —
 that badge is the current figure; no number is repeated here, where it would go
@@ -511,9 +512,9 @@ All of the above are the exact steps run in CI
 
 ## Benchmarks
 
-Three tools run the **same** reference workloads (a 1000-element integer array
-and a typical composite message), so results are comparable across language
-ports:
+Three tools run the **same** reference workloads on the **same** data, measured
+the same way and printed in the same format as every other `corelib-*` port, so
+the numbers are directly comparable across languages:
 
 ```bash
 cargo bench --bench perf     # per-op cost: HW cycles/op + MB/s
@@ -521,8 +522,38 @@ cargo bench --bench bench    # throughput in MB/s (MB = 1,000,000 bytes)
 bash benches/run_callgrind.sh  # instructions/op (Ir) + message size per workload
 ```
 
-The first two take a few seconds (a ~1 s CPU-time loop per workload) and both run
-in CI (the `Bench tools` job), so the documented commands stay working.
+The workloads, values and output grammar are not this repo's to choose: they come
+from the family-wide benchmark specification, and `bench` runs all four of its
+datasets —
+
+| dataset | what it is there for |
+|---|---|
+| `u64 array (1000)` | `src[i] = i * 0x9E3779B97F4A7C15`, a compact scalar array spanning 1..10-byte varints |
+| `typical message` | seven fields, ids 1–7, ~37 bytes — the small-message case |
+| `blob 1MB` | one unbounded `blob` field, 1,000,000 payload bytes (1,000,005 encoded), driven three ways: **one-shot** into a hand-sized buffer with no sink, **streaming** through a 4096-byte buffer with a flush sink, and **decoded** from 4096-byte chunks |
+| `composite` | 956 bytes covering what the flat three miss: a 64-element wrapper array, 320 bytes of 1/2/3/4-byte UTF-8, nesting at depth 3, a field equal to its default (so the encoder must *omit* it), and a two-byte field header. Decoded twice — normally, and with every field skipped |
+
+— and `170` / `1,000,005` / `956` are cross-port parity checks: both tools exit
+non-zero if their message sizes miss them, because a port that disagrees about the
+bytes is not running the same workload however good its MB/s looks. What each row
+*does* is asserted in the ordinary test job (`tests/bench_workloads_tests.rs`) and
+re-checked by the bench binary itself before it times anything — a chunked decode
+that failed on its first chunk, or a streaming encode whose sink is never called,
+would otherwise print a very fast number and no error.
+
+**The `blob 1MB` rows are not a statement about this port's speed** — five of its
+bytes are metadata and a million are payload, so its MB/s is memory bandwidth.
+Read the rows against each other instead: the one-shot/streaming gap is the cost
+of the divisible-run path, and on this port it is the widest thing in the suite
+under `Ir/op` (~0.2 instructions per byte against ~11). That is codegen, not flush
+logic: with no sink the payload loop has a single exit condition and LLVM turns it
+into a `memcpy`, while the streaming loop's per-byte "is the buffer full?" test —
+the same test that lets `MIN_OUTPUT_BUFFER` be **1** here — keeps it
+byte-at-a-time. In MB/s the one-shot row gives most of that back, because it is
+bandwidth-bound while the streaming row works inside a cache-resident 4 KB window.
+
+The first two tools take a few seconds (a ~1 s CPU-time loop per workload) and
+both run in CI (the `Bench tools` job), so the documented commands stay working.
 [`benches/run_callgrind.sh`](benches/run_callgrind.sh) is the machine-independent
 one: it builds the bench binary, runs each workload once under Callgrind with
 collection toggled on the `run_<workload>` symbol, and prints a table of

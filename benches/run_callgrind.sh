@@ -37,7 +37,21 @@ fi
 
 OUT="$(mktemp -d)"
 trap 'rm -rf "$OUT"' EXIT
-WORKLOADS=(encode_u64_array encode_typical decode_u64_array decode_typical)
+# Order follows BENCH_SPEC's table. `encode: blob 1MB passthrough` is its one
+# optional row and this port implements no pass-through (CORELIB_PLAN §5.1 makes
+# it a MAY), so the row is absent rather than a placeholder.
+WORKLOADS=(
+    encode_u64_array
+    encode_typical
+    encode_blob_oneshot
+    encode_blob_streaming
+    encode_composite
+    decode_u64_array
+    decode_typical
+    decode_blob
+    decode_composite
+    decode_composite_skip
+)
 
 run_cg() { # $1 workload
     valgrind --tool=callgrind --collect-atstart=no --toggle-collect="run_$1" \
@@ -50,10 +64,16 @@ bytes_of() { grep -ohE 'BYTES=[0-9]+' "$OUT/$1.log" 2>/dev/null | head -1 | cut 
 
 label() {
     case "$1" in
-        encode_u64_array) echo "encode: u64 array (1000)";;
-        encode_typical)   echo "encode: typical message";;
-        decode_u64_array) echo "decode: u64 array (1000)";;
-        decode_typical)   echo "decode: typical message";;
+        encode_u64_array)      echo "encode: u64 array (1000)";;
+        encode_typical)        echo "encode: typical message";;
+        encode_blob_oneshot)   echo "encode: blob 1MB one-shot";;
+        encode_blob_streaming) echo "encode: blob 1MB streaming";;
+        encode_composite)      echo "encode: composite";;
+        decode_u64_array)      echo "decode: u64 array (1000)";;
+        decode_typical)        echo "decode: typical message";;
+        decode_blob)           echo "decode: blob 1MB";;
+        decode_composite)      echo "decode: composite";;
+        decode_composite_skip) echo "decode: composite skip-all";;
     esac
 }
 
@@ -66,11 +86,35 @@ echo "==========================================================================
 printf "%-26s %16s %9s\n" "Workload" "instr/op" "bytes"
 printf "%-26s %16s %9s\n" "--------" "--------" "-----"
 
+missing=()
 for w in "${WORKLOADS[@]}"; do
     run_cg "$w"
     ir="$(ir_of "$w")"; b="$(bytes_of "$w")"
+    [ -n "$ir" ] || missing+=("$w")
     printf "%-26s %16s %9s\n" "$(label "$w")" "${ir:--}" "${b:--}"
 done
 echo
 echo "Ir = instructions retired (Callgrind). Independent of CPU clock and OS"
 echo "scheduling; depends only on the executed code, so it compares across machines."
+echo
+echo "The blob 1MB rows are where Ir/op earns its keep: it takes the machine's"
+echo "memory subsystem out of a measurement that is otherwise bandwidth-bound,"
+echo "leaving the one-shot/streaming gap as the cost of the divisible-run path"
+echo "(CORELIB_PLAN 5.1). On this port that gap is the widest thing in the suite --"
+echo "~0.2 Ir/byte against ~11 -- and it is a codegen effect, not flush logic: with"
+echo "no sink the payload loop has a single exit condition and LLVM turns it into a"
+echo "memcpy, while the streaming loop's per-byte 'is the buffer full?' test keeps"
+echo "it byte-at-a-time. MB/s hides that, because the one-shot row is bandwidth-"
+echo "bound and gives most of the advantage back; Ir/op does not."
+
+# A workload whose run produced no summary printed a dash above. That is a tool
+# failure, not a measurement: the row is meant to run end to end and report a
+# real number, and exiting 0 with a dash in the table is how a broken workload
+# survives into a comparison.
+if [ ${#missing[@]} -ne 0 ]; then
+    echo >&2
+    echo "error: no instruction count for: ${missing[*]}" >&2
+    echo "       (see the Callgrind logs, or run the bench binary directly:" >&2
+    echo "        $BIN ${missing[0]})" >&2
+    exit 1
+fi
