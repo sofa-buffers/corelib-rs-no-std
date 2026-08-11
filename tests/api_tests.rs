@@ -123,6 +123,23 @@ fn an_offset_past_the_end_is_rejected_on_every_installation_path() {
     let mut os = OStream::with_flush(&mut active, 0, &mut sink).unwrap();
     assert_eq!(os.buffer_set(&mut other, 5).err(), Some(Error::Argument));
 
+    // The handover constructor is an installation path like the others, and the
+    // only one whose stream can hand the buffer on to a taking sink — an
+    // out-of-range offset there would prepend stale bytes to every unit.
+    let handover = sofab::Handover::new();
+    let mut buf = [0u8; 4];
+    assert_eq!(
+        OStream::with_handover(&mut buf, 5, &mut sink, &handover).err(),
+        Some(Error::Argument),
+    );
+    let handover = sofab::Handover::new();
+    let mut buf = [0u8; MIN_OUTPUT_BUFFER - 1];
+    assert_eq!(
+        OStream::with_handover(&mut buf, 0, &mut sink, &handover).err(),
+        Some(Error::Argument),
+        "the streaming minimum binds it too",
+    );
+
     // `offset == len` is *not* out of range: it is zero room, legal without a
     // sink, and simply reports buffer-full on the first write.
     let mut buf = [0u8; 4];
@@ -457,6 +474,70 @@ fn a_replacement_below_the_minimum_is_rejected_where_it_is_handed_over() {
     }
     assert_eq!(rejected, 1);
     assert_eq!(streamed, one_shot[..n]);
+}
+
+#[test]
+fn formatting_the_channel_does_not_disarm_it() {
+    // A `Cell` has no shared read, so `Debug` has to *take* both slots to print
+    // them and put them back. Getting that wrong is silent and expensive: a log
+    // line next to the installation would swallow the replacement buffer, and
+    // the encoder would carry on writing into the storage the sink just handed
+    // to its transport. So the channel is formatted at exactly that point, in
+    // the middle of the take-and-replace dance, and the emitted message still
+    // has to be the one-shot bytes.
+    const TEXT: &str = "logged while handing over";
+
+    let mut one_shot = [0u8; 64];
+    let n = {
+        let mut os = OStream::new(&mut one_shot);
+        os.write_unsigned(1, 300).unwrap();
+        os.write_str(2, TEXT).unwrap();
+        os.bytes_used()
+    };
+
+    let mut first = [0u8; 4];
+    let mut storage: Vec<[u8; 4]> = vec![[0u8; 4]; 32];
+    let mut pool: Vec<&mut [u8]> = storage.iter_mut().map(|b| &mut b[..]).collect();
+    let mut streamed: Vec<u8> = Vec::new();
+    let mut shapes: Vec<String> = Vec::new();
+    let handover = sofab::Handover::new();
+    {
+        let mut os = OStream::with_handover(
+            &mut first,
+            0,
+            |chunk: &[u8]| {
+                streamed.extend_from_slice(chunk);
+                handover
+                    .install(pool.pop().expect("pool exhausted"), 0)
+                    .unwrap();
+                shapes.push(format!("{handover:?}"));
+                if let Some(done) = handover.taken() {
+                    pool.push(done);
+                }
+            },
+            &handover,
+        )
+        .unwrap();
+        os.write_unsigned(1, 300).unwrap();
+        os.write_str(2, TEXT).unwrap();
+        os.flush();
+    }
+
+    assert_eq!(
+        streamed,
+        one_shot[..n],
+        "formatting the channel must not swallow the installed buffer",
+    );
+    assert!(shapes.len() > 2, "the window must have flushed repeatedly");
+    // First callback: a buffer installed, nothing retired yet. Every later one
+    // also sees the buffer the encoder gave up at the previous handover.
+    assert_eq!(shapes[0], "Handover { installed: true, retired: false }");
+    assert!(
+        shapes[1..]
+            .iter()
+            .all(|s| s == "Handover { installed: true, retired: true }"),
+        "{shapes:?}",
+    );
 }
 
 #[test]
