@@ -491,9 +491,14 @@ cargo build --lib --all-features --target thumbv7em-none-eabihf
 
 Integration tests live in `tests/`: `vectors_tests.rs` (replays the shared
 `assets/test_vectors.json`, feature-aware), `ostream_tests.rs`,
-`istream_tests.rs`, `roundtrip_tests.rs`, `api_tests.rs`, and `config_tests.rs`.
-Line coverage is ~92% (`cargo llvm-cov --all-features`). To exercise the whole
-feature powerset, use [`cargo-hack`](https://github.com/taiki-e/cargo-hack):
+`istream_tests.rs`, `roundtrip_tests.rs`, `api_tests.rs`, `config_tests.rs`,
+`utf8_tests.rs`, `fixlen_header_tests.rs`, `fixlen_array_header_tests.rs`,
+`no_elision_tests.rs`, `bench_tools_tests.rs`, and `readme_tests.rs`.
+Line coverage is measured by CI on every push with
+`cargo llvm-cov --all-features` and reported by the **Coverage** badge above —
+that badge is the current figure; no number is repeated here, where it would go
+stale. To exercise the whole feature powerset, use
+[`cargo-hack`](https://github.com/taiki-e/cargo-hack):
 
 ```bash
 cargo hack --feature-powerset --no-dev-deps clippy --lib -- -D warnings
@@ -505,29 +510,36 @@ All of the above are the exact steps run in CI
 
 ## Benchmarks
 
-Two tools run the **same** reference workloads (a 1000-element integer array and
-a typical composite message), so results are comparable across language ports:
+Three tools run the **same** reference workloads (a 1000-element integer array
+and a typical composite message), so results are comparable across language
+ports:
 
 ```bash
-cargo bench --bench perf    # per-op cost: HW cycles/op + MB/s
-cargo bench --bench bench   # throughput in MB/s (MB = 1,000,000 bytes)
+cargo bench --bench perf     # per-op cost: HW cycles/op + MB/s
+cargo bench --bench bench    # throughput in MB/s (MB = 1,000,000 bytes)
+bash benches/run_callgrind.sh  # instructions/op (Ir) + message size per workload
 ```
 
-Both take a few seconds (a ~1 s CPU-time loop per workload) and both run in CI
-(the `Bench tools` job), so the documented commands stay working. The `bench`
-binary also accepts a single workload name — `bench encode_typical` performs
-exactly one op and prints its size, which is how
-[`benches/run_callgrind.sh`](benches/run_callgrind.sh) measures instructions per
-op; cargo's own flags (`--bench`, `--nocapture`, …) are ignored when looking for
-it, so `cargo bench` still prints the full table.
+The first two take a few seconds (a ~1 s CPU-time loop per workload) and both run
+in CI (the `Bench tools` job), so the documented commands stay working.
+[`benches/run_callgrind.sh`](benches/run_callgrind.sh) is the machine-independent
+one: it builds the bench binary, runs each workload once under Callgrind with
+collection toggled on the `run_<workload>` symbol, and prints a table of
+instructions retired per op (`Ir/op`, lower is better) next to the encoded
+message size. It needs `valgrind` on `PATH` and is slow, but its numbers do not
+depend on clock speed or scheduling — they are what the
+[changelog](CHANGELOG.md) quotes. Under the hood it uses the `bench` binary's
+single-workload mode: `bench encode_typical` performs exactly one op and prints
+its size. Cargo's own flags (`--bench`, `--nocapture`, …) are ignored when
+looking for a workload name, so `cargo bench` still prints the full table.
 
-**Instruction counts.** Cycles and MB/s are noisy across machines, so the numbers
-quoted in the [changelog](CHANGELOG.md) are callgrind instruction counts, which
-are deterministic. Two environment variables make `perf` measurable that way, and
-change nothing otherwise: `SOFAB_PERF_ONLY` (`encode` / `decode` / `encode_u64` /
-`decode_u64`) runs a single workload, and `SOFAB_PERF_ITERS=N` replaces the
-adaptive ~1 s loop with exactly N iterations. Run at two N and difference the
-totals — start-up and warm-up cancel:
+**Instruction counts without the script.** Where the script's prerequisites are
+missing (or to profile `perf`'s workloads instead), two environment variables
+make `perf` measurable the same way, and change nothing otherwise:
+`SOFAB_PERF_ONLY` (`encode` / `decode` / `encode_u64` / `decode_u64`) runs a
+single workload, and `SOFAB_PERF_ITERS=N` replaces the adaptive ~1 s loop with
+exactly N iterations. Run at two N and difference the totals — start-up and
+warm-up cancel:
 
 ```bash
 cargo bench --bench perf --all-features --no-run   # prints the binary path

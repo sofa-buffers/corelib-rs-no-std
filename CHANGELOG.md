@@ -5,6 +5,30 @@ a **minor** bump may break API or wire output.
 
 ## Unreleased
 
+### Documentation
+
+- **The README no longer states a line-coverage percentage in prose.** It claimed
+  "~92%" while `cargo llvm-cov --all-features` measured 96.68% — a hand-maintained
+  duplicate of what the CI-driven **Coverage** badge already reports, five points
+  behind and guaranteed to drift again. The badge is now the single place the
+  figure lives; the prose says how it is measured and where to read it. The stale
+  list of integration-test files next to it was completed at the same time.
+
+- **`benches/run_callgrind.sh` is documented as the third bench tool.** It shipped
+  and worked, but the "Benchmarks" section listed only `cargo bench --bench perf`
+  and `cargo bench --bench bench` and then spelled out the *manual* two-run
+  valgrind/`SOFAB_PERF_ITERS` differencing recipe for the instruction counts this
+  changelog quotes — the very thing the script automates, undiscoverable from the
+  README (CORELIB_PLAN §10). It now sits in the section's command block with a
+  line on what it prints (per-workload `Ir/op` and encoded message size) and its
+  `valgrind` prerequisite; the manual recipe stays as the fallback for
+  environments without it.
+
+  Both facts are now pinned by `tests/readme_tests.rs` in the normal suite: a
+  coverage figure in prose fails the build, every `.sh` tool the repo ships must
+  be named in the README, and all three bench entry points must appear under the
+  "Benchmarks" heading.
+
 ### Breaking — API
 
 - **Removed `trim_tail`, `trim_tail_f32` and `trim_tail_f64`** (and the `trim`
