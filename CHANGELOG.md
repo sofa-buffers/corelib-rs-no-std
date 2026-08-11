@@ -62,6 +62,22 @@ a **minor** bump may break API or wire output.
 
 ### Fixed
 
+- **`cargo bench --bench bench` — the invocation the README documents — exited
+  with "unknown workload: --bench".** The throughput tool reads the optional
+  Callgrind workload name from `argv[1]`, but `benches/bench.rs` is a
+  `harness = false` bench target, so cargo appends its own `--bench` flag to
+  every run: the tool saw a workload named `--bench`, printed the error and
+  exited 2 before measuring anything. Plain `cargo bench` (both tools) failed
+  the same way; only running the built binary by hand, or
+  `benches/run_callgrind.sh` (which passes a bare workload name), still worked.
+  The workload is now the first *non-flag* argument, so cargo's flags fall
+  through to the full table while `bench <workload>` keeps selecting a single
+  op. No library code is involved — the crate itself is unchanged. The selection
+  lives in `benches/support/workload_arg.rs`, is covered by
+  `tests/bench_tools_tests.rs` in the normal suite, and a new `Bench tools` CI
+  job runs both documented commands plus every single-op workload, so a broken
+  tool cannot ship green again (CORELIB_PLAN §10/§13).
+
 - **`write_fixlen(id, bytes, FixlenType::Str)` emitted an unchecked non-UTF-8
   `string` field.** This port declares itself pinned to the ON state of
   `SOFAB_STRICT_UTF8` (CORELIB_PLAN §6.4) and exposes no validator, on the

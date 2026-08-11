@@ -20,6 +20,10 @@
 use sofab::{IStream, Id, OStream, Signed, Unsigned, Visitor};
 use std::hint::black_box;
 
+#[path = "support/workload_arg.rs"]
+mod workload_arg;
+use workload_arg::workload_arg;
+
 const N: usize = 1000;
 
 /// Process CPU time in seconds (not wall-clock), via
@@ -201,7 +205,9 @@ fn main() {
     // and exits, so run_callgrind.sh can toggle collection around the run_*
     // symbol. `BYTES=<n>` on stderr feeds the table's size column. The decode
     // inputs (u64_buf/typ_buf) were encoded above — outside the collected op.
-    if let Some(w) = std::env::args().nth(1) {
+    // Cargo appends its own `--bench` when it runs this target, so flags are
+    // skipped when looking for the workload — see [`workload_arg`].
+    if let Some(w) = workload_arg(std::env::args()) {
         let mut enc_u64_out = vec![0u8; N * 11 + 16];
         let mut enc_typ_out = [0u8; 256];
         let bytes = match w.as_str() {

@@ -163,6 +163,48 @@ jobs:
       - name: Test every feature combination (config smoke tests)
         run: cargo hack --feature-powerset test --test config_tests
 
+  bench-tools:
+    name: Bench tools
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain (1.97)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97"
+
+      - name: Cache cargo registry & build
+        uses: Swatinem/rust-cache@v2
+
+      # §10/§13 require the perf and bench tools to be present *and runnable*.
+      # Both are `harness = false` bench targets, so cargo appends its own
+      # `--bench` flag to every run — which once made the documented invocation
+      # exit 2 without anything in CI noticing. Each tool finishes in seconds
+      # (~1 s CPU-time loop per workload); the numbers are not asserted, only
+      # that the documented commands run to completion.
+      - name: Throughput table (cargo bench --bench bench)
+        run: cargo bench --bench bench
+
+      - name: Per-op cost (cargo bench --bench perf)
+        run: cargo bench --bench perf
+
+      # The other entry point into the same binary: `run_callgrind.sh` runs it
+      # as `bench <workload>` for exactly one op and reads `BYTES=` off stderr.
+      # Checked without valgrind (not installed on the runner) — only that the
+      # workload is still selected and reports its size.
+      - name: Callgrind workload mode (bench <workload>)
+        run: |
+          BIN="$(cargo bench --bench bench --no-run --message-format=json 2>/dev/null \
+              | grep -o '"executable":"[^"]*/bench-[^"]*"' | head -1 \
+              | sed 's/.*"executable":"//;s/"$//')"
+          test -x "$BIN" || { echo "bench binary not found"; exit 1; }
+          for w in encode_u64_array encode_typical decode_u64_array decode_typical; do
+            out="$("$BIN" "$w" 2>&1 >/dev/null)"
+            echo "$w -> $out"
+            case "$out" in BYTES=[0-9]*) ;; *) echo "workload $w did not run"; exit 1;; esac
+          done
+
   coverage:
     name: Coverage
     runs-on: ubuntu-latest
