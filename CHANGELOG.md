@@ -7,6 +7,28 @@ a **minor** bump may break API or wire output.
 
 ### Fixed
 
+- **A message proven malformed could still deliver fields.** The `INVALID`
+  decode outcome is terminal (CORELIB_PLAN §5.2), but `IStream` kept no record
+  of having returned `Error::InvalidMsg`: it recomputed the verdict from the
+  current state on every `feed`, and most `INVALID` conditions — a dangling
+  sequence end, an overlong varint, an over-maximum id — leave the state machine
+  at a clean field boundary. The next `feed` therefore parsed on, pushed the
+  following fields to the visitor and returned `Ok(())` (`COMPLETE`) for a byte
+  stream the decoder itself had already rejected. `feed(&[0x07, 0x08, 0x2a])`
+  was `InvalidMsg` with nothing delivered, while `feed(&[0x07])` then
+  `feed(&[0x08, 0x2a])` was `InvalidMsg` and then `Ok(())` with `unsigned(1, 42)`
+  delivered — the outcome depended on where the chunk boundary fell, which §7.2
+  item 4 forbids. `INVALID` is now latched: every later `feed` returns
+  `InvalidMsg` without consuming the chunk or delivering a field, and decoding
+  another message means a fresh `IStream::new()`. The latch is a terminal state
+  of the decoder's existing state byte rather than a flag of its own — an extra
+  byte would be free in `Core`'s padding but not in flash, since it perturbs the
+  initializer image `IStream::new` stores (~180 B of `.text` on a 64-bit-value
+  build, measured). `size_of::<IStream>()` is unchanged (32 B with every feature
+  on), RAM is unchanged in every configuration, flash moves by at most +32 B on
+  one row, and there is no new allocation and no new panic path. The README
+  footprint table is regenerated accordingly.
+
 - **A stale output buffer could be flushed downstream as message content.**
   `OStream::with_flush` / `buffer_set` accepted an `offset` past the end of the
   buffer. The first write then saw `offset >= len`, handed the buffer's entire
