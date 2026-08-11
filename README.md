@@ -513,6 +513,14 @@ cargo bench --bench perf    # per-op cost: HW cycles/op + MB/s
 cargo bench --bench bench   # throughput in MB/s (MB = 1,000,000 bytes)
 ```
 
+Both take a few seconds (a ~1 s CPU-time loop per workload) and both run in CI
+(the `Bench tools` job), so the documented commands stay working. The `bench`
+binary also accepts a single workload name — `bench encode_typical` performs
+exactly one op and prints its size, which is how
+[`benches/run_callgrind.sh`](benches/run_callgrind.sh) measures instructions per
+op; cargo's own flags (`--bench`, `--nocapture`, …) are ignored when looking for
+it, so `cargo bench` still prints the full table.
+
 **Instruction counts.** Cycles and MB/s are noisy across machines, so the numbers
 quoted in the [changelog](CHANGELOG.md) are callgrind instruction counts, which
 are deterministic. Two environment variables make `perf` measurable that way, and
