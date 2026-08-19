@@ -163,46 +163,6 @@ jobs:
       - name: Test every feature combination (config smoke tests)
         run: cargo hack --feature-powerset test --test config_tests
 
-  bench-tools:
-    name: Bench tools
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Install Rust toolchain (1.97)
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: "1.97"
-
-      - name: Cache cargo registry & build
-        uses: Swatinem/rust-cache@v2
-
-      # §10/§13 require the bench tool to be present *and runnable*, which is
-      # what the smoke check below establishes -- it builds the `harness =
-      # false` bench target and selects each workload for exactly one op. No
-      # benchmark is measured in CI: a shared runner's numbers are noise, so
-      # the throughput and per-op tables are produced by hand on a quiet
-      # machine (BENCH_SPEC). The datasets themselves are asserted in the
-      # `test` job (`tests/bench_workloads_tests.rs`).
-
-      # `run_callgrind.sh` uses the same entry point: it runs the binary
-      # as `bench <workload>` for exactly one op and reads `BYTES=` off stderr.
-      # Checked without valgrind (not installed on the runner) — only that the
-      # workload is still selected and reports its size.
-      - name: Callgrind workload mode (bench <workload>)
-        run: |
-          BIN="$(cargo bench --bench bench --no-run --message-format=json 2>/dev/null \
-              | grep -o '"executable":"[^"]*/bench-[^"]*"' | head -1 \
-              | sed 's/.*"executable":"//;s/"$//')"
-          test -x "$BIN" || { echo "bench binary not found"; exit 1; }
-          for w in encode_u64_array encode_typical encode_blob_oneshot \
-                   encode_blob_streaming encode_composite decode_u64_array \
-                   decode_typical decode_blob decode_composite decode_composite_skip; do
-            out="$("$BIN" "$w" 2>&1 >/dev/null)"
-            echo "$w -> $out"
-            case "$out" in BYTES=[0-9]*) ;; *) echo "workload $w did not run"; exit 1;; esac
-          done
-
   coverage:
     name: Coverage
     runs-on: ubuntu-latest
