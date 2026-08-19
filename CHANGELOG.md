@@ -5,6 +5,30 @@ a **minor** bump may break API or wire output.
 
 ## Unreleased
 
+### API
+
+- **`PayloadAcc<N>` — chunk reassembly, written once here instead of in every
+  generated crate.** `Visitor::string` / `Visitor::blob` deliver a payload as
+  `(total, offset, chunk)`, so a consumer that wants the field as a single value
+  has to put it back together — the same handful of lines in every crate
+  `sofabgen` emits, and lines that know nothing about the schema they were
+  emitted for (generator#345: a helper whose code has the same shape for every
+  schema, with its bounds carried by arguments, belongs in the corelib). `N` is
+  that bound here: the largest payload the accumulator can *reassemble*, chosen
+  by the caller and living in the caller's storage, so the port still allocates
+  nothing. A payload that arrives contiguously is handed straight back
+  **borrowed from the fed bytes** — no copy, and no bound from `N` either.
+  Finite storage is the one place this differs from the `std` twin: a *split*
+  payload larger than `N` is `Error::BufferFull`, reported on the chunk that
+  reveals it and before a byte is copied, rather than a truncated field or a
+  "not complete yet" that never completes. Purely additive — generated code
+  carrying its own accumulator keeps compiling — and free when unused, since `N`
+  makes it a generic that an image never naming it does not monomorphise.
+  `tests/payload_tests.rs` covers what the shared vectors cannot: every split of
+  one payload assembles to the same bytes, a completed payload is never handed
+  back twice (`offset >= total`, the hole the `invalid_utf8` vectors leave), and
+  a visitor built on it decodes a message identically at every chunk size.
+
 ### Benchmarks
 
 The three tools now run **all four** BENCH_SPEC datasets. `bench` grew from four

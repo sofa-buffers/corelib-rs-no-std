@@ -409,8 +409,11 @@ nothing is ever boxed — no allocation in either direction.**
   only for the `feed` call; values are delivered **by value** the instant they
   decode (so destinations need not be address-stable). A string/blob
   `chunk: &[u8]` **borrows the bytes you fed** and is valid only for that
-  callback — copy out anything you must keep. Your `Visitor` decides where data
-  lands and how to handle overflow. State lives in the fixed `IStream` struct
+  callback — copy out anything you must keep. `PayloadAcc<N>` does exactly that
+  for a payload torn across chunks: `N` bytes of caller storage, no allocator,
+  the whole payload returned on the chunk that completes it — and returned
+  *borrowed*, without a copy, whenever it arrived contiguously. Your `Visitor`
+  decides where data lands and how to handle overflow. State lives in the fixed `IStream` struct
   (one 8-byte fp accumulator), never allocating.
 
 | | Encoder ([`OStream`]) | Decoder ([`IStream`] + [`Visitor`]) |

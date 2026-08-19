@@ -20,7 +20,9 @@
 //!   lower-layer protocol headers (avoids a copy).
 //! * **Streaming decode** — [`IStream`] is a byte-at-a-time state machine. Feed
 //!   it arbitrary chunks; it pushes decoded fields to your [`Visitor`]. Large
-//!   string/blob payloads are delivered in chunks, so they too may exceed RAM.
+//!   string/blob payloads are delivered in chunks, so they too may exceed RAM;
+//!   [`PayloadAcc`] reassembles one into caller-sized storage where the consumer
+//!   wants the field as a single value.
 //! * **Zero-cost feature gating** — disable `fixlen` / `array` / `sequence` /
 //!   `fp64` to drop whole code paths, mirroring the C `SOFAB_DISABLE_*` macros.
 //! * **Sequences frame lazily** — [`OStream::write_sequence_begin_lazy`] holds a
@@ -94,6 +96,8 @@
 mod error;
 mod istream;
 mod ostream;
+#[cfg(feature = "fixlen")]
+mod payload;
 mod types;
 mod varint;
 
@@ -102,6 +106,8 @@ pub use istream::{IStream, Visitor};
 pub use ostream::{Flush, Handoff, Handover, NoFlush, NoHandoff, OStream, MIN_OUTPUT_BUFFER};
 pub use types::{Id, Signed, Unsigned, API_VERSION, ID_MAX};
 
+#[cfg(feature = "fixlen")]
+pub use payload::PayloadAcc;
 #[cfg(feature = "fixlen")]
 pub use types::FixlenType;
 
