@@ -252,7 +252,8 @@ impl<const N: usize> PayloadAcc<N> {
     ///
     /// Rarely needed — the next payload's first chunk does the same — but it is
     /// how a consumer explicitly drops the tail of an abandoned message before
-    /// reusing its decoder, mirroring [`crate::IStream::reset`]. The buffer is
+    /// reusing this accumulator. ([`crate::IStream`] has no counterpart: a
+    /// decoder is restarted by replacing it, `IStream::default()`.) The buffer is
     /// not scrubbed; the bytes are unreachable, since the next chunk accepted is
     /// the one at offset `0`.
     #[inline]
