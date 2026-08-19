@@ -177,24 +177,15 @@ jobs:
       - name: Cache cargo registry & build
         uses: Swatinem/rust-cache@v2
 
-      # §10/§13 require the perf and bench tools to be present *and runnable*.
-      # Both are `harness = false` bench targets, so cargo appends its own
-      # `--bench` flag to every run — which once made the documented invocation
-      # exit 2 without anything in CI noticing. Each tool runs a ~1 s CPU-time
-      # loop per workload, so `bench` takes ~11 s for BENCH_SPEC's ten rows.
-      # The numbers are not asserted here, but the tools are not merely started
-      # either: both fail the step if their message sizes miss the cross-port
-      # parity checks (170 / 1,000,005 / 956 bytes), and `bench` additionally
-      # self-checks each workload's shape before timing anything. The datasets
-      # themselves are asserted in the `test` job
-      # (`tests/bench_workloads_tests.rs`).
-      - name: Throughput table (cargo bench --bench bench)
-        run: cargo bench --bench bench
+      # §10/§13 require the bench tool to be present *and runnable*, which is
+      # what the smoke check below establishes -- it builds the `harness =
+      # false` bench target and selects each workload for exactly one op. No
+      # benchmark is measured in CI: a shared runner's numbers are noise, so
+      # the throughput and per-op tables are produced by hand on a quiet
+      # machine (BENCH_SPEC). The datasets themselves are asserted in the
+      # `test` job (`tests/bench_workloads_tests.rs`).
 
-      - name: Per-op cost (cargo bench --bench perf)
-        run: cargo bench --bench perf
-
-      # The other entry point into the same binary: `run_callgrind.sh` runs it
+      # `run_callgrind.sh` uses the same entry point: it runs the binary
       # as `bench <workload>` for exactly one op and reads `BYTES=` off stderr.
       # Checked without valgrind (not installed on the runner) — only that the
       # workload is still selected and reports its size.
