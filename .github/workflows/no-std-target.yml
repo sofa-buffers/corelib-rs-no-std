@@ -31,6 +31,9 @@ jobs:
   # which configuration broke on which target — not just "the no-std job".
   # The list mirrors the rows of `tools/footprint.sh` (and therefore the
   # README's footprint table) so a size number always has a build behind it.
+  # The eight configurations an embedded user actually picks, from the smallest
+  # useful profile to the full one -- built for real (codegen and link), which is
+  # also what `footprint` then measures.
   build:
     name: build
     runs-on: ubuntu-latest
@@ -102,8 +105,12 @@ jobs:
           cargo build --locked --lib --release --target ${{ inputs.target }} \
             --no-default-features --features "fixlen,array,sequence,fp64,value64"
 
+  # Every combination of the feature flags, including ones nobody would choose
+  # -- `fp64` without `array`, `sequence` on its own. Only `check`, so it is
+  # shallow where `build` is deep: it catches a missing `#[cfg(feature = ...)]`
+  # in a combination none of the eight profiles happens to hit.
   powerset:
-    name: features
+    name: powerset
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
