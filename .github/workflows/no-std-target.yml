@@ -44,7 +44,7 @@ jobs:
       - name: Install Rust toolchain (1.97, ${{ inputs.target }})
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.97"
+          toolchain: "1.98"
           targets: ${{ inputs.target }}
           # llvm-tools-preview is for the footprint step at the end: it reads
           # section sizes with llvm-size and struct sizes with llvm-nm.
@@ -130,7 +130,7 @@ jobs:
       - name: Install Rust toolchain (1.97, ${{ inputs.target }})
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.97"
+          toolchain: "1.98"
           targets: ${{ inputs.target }}
 
       - name: Cache cargo registry & build
