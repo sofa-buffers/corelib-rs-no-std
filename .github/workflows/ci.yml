@@ -6,6 +6,13 @@ on:
   pull_request:
   workflow_dispatch:
 
+# One run per ref: a new push supersedes the in-flight run for the same branch
+# instead of both queueing for the 20 shared runner slots. `main` is excluded so
+# a push to main is never cancelled by the next one.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -16,10 +23,18 @@ env:
 # workflow is the host side: lint, tests, vectors, the feature powerset and
 # coverage.
 
+# Every job below carries a `timeout-minutes`. The org's Actions concurrency is
+# 20 runners, so a step that wedges holds a slot the rest of the family queues
+# behind — and GitHub's 360-minute default means it holds it for six hours.
+# A bound of roughly 4x the observed runtime makes a hung job fail fast and
+# name itself instead. Observed on recent runs: every job here finishes in
+# under two minutes.
+
 jobs:
   lint:
     name: Lint
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
 
@@ -45,7 +60,13 @@ jobs:
 
   test:
     name: Test (${{ matrix.toolchain }})
+    # `lint` is this repo's gate: `cargo clippy --all-features --all-targets`
+    # already compiles the library, the tests and the benches, so a build error
+    # is red within ~20 s instead of once every matrix leg has paid for its own
+    # toolchain and cache. No separate `build` job exists (or is needed).
+    needs: [lint]
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -92,7 +113,9 @@ jobs:
 
   vectors:
     name: Vectors
+    needs: [lint]   # gated on the compile-everything lint; see `test`
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
 
@@ -135,7 +158,9 @@ jobs:
 
   features:
     name: Features
+    needs: [lint]   # gated on the compile-everything lint; see `test`
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v7
 
@@ -165,7 +190,9 @@ jobs:
 
   coverage:
     name: Coverage
+    needs: [lint]   # gated on the compile-everything lint; see `test`
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: write   # to push the badge JSON to the `badges` branch
     steps:

@@ -19,10 +19,18 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
 
+# Every job below carries a `timeout-minutes`. The org's Actions concurrency is
+# 20 runners, so a step that wedges holds a slot the rest of the family queues
+# behind — and GitHub's 360-minute default means it holds it for six hours.
+# A bound of roughly 4x the observed runtime makes a hung job fail fast and
+# name itself instead. Observed on recent runs: every job here finishes in
+# under two minutes.
+
 jobs:
   build:
     name: Build
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
 
@@ -52,6 +60,7 @@ jobs:
     name: Deploy
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}

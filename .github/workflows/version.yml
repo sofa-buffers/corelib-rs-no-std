@@ -1,0 +1,39 @@
+name: Version
+
+# Tags only. A release tag and the crate version in `Cargo.toml` are two hand-
+# maintained copies of one number, and the moment they disagree `cargo publish`
+# either ships the wrong version or fails after the tag is already public. This
+# job is the check that they agree — it does not create, move or fix anything.
+on:
+  push:
+    tags: ["v*"]
+
+concurrency:
+  group: version-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  version:
+    name: Tag matches Cargo.toml
+    runs-on: ubuntu-latest
+    # A `git` checkout plus a `grep`; see the note in `ci.yml` on why every job
+    # here is bounded well below GitHub's 360-minute default.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Compare tag against Cargo.toml
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          CRATE=$(sed -n '/^\[package\]/,/^\[/ s/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -1)
+          echo "tag: ${GITHUB_REF_NAME} (version ${TAG})"
+          echo "Cargo.toml: ${CRATE}"
+          if [ -z "$CRATE" ]; then
+            echo "::error::could not read the package version from Cargo.toml"
+            exit 1
+          fi
+          if [ "$TAG" != "$CRATE" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match Cargo.toml version ${CRATE}"
+            exit 1
+          fi
+          echo "tag and Cargo.toml agree on ${CRATE}"
