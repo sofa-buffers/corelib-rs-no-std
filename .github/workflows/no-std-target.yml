@@ -32,7 +32,7 @@ jobs:
   # The list mirrors the rows of `tools/footprint.sh` (and therefore the
   # README's footprint table) so a size number always has a build behind it.
   build:
-    name: ${{ inputs.label }}
+    name: build
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -103,7 +103,7 @@ jobs:
             --no-default-features --features "fixlen,array,sequence,fp64,value64"
 
   powerset:
-    name: ${{ inputs.label }} — every feature combination
+    name: features
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -133,7 +133,7 @@ jobs:
   # The size report for this target. Runs after the configurations are known to
   # build, so a red footprint job means the *measurement* broke, not the code.
   footprint:
-    name: ${{ inputs.label }} — footprint
+    name: footprint
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 15
