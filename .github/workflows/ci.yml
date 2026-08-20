@@ -239,3 +239,27 @@ jobs:
           git add coverage.json
           git commit -q -m "chore: update coverage badge ($MSG)"
           git push -f "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" badges
+
+  # The bare-metal targets, behind the same gate as everything else. They used
+  # to live in three thin caller files, which meant they could not be sequenced
+  # at all: `needs:` does not cross workflow files, so thirty jobs started while
+  # lint was still running. One call site with a matrix keeps the shared body in
+  # no-std-target.yml and puts all three behind the gate.
+  #
+  # A job that calls a reusable workflow forwards inputs and nothing else, so it
+  # carries no `timeout-minutes` -- GitHub rejects the key there. The bounds
+  # live on the callee's jobs.
+  no-std:
+    name: no-std
+    needs: [lint]
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - { triple: thumbv6m-none-eabi,   label: Cortex-M0 }
+          - { triple: thumbv7em-none-eabihf, label: Cortex-M4F }
+          - { triple: riscv32imc-unknown-none-elf, label: RISC-V 32 }
+    uses: ./.github/workflows/no-std-target.yml
+    with:
+      target: ${{ matrix.target.triple }}
+      label: ${{ matrix.target.label }}
