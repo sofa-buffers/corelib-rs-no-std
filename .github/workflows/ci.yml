@@ -250,7 +250,9 @@ jobs:
   # carries no `timeout-minutes` -- GitHub rejects the key there. The bounds
   # live on the callee's jobs.
   no-std:
-    name: no-std
+    # The label alone: GitHub already prefixes the callee's job with this one's
+    # name, so anything more repeats itself three times over.
+    name: ${{ matrix.target.label }}
     needs: [lint]
     strategy:
       fail-fast: false

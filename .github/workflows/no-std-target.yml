@@ -31,8 +31,11 @@ jobs:
   # which configuration broke on which target — not just "the no-std job".
   # The list mirrors the rows of `tools/footprint.sh` (and therefore the
   # README's footprint table) so a size number always has a build behind it.
+  # The eight configurations an embedded user actually picks, from the smallest
+  # useful profile to the full one -- built for real (codegen and link), which is
+  # also what `footprint` then measures.
   build:
-    name: ${{ inputs.label }}
+    name: build
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -43,6 +46,9 @@ jobs:
         with:
           toolchain: "1.97"
           targets: ${{ inputs.target }}
+          # llvm-tools-preview is for the footprint step at the end: it reads
+          # section sizes with llvm-size and struct sizes with llvm-nm.
+          components: llvm-tools-preview
 
       - name: Cache cargo registry & build
         uses: Swatinem/rust-cache@v2
@@ -102,8 +108,20 @@ jobs:
           cargo build --locked --lib --release --target ${{ inputs.target }} \
             --no-default-features --features "fixlen,array,sequence,fp64,value64"
 
+      # footprint used to be its own job with `needs: build`, so it waited for
+      # this one and then installed the same toolchain for the same target a
+      # second time. As a step it costs no extra wall clock, one less install,
+      # and it reuses the target directory this job just filled.
+      - name: footprint
+        if: always()
+        run: tools/footprint.sh ${{ inputs.target }}
+
+  # Every combination of the feature flags, including ones nobody would choose
+  # -- `fp64` without `array`, `sequence` on its own. Only `check`, so it is
+  # shallow where `build` is deep: it catches a missing `#[cfg(feature = ...)]`
+  # in a combination none of the eight profiles happens to hit.
   powerset:
-    name: ${{ inputs.label }} — every feature combination
+    name: powerset
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -132,30 +150,3 @@ jobs:
 
   # The size report for this target. Runs after the configurations are known to
   # build, so a red footprint job means the *measurement* broke, not the code.
-  footprint:
-    name: ${{ inputs.label }} — footprint
-    needs: build
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Install Rust toolchain (1.97, ${{ inputs.target }})
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: "1.97"
-          targets: ${{ inputs.target }}
-          # llvm-tools-preview provides llvm-size / llvm-nm and rust-lld, which
-          # footprint.sh links with and reads the section sizes from.
-          components: llvm-tools-preview
-
-      - name: Cache cargo registry & build
-        uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ inputs.target }}-footprint
-
-      # Reports flash (.text + .data) and the caller-provided RAM across the
-      # feature configurations, so size changes surface in the CI log — the
-      # single source of truth for the numbers documented in the README.
-      - name: Library footprint
-        run: tools/footprint.sh ${{ inputs.target }}
