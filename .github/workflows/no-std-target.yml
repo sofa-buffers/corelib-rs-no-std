@@ -32,21 +32,9 @@ jobs:
   # The list mirrors the rows of `tools/footprint.sh` (and therefore the
   # README's footprint table) so a size number always has a build behind it.
   build:
-    name: ${{ inputs.label }} — ${{ matrix.config.name }}
+    name: ${{ inputs.label }}
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      matrix:
-        config:
-          - { name: "MIN: integers only, 32-bit", features: "" }
-          - { name: "integers only, 64-bit", features: "value64" }
-          - { name: "+ sequence (64-bit)", features: "value64,sequence" }
-          - { name: "+ array (64-bit)", features: "value64,array" }
-          - { name: "+ fixlen (64-bit)", features: "value64,fixlen" }
-          - { name: "+ fp64 (64-bit)", features: "value64,fixlen,fp64" }
-          - { name: "all wire types, 32-bit", features: "fixlen,array,sequence,fp64" }
-          - { name: "MAX: all wire types, 64-bit", features: "fixlen,array,sequence,fp64,value64" }
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
 
@@ -59,22 +47,61 @@ jobs:
       - name: Cache cargo registry & build
         uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ inputs.target }}-${{ matrix.config.features }}
+          key: ${{ inputs.target }}-build
 
-      # Building the library for a bare-metal target with no host std proves the
-      # crate is genuinely no_std / heap-free in this configuration. The release
-      # profile is the shipping one (`opt-level="z"`, LTO, `panic="abort"`), so
-      # it is what the footprint numbers are taken from.
-      - name: Build library
+      # The eight feature configurations are steps, not a matrix axis. They share
+      # one toolchain install and one cargo cache, and `if: always()` keeps a
+      # failing configuration from hiding the seven after it -- each still
+      # reports its own name, duration and log. The axis was worth a matrix when
+      # each leg paid its own setup; it is not worth eight of them.
+      - name: "MIN: integers only, 32-bit"
+        if: always()
         run: |
           cargo build --locked --lib --release --target ${{ inputs.target }} \
-            --no-default-features --features "${{ matrix.config.features }}"
+            --no-default-features --features ""
 
-  # The matrix above names the configurations that carry meaning; this job is
-  # the backstop that leaves no combination unbuilt for this target, including
-  # the ones nobody would think to name (`fp64` without `array`, `sequence`
-  # alone at 32-bit width, …). `check` rather than `build`: it is a `cfg`
-  # correctness sweep, and the named rows above already produce real objects.
+      - name: "integers only, 64-bit"
+        if: always()
+        run: |
+          cargo build --locked --lib --release --target ${{ inputs.target }} \
+            --no-default-features --features "value64"
+
+      - name: "+ sequence (64-bit)"
+        if: always()
+        run: |
+          cargo build --locked --lib --release --target ${{ inputs.target }} \
+            --no-default-features --features "value64,sequence"
+
+      - name: "+ array (64-bit)"
+        if: always()
+        run: |
+          cargo build --locked --lib --release --target ${{ inputs.target }} \
+            --no-default-features --features "value64,array"
+
+      - name: "+ fixlen (64-bit)"
+        if: always()
+        run: |
+          cargo build --locked --lib --release --target ${{ inputs.target }} \
+            --no-default-features --features "value64,fixlen"
+
+      - name: "+ fp64 (64-bit)"
+        if: always()
+        run: |
+          cargo build --locked --lib --release --target ${{ inputs.target }} \
+            --no-default-features --features "value64,fixlen,fp64"
+
+      - name: "all wire types, 32-bit"
+        if: always()
+        run: |
+          cargo build --locked --lib --release --target ${{ inputs.target }} \
+            --no-default-features --features "fixlen,array,sequence,fp64"
+
+      - name: "MAX: all wire types, 64-bit"
+        if: always()
+        run: |
+          cargo build --locked --lib --release --target ${{ inputs.target }} \
+            --no-default-features --features "fixlen,array,sequence,fp64,value64"
+
   powerset:
     name: ${{ inputs.label }} — every feature combination
     runs-on: ubuntu-latest
