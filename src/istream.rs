@@ -345,12 +345,24 @@ impl IStream {
     /// * [`Err(Error::InvalidMsg)`](Error::InvalidMsg) — **`INVALID`**: the
     ///   bytes are malformed regardless of what follows (varint overflow, bad
     ///   type tag, oversized length/count, nesting past `MAX_DEPTH`, dangling
-    ///   sequence end). **Terminal**, and latched: no continuation can make
-    ///   these bytes valid, so every later `feed` on this decoder returns
-    ///   `InvalidMsg` again without consuming the chunk or delivering a single
-    ///   further field to the visitor. Decoding another message means a fresh
-    ///   [`IStream::new`] — where to resynchronize the byte stream is the
-    ///   caller's framing decision, not the decoder's.
+    ///   sequence end, or a wire type this build does not compile in).
+    ///   **Terminal**, and latched: no continuation can make these bytes valid,
+    ///   so every later `feed` on this decoder returns `InvalidMsg` again
+    ///   without consuming the chunk or delivering a single further field to the
+    ///   visitor. Decoding another message means a fresh [`IStream::new`] —
+    ///   where to resynchronize the byte stream is the caller's framing
+    ///   decision, not the decoder's.
+    ///
+    ///   **Fields already delivered are not retracted.** Decoding streams, so
+    ///   the callbacks for everything ahead of the offending bytes have already
+    ///   fired by the time this returns — on this very call, not only on
+    ///   earlier ones. The visitor has no "undo" hook and gets no notification;
+    ///   the returned outcome is the only truth. A caller must therefore treat
+    ///   `Err(Error::InvalidMsg)` as invalidating **everything it collected for
+    ///   this message**, not just the part that had not arrived yet. This is
+    ///   what a build with a wire-type feature turned off runs into routinely:
+    ///   the message is rejected *at* the construct it cannot parse, with every
+    ///   preceding field already handed over.
     ///
     /// Decoding can continue across many `feed` calls; the decoder keeps all
     /// state internally. Because the verdict is latched, it does not depend on

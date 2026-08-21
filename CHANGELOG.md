@@ -29,6 +29,26 @@ a **minor** bump may break API or wire output.
   The powerset CI job runs it. A matrix in which each leg drops the tests for
   what it disabled is not coverage — which is how the question went unasked.
 
+### Documentation
+
+- **The feature flags now state that they remove a wire *construct*, not just
+  the storage for it** (README "Feature flags", `Cargo.toml`, crate docs) —
+  matching corelib-c-cpp. Two consequences were promised nowhere before:
+
+  - **Interop narrows to peers that never send the construct in *any* field.**
+    Not "in no field you care about": an unknown id still has to be parsed to be
+    stepped over, so a peer adding an unrelated `array` field invalidates the
+    whole message for an `array`-less build. Forward compatibility with a
+    growing schema needs the feature left on.
+  - **Fields ahead of the rejection have already been delivered.** Decoding
+    streams, so the callbacks for everything before the offending construct fire
+    before `feed` returns `InvalidMsg` — on that same call. The visitor gets no
+    retraction and no notification; the returned outcome is the only truth, and
+    an application must discard everything it collected for the message rather
+    than keep the prefix. `IStream::feed`'s docs say so at the `INVALID` bullet,
+    and `unsupported_vectors_are_rejected_not_ignored` asserts the hazard is
+    real in every narrowed configuration rather than only documented.
+
 ### API
 
 - **`PayloadAcc<N>` — chunk reassembly, written once here instead of in every

@@ -45,6 +45,19 @@ harness = false
 # ---------------------------------------------------------------------------
 # Every capability is ON by default; turn features *off* (via
 # `default-features = false`, then re-enable what you want) to shrink the binary.
+#
+# A disabled feature removes the wire *construct*, not just the storage for it:
+# the decoder keeps no parser for a type it can never deliver (that parser is
+# most of what the flag saves), so a message carrying the construct is INVALID
+# rather than having the field skipped. Two consequences worth knowing before
+# turning one off, spelled out under "Feature flags" in the README:
+#   * interop narrows to peers that never send the construct in ANY field —
+#     an unknown id still has to be parsed to be stepped over, so an unrelated
+#     new field from a peer invalidates the whole message;
+#   * the decoder streams, so fields ahead of the offending construct have
+#     ALREADY been handed to the visitor when the rejection comes. The outcome
+#     is the only truth: on InvalidMsg the application must discard them.
+# `value64` is different — it narrows the value type, not the construct set.
 [features]
 default = ["fixlen", "array", "sequence", "fp64", "value64"]
 # Fixed-length fields: fp32, fp64, string, blob (wire types FIXLEN / FIXLENARRAY).

@@ -596,6 +596,7 @@ fn unsupported_vectors_are_rejected_not_ignored() {
     let vectors = doc["vectors"].as_array().unwrap();
 
     let mut ran = 0;
+    let mut rejected_after_delivering = 0;
     for vec in vectors {
         let requires = parse_requires(vec);
         if vector_supported(&requires) {
@@ -608,12 +609,21 @@ fn unsupported_vectors_are_rejected_not_ignored() {
 
         // Whole, and one byte at a time: `INVALID` is terminal and latched
         // (§5.2), so the verdict must not depend on where the chunks fall.
+        let (outcome, delivered) = common::feed(&bytes);
         assert_eq!(
-            common::feed(&bytes).0,
+            outcome,
             Err(Error::InvalidMsg),
             "[{name}] needs {requires:?}, which this build lacks — the message \
              must be rejected, not decoded",
         );
+        // The rejection happens *at* the unsupported construct, so whatever
+        // stood before it in the message has already reached the visitor. The
+        // outcome is the only truth: a caller must discard those fields rather
+        // than keep a half-message. Counted so the hazard is demonstrably real
+        // and not merely documented.
+        if !delivered.is_empty() {
+            rejected_after_delivering += 1;
+        }
 
         let mut rec = common::Recorder::new();
         let mut is = IStream::new();
@@ -647,6 +657,12 @@ fn unsupported_vectors_are_rejected_not_ignored() {
         assert!(
             ran > 0,
             "this build disables a capability but no vector exercised it",
+        );
+        assert!(
+            rejected_after_delivering > 0,
+            "expected at least one vector to deliver fields before the \
+             unsupported construct rejected the message — the partial-delivery \
+             hazard the feature-flag docs warn about",
         );
     }
 }
