@@ -138,14 +138,19 @@ jobs:
           fi
 
   # ---------------------------------------------------------------------------
-  # The quality gate, and the only one: the four CI workflows already ran fmt,
-  # clippy, the toolchain matrix, the locked test suites, the feature-powerset
-  # sweep and the per-target bare-metal builds (Cortex-M0 / M4F / RISC-V 32).
+  # The quality gate, and the only one: ci.yml already ran fmt, clippy, the
+  # toolchain matrix, the locked test suites, the feature-powerset sweep and the
+  # three bare-metal targets (its `no-std` matrix job behind `needs: [lint]`).
   # Re-running any of that here would prove nothing new and would be a second
-  # copy of a list that drifts — so this job asserts instead that they actually
+  # copy of a list that drifts — so this job asserts instead that it actually
   # ran, and passed, on this *exact* commit. That matters because a release tag
-  # can point at any commit, while the workflows trigger on pushes to main and
-  # on pull requests.
+  # can point at any commit, while ci.yml triggers on pushes to main and on
+  # pull requests.
+  #
+  # The one list that does live here is GATING_WORKFLOWS, and it is the thing
+  # that drifts: the bare-metal targets were three caller files until they were
+  # folded into ci.yml, and a name that no longer exists must fail loudly rather
+  # than as "no successful run".
   # ---------------------------------------------------------------------------
   ci-status:
     name: CI passed on this commit
@@ -161,13 +166,22 @@ jobs:
       - name: Require a successful run of every gating workflow
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GATING_WORKFLOWS: ci.yml
         run: |
           set -euo pipefail
           SHA="$(git rev-parse HEAD)"
           failed=0
-          for wf in ci.yml no-std-cortex-m0.yml no-std-cortex-m4f.yml no-std-riscv32.yml; do
-            CONCLUSIONS="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/$wf/runs?head_sha=$SHA" \
-                            --jq '.workflow_runs[] | select(.status == "completed") | .conclusion')"
+          for wf in $GATING_WORKFLOWS; do
+            # A workflow that was renamed or folded into another file answers
+            # 404 here. Saying so is the point: silently reading that as "no
+            # successful run" would tell a maintainer to re-run something that
+            # no longer exists.
+            if ! RUNS="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/$wf/runs?head_sha=$SHA" 2>&1)"; then
+              echo "::error::cannot read runs for '$wf' — renamed or removed? Then GATING_WORKFLOWS in this file is stale. ($RUNS)"
+              failed=1
+              continue
+            fi
+            CONCLUSIONS="$(jq -r '.workflow_runs[] | select(.status == "completed") | .conclusion' <<<"$RUNS")"
             if grep -qx success <<<"$CONCLUSIONS"; then
               echo "$wf: green"
             else
