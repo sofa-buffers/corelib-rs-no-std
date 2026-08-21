@@ -575,6 +575,83 @@ fn all_shared_vectors_conform() {
 }
 
 #[test]
+fn unsupported_vectors_are_rejected_not_ignored() {
+    // The inversion of `all_shared_vectors_conform`, and the coverage shape a
+    // feature powerset otherwise misses: every leg asks "does what I enabled
+    // work?" and nothing asks "what happens to what I disabled?". A matrix in
+    // which each leg drops the tests for what it turned off is not coverage.
+    //
+    // This corelib implements a *subset* of the wire format when features are
+    // turned off — that is the point of turning them off, and carrying a parser
+    // for a wire type that can never be delivered would defeat it. So a message
+    // that needs a capability this build does not have is `INVALID`, not
+    // partially decoded: the `requires` mask names exactly those vectors, and
+    // each one must be rejected rather than quietly mis-decoded or waved
+    // through.
+    //
+    // With every feature on there is nothing unsupported and this test is
+    // vacuous by construction — which is asserted, so it cannot rot into
+    // silently running nothing in the configuration CI runs most.
+    let doc: Value = serde_json::from_str(VECTORS_JSON).unwrap();
+    let vectors = doc["vectors"].as_array().unwrap();
+
+    let mut ran = 0;
+    for vec in vectors {
+        let requires = parse_requires(vec);
+        if vector_supported(&requires) {
+            continue;
+        }
+        ran += 1;
+
+        let name = vec["name"].as_str().unwrap();
+        let bytes = hex_to_bytes(vec["serialized"]["hex"].as_str().unwrap());
+
+        // Whole, and one byte at a time: `INVALID` is terminal and latched
+        // (§5.2), so the verdict must not depend on where the chunks fall.
+        assert_eq!(
+            common::feed(&bytes).0,
+            Err(Error::InvalidMsg),
+            "[{name}] needs {requires:?}, which this build lacks — the message \
+             must be rejected, not decoded",
+        );
+
+        let mut rec = common::Recorder::new();
+        let mut is = IStream::new();
+        let mut chunked = Ok(());
+        for b in &bytes {
+            chunked = is.feed(&[*b], &mut rec);
+            if chunked == Err(Error::InvalidMsg) {
+                break;
+            }
+        }
+        assert_eq!(
+            chunked,
+            Err(Error::InvalidMsg),
+            "[{name}] chunked feeding changed the verdict",
+        );
+    }
+
+    let all_on = cfg!(all(
+        feature = "fixlen",
+        feature = "array",
+        feature = "sequence",
+        feature = "fp64",
+        feature = "value64"
+    ));
+    if all_on {
+        assert_eq!(
+            ran, 0,
+            "with every feature on, no vector can be unsupported"
+        );
+    } else {
+        assert!(
+            ran > 0,
+            "this build disables a capability but no vector exercised it",
+        );
+    }
+}
+
+#[test]
 fn skip_ids_vectors_conform() {
     // The spec's `skip_ids` scenario: a receiver that ignores those ids (a
     // skipped `sequence_begin` skips the whole sub-tree) must still recover every

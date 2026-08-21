@@ -185,8 +185,16 @@ jobs:
 
       # Behavioural smoke test (encode -> decode) under every combination. The
       # config_tests crate is `cfg`-gated so it builds and runs for any subset.
-      - name: Test every feature combination (config smoke tests)
-        run: cargo hack --feature-powerset test --test config_tests
+      #
+      # `vectors_tests` runs here too, and it is the half that asks what each leg
+      # turned *off*: a shared vector whose `requires` mask this configuration
+      # does not satisfy is fed to the decoder and must be rejected as INVALID,
+      # rather than being skipped by the runner. A powerset that only ever
+      # exercises what a leg enabled is not coverage.
+      - name: Test every feature combination (config + vector conformance)
+        run: |
+          cargo hack --feature-powerset test \
+            --test config_tests --test vectors_tests
 
   coverage:
     name: Coverage

@@ -5,6 +5,30 @@ a **minor** bump may break API or wire output.
 
 ## Unreleased
 
+### Testing
+
+- **The feature powerset now tests what each leg turns *off* (issue #103).**
+  `vectors_tests` gains `unsupported_vectors_are_rejected_not_ignored`: instead
+  of the runner skipping a shared vector whose `requires` mask this build does
+  not satisfy, the vector is fed to the decoder and must be rejected as
+  `INVALID` — whole and one byte at a time, since the verdict is latched and
+  must not depend on chunk boundaries. That exercises 18–58 of the 81 shared
+  vectors per narrowed configuration, where the matrix previously asserted
+  nothing about them.
+
+  This pins the **subset** reading of the feature flags, which is what they are
+  for: a build that turns a wire type off does not implement that part of the
+  format, and a message needing it is invalid rather than partially decoded.
+  Carrying a parser for a wire type that can never be delivered would defeat the
+  footprint saving the flags exist to provide — on Cortex-M0 the integer-only
+  build would grow from 614 B to 986 B (+61%) for exactly that. The trade-off
+  accepted here is forward compatibility: a peer that adds a field carrying a
+  wire type this build lacks makes the whole message invalid, so a deployment
+  that needs to tolerate that must keep the corresponding feature on.
+
+  The powerset CI job runs it. A matrix in which each leg drops the tests for
+  what it disabled is not coverage — which is how the question went unasked.
+
 ### API
 
 - **`PayloadAcc<N>` — chunk reassembly, written once here instead of in every
