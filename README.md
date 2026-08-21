@@ -562,8 +562,8 @@ one: it builds the bench binary, runs each workload once under Callgrind with
 collection toggled on the `run_<workload>` symbol, and prints a table of
 instructions retired per op (`Ir/op`, lower is better) next to the encoded
 message size. It needs `valgrind` on `PATH` and is slow, but its numbers do not
-depend on clock speed or scheduling — they are what the
-[changelog](CHANGELOG.md) quotes. Under the hood it uses the `bench` binary's
+depend on clock speed or scheduling — they are what the release notes
+quote. Under the hood it uses the `bench` binary's
 single-workload mode: `bench encode_typical` performs exactly one op and prints
 its size. Cargo's own flags (`--bench`, `--nocapture`, …) are ignored when
 looking for a workload name, so `cargo bench` still prints the full table.

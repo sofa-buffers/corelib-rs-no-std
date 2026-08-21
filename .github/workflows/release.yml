@@ -1,0 +1,320 @@
+name: Release
+
+# Publish `sofa-buffers-corelib-no-std` to crates.io when a GitHub Release is
+# published.
+#
+# The git tag is the source of truth for the version — but unlike npm, Cargo
+# cannot be handed one at publish time: `cargo publish` reads the version out of
+# Cargo.toml and bakes it into the artifact. So the guard *compares* tag and
+# manifest and refuses a mismatch, rather than injecting the tag.
+#
+# Every check sits before the upload on purpose: a crates.io version can never
+# be replaced or deleted, only yanked — and a yanked version still serves every
+# lockfile that already references it.
+#
+# `workflow_dispatch` runs the identical pipeline against an existing tag as a
+# rehearsal and stops short of the publish, so the machinery can be exercised
+# without spending a version number.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to rehearse against (e.g. v0.11.0). Runs every check, publishes nothing."
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+# One release at a time; never cancel a run that may already have uploaded.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CRATE: sofa-buffers-corelib-no-std
+  BARE_TARGET: thumbv6m-none-eabi
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Everything that can be decided without a build, decided first: a bad tag or
+  # a version that is already taken should cost seconds, not a full matrix.
+  # ---------------------------------------------------------------------------
+  guard:
+    name: Guard
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      ref: ${{ steps.resolve.outputs.ref }}
+      publish: ${{ steps.resolve.outputs.publish }}
+    steps:
+      - name: Resolve the version from the tag
+        id: resolve
+        env:
+          TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.tag }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#v}"
+          # Plain semver, optional prerelease / build metadata. A malformed tag
+          # must surface here rather than inside `cargo publish`.
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Tag '$TAG' does not resolve to a valid semver version ('$VERSION')."
+            exit 1
+          fi
+          {
+            echo "version=$VERSION"
+            echo "ref=$TAG"
+            echo "publish=${{ github.event_name == 'release' }}"
+          } >> "$GITHUB_OUTPUT"
+          echo "Release version: $VERSION (tag $TAG)"
+
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ steps.resolve.outputs.ref }}
+          fetch-depth: 0   # the ancestry notice below needs history
+
+      # `cargo metadata` rather than a grep: it reads the manifest the way Cargo
+      # will. Ubuntu runners ship a Rust toolchain, so this job needs no
+      # toolchain setup of its own.
+      - name: Manifest must agree with the tag
+        env:
+          VERSION: ${{ steps.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          META="$(cargo metadata --no-deps --format-version 1)"
+          NAME="$(jq -r '.packages[0].name' <<<"$META")"
+          MANIFEST_VERSION="$(jq -r '.packages[0].version' <<<"$META")"
+
+          if [ "$NAME" != "$CRATE" ]; then
+            echo "::error::Cargo.toml publishes '$NAME', but this workflow guards '$CRATE'."
+            exit 1
+          fi
+          if [ "$MANIFEST_VERSION" != "$VERSION" ]; then
+            echo "::error::Cargo.toml is at $MANIFEST_VERSION but the tag says $VERSION. Cargo publishes the manifest version — bump Cargo.toml, commit, and re-tag."
+            exit 1
+          fi
+          echo "$NAME $MANIFEST_VERSION matches tag."
+
+      # The committed Cargo.lock is what every `--locked` build in this repo
+      # resolves against. If it still names the previous version, the lockfile
+      # and the manifest disagree and every gate below would be building
+      # something other than what is being published.
+      - name: Lockfile must be current
+        run: |
+          set -euo pipefail
+          cargo metadata --locked --format-version 1 >/dev/null \
+            || { echo "::error::Cargo.lock is out of date. Run 'cargo update --workspace' (or a plain 'cargo build'), commit the lockfile, and re-tag."; exit 1; }
+          echo "Cargo.lock is in sync with Cargo.toml."
+
+      - name: Refuse a version that already exists on crates.io
+        env:
+          VERSION: ${{ steps.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          # 200 = this exact version is published; 404 = free (also the answer
+          # for a crate that does not exist yet, which is the first release).
+          CODE="$(curl -sS -o /dev/null -w '%{http_code}' \
+                    -H "User-Agent: $CRATE release workflow (github.com/${GITHUB_REPOSITORY})" \
+                    "https://crates.io/api/v1/crates/$CRATE/$VERSION")"
+          case "$CODE" in
+            404) echo "$CRATE $VERSION is free — clear to publish." ;;
+            200) echo "::error::$CRATE $VERSION is already on crates.io. A published version is immutable; bump and re-tag."; exit 1 ;;
+            *)   echo "::error::crates.io answered HTTP $CODE for $CRATE/$VERSION — refusing to guess."; exit 1 ;;
+          esac
+
+      # Not a gate: a hotfix release off a maintenance branch is legitimate.
+      # But a tag that is on *no* mainline is nearly always an accident.
+      - name: Note where the tag sits
+        run: |
+          set -euo pipefail
+          if git merge-base --is-ancestor HEAD origin/main 2>/dev/null; then
+            echo "Tagged commit is on main."
+          else
+            echo "::warning::The tagged commit is not an ancestor of main — releasing off-mainline."
+          fi
+
+  # ---------------------------------------------------------------------------
+  # The quality gate, and the only one: the four CI workflows already ran fmt,
+  # clippy, the toolchain matrix, the locked test suites, the feature-powerset
+  # sweep and the per-target bare-metal builds (Cortex-M0 / M4F / RISC-V 32).
+  # Re-running any of that here would prove nothing new and would be a second
+  # copy of a list that drifts — so this job asserts instead that they actually
+  # ran, and passed, on this *exact* commit. That matters because a release tag
+  # can point at any commit, while the workflows trigger on pushes to main and
+  # on pull requests.
+  # ---------------------------------------------------------------------------
+  ci-status:
+    name: CI passed on this commit
+    needs: guard
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.guard.outputs.ref }}
+      - name: Require a successful run of every gating workflow
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          SHA="$(git rev-parse HEAD)"
+          failed=0
+          for wf in ci.yml no-std-cortex-m0.yml no-std-cortex-m4f.yml no-std-riscv32.yml; do
+            CONCLUSIONS="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/$wf/runs?head_sha=$SHA" \
+                            --jq '.workflow_runs[] | select(.status == "completed") | .conclusion')"
+            if grep -qx success <<<"$CONCLUSIONS"; then
+              echo "$wf: green"
+            else
+              echo "::error::$wf has no successful run for $SHA (saw: ${CONCLUSIONS:-<none>})."
+              failed=1
+            fi
+          done
+          if [ "$failed" -ne 0 ]; then
+            echo "::error::Push the commit to main (or open a PR for it), let the workflows finish, then re-cut the release."
+            exit 1
+          fi
+
+  # ---------------------------------------------------------------------------
+  # The artifact, not the working tree. `cargo package` builds the exact file
+  # set that would go to crates.io and verifies it compiles; the smoke script
+  # then consumes that extracted package from *outside* the repository — on the
+  # host, where the values can be asserted, and as a `#![no_std]` staticlib for
+  # a bare-metal target, which is the property this crate exists for and the one
+  # a host build cannot check.
+  # ---------------------------------------------------------------------------
+  package-smoke:
+    name: Package & smoke
+    needs: guard
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.guard.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.guard.outputs.ref }}
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97"
+          targets: ${{ env.BARE_TARGET }}
+          # llvm-nm reads the exported symbol back out of the bare-metal archive.
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Package (builds and verifies the .crate)
+        run: cargo package --locked --verbose
+
+      - name: What the package contains
+        run: cargo package --locked --list
+
+      # `.github/smoke/run.sh` builds throwaway crates outside the repository
+      # against the given dependency spec. The same script runs again after the
+      # publish with a registry dependency, so both halves test one thing.
+      - name: Smoke-test the packaged crate as a dependency
+        run: |
+          set -euo pipefail
+          PKG="$PWD/target/package/$CRATE-$VERSION"
+          test -d "$PKG" || { echo "::error::$PKG missing — did cargo package change its layout?"; exit 1; }
+          .github/smoke/run.sh "path = \"$PKG\""
+
+      - name: Upload the .crate for inspection
+        uses: actions/upload-artifact@v4
+        with:
+          name: crate-${{ env.VERSION }}
+          path: target/package/*.crate
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Publish. Trusted Publishing (OIDC) instead of a long-lived CRATES_IO_TOKEN:
+  # the runner mints a short-lived id-token that crates.io exchanges for a
+  # one-off publish credential. Configured once on crates.io under the crate's
+  # Settings -> Trusted Publishing (this repository + `release.yml` +
+  # environment `crates-io`).
+  #
+  # crates.io can only be told about a crate that already exists, so the *first*
+  # version of each crate is published by hand (`cargo publish` with a personal
+  # token); from the second on, this job is the only publisher.
+  # ---------------------------------------------------------------------------
+  publish:
+    name: Publish to crates.io
+    needs: [guard, ci-status, package-smoke]
+    if: needs.guard.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    environment:
+      name: crates-io
+      url: https://crates.io/crates/sofa-buffers-corelib-no-std
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.guard.outputs.ref }}
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97"
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Mint a short-lived crates.io token
+        id: auth
+        uses: rust-lang/crates-io-auth-action@v1
+
+      - name: cargo publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        run: cargo publish --locked --verbose
+
+  # ---------------------------------------------------------------------------
+  # The same smoke script again, but against what the registry actually serves.
+  # Everything above tests a local artifact; only this proves the upload landed
+  # intact and is installable — and still links on bare metal — for a stranger.
+  # ---------------------------------------------------------------------------
+  verify:
+    name: Verify from crates.io
+    needs: [guard, publish]
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.guard.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.guard.outputs.ref }}
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97"
+          targets: ${{ env.BARE_TARGET }}
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+
+      # Wait for the sparse index — the file Cargo itself resolves against —
+      # rather than retrying the smoke test until it happens to work: a retry
+      # loop around the whole check would bury a genuine failure under minutes
+      # of "not yet".
+      - name: Wait for the index to carry the new version
+        run: |
+          set -euo pipefail
+          # Sparse-index layout: names of four characters or more live under
+          # <first two>/<next two>/<name>.
+          INDEX="https://index.crates.io/so/fa/$CRATE"
+          for attempt in $(seq 1 30); do
+            # Fetch into a variable rather than piping into `grep -q`: `-q`
+            # closes the pipe on the first match and curl dies of SIGPIPE,
+            # which `pipefail` would turn into a false negative.
+            entries="$(curl -sS -H "User-Agent: $CRATE release workflow (github.com/${GITHUB_REPOSITORY})" "$INDEX" || true)"
+            if grep -q "\"vers\":\"$VERSION\"" <<<"$entries"; then
+              echo "index carries $VERSION."
+              exit 0
+            fi
+            echo "attempt $attempt: index has no $VERSION yet — waiting"
+            sleep 10
+          done
+          echo "::error::$CRATE $VERSION never appeared in the sparse index. The publish reported success, so check crates.io before re-running."
+          exit 1
+
+      - name: Install the published version and round-trip through it
+        run: .github/smoke/run.sh "version = \"=$VERSION\""
