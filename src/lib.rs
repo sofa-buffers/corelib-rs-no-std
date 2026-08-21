@@ -25,6 +25,14 @@
 //!   wants the field as a single value.
 //! * **Zero-cost feature gating** — disable `fixlen` / `array` / `sequence` /
 //!   `fp64` to drop whole code paths, mirroring the C `SOFAB_DISABLE_*` macros.
+//!   Each flag removes the wire *construct*, not merely the storage for it: no
+//!   parser is kept for a type that can never be delivered, so a message
+//!   carrying it is [`Error::InvalidMsg`] rather than having the field skipped.
+//!   That narrows interop to peers which never send the construct in **any**
+//!   field — an unknown id still has to be parsed to be stepped over — and,
+//!   because decoding streams, fields ahead of the offending construct have
+//!   already reached the [`Visitor`] when the rejection arrives; see
+//!   [`IStream::feed`] and the README's "Feature flags" section.
 //! * **Sequences frame lazily** — [`OStream::write_sequence_begin_lazy`] holds a
 //!   sequence header back until the sequence turns out to have content, so a
 //!   sequence-typed *field* equal to its declared default is omitted rather than

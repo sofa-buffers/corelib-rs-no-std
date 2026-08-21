@@ -427,6 +427,34 @@ Every capability is **on by default**. The features positively *enable* wire
 types; turn them **off** (`default-features = false`, then re-enable what you
 need) to shrink the binary on tiny targets.
 
+> **A disabled feature removes the wire construct, not just the storage.** This
+> is a decode-side contract, and the sharp edge of these flags — read it before
+> turning one off.
+>
+> - **The construct becomes unparseable.** The decoder does not keep a parser
+>   for a wire type it can never deliver; that parser is most of what the flag
+>   saves. A message carrying the construct is therefore **`INVALID`**
+>   ([`Error::InvalidMsg`]) — not "the field is ignored", not "the field is
+>   skipped". The build implements a *subset* of the wire format.
+> - **Interop narrows to peers that never send it — in any field.** Not "in no
+>   field you care about": an id your schema does not know still has to be
+>   parsed to be stepped over, so a peer that adds an unrelated `array` field
+>   invalidates the whole message for an `array`-less build. Forward
+>   compatibility with a growing schema needs the feature left **on**.
+> - **Fields before the rejection have already been delivered.** The decoder is
+>   streaming: it rejects *at* the offending construct, and everything ahead of
+>   it in the message already reached your [`Visitor`]. Those callbacks fired on
+>   a message that turns out to be invalid, so the **outcome is the only truth**
+>   — on `Err(Error::InvalidMsg)` an application must discard what it collected,
+>   not keep a half-message. `INVALID` is also terminal: the decoder stays
+>   rejecting until a fresh [`IStream::new`].
+>
+> None of this applies to `value64`, which narrows the value *type* rather than
+> removing a construct; see its own note below.
+
+[`Error::InvalidMsg`]: https://sofa-buffers.github.io/corelib-rs-no-std/sofab/enum.Error.html
+[`IStream::new`]: https://sofa-buffers.github.io/corelib-rs-no-std/sofab/struct.IStream.html#method.new
+
 | Feature | Default | Enables |
 |---------|:------:|---------|
 | `fixlen` | ✅ | fp32, fp64, string, blob (`FIXLEN` / `FIXLENARRAY`) |
