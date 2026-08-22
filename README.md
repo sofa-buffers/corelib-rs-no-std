@@ -41,6 +41,78 @@ The crates.io package is `sofa-buffers-corelib-no-std`; the compiled crate you
 cargo add sofa-buffers-corelib-no-std
 ```
 
+### Feature flags
+
+Every capability is **on by default**. The features positively *enable* wire
+types; turn them off (`default-features = false`, then re-enable what you need)
+to shrink the binary.
+
+> **A disabled feature removes the wire construct, not just the storage.**
+>
+> - The construct becomes **unparseable**: a message carrying it is
+>   **`INVALID`** ([`Error::InvalidMsg`]), not skipped and not ignored.
+> - **Interop narrows to peers that never send it, in any field.** An id your
+>   schema does not know still has to be parsed to be stepped over, so a peer
+>   that adds an unrelated `array` field invalidates the whole message for an
+>   `array`-less build. Forward compatibility with a growing schema needs the
+>   feature left **on**.
+> - **Fields before the rejection have already reached your [`Visitor`].** On
+>   `Err(Error::InvalidMsg)` discard what you collected; `INVALID` is terminal
+>   until a fresh [`IStream::new`].
+>
+> None of this applies to `value64`, which narrows the value *type* rather than
+> removing a construct; see its own note below.
+
+[`Error::InvalidMsg`]: https://sofa-buffers.github.io/corelib-rs-no-std/sofab/enum.Error.html
+[`IStream::new`]: https://sofa-buffers.github.io/corelib-rs-no-std/sofab/struct.IStream.html#method.new
+
+| Feature | Default | Enables |
+|---------|:------:|---------|
+| `fixlen` | ✅ | fp32, fp64, string, blob (`FIXLEN` / `FIXLENARRAY`) |
+| `array` | ✅ | array fields (`VARINTARRAY_*`, `FIXLENARRAY`) |
+| `sequence` | ✅ | nested sequences (`SEQUENCE_START` / `END`) |
+| `fp64` | ✅ | 64-bit floats (implies `fixlen`) |
+| `value64` | ✅ | 64-bit scalar value type (`u64`/`i64`); disable for 32-bit (`u32`/`i32`) |
+
+```toml
+# Smallest build: integers only, 32-bit values. The crate is still `sofab`.
+sofa-buffers-corelib-no-std = { version = "0.1", default-features = false }
+```
+
+> **`value64` side effects.** Turning it off shrinks 64-bit varint math
+> (smaller and faster on 32-bit MCUs) and changes four things:
+> - **Wire compatibility:** the format is width-agnostic, so messages whose values
+>   all fit in 32 bits stay byte-identical and interoperable. A value beyond the
+>   32-bit range from a 64-bit peer is **rejected** as malformed (`Error::InvalidMsg`),
+>   never silently truncated.
+> - **ABI:** the value types appear in public signatures, so 32-bit and 64-bit
+>   builds are **not** ABI-compatible.
+> - **Field ids:** the effective field-id range shrinks, since the field header is a
+>   varint of `(id << 3) | type`.
+> - **Conformance:** the shipped test vectors include 64-bit values and won't
+>   decode in this mode.
+
+(Array element widths are compile-time type parameters, so an invalid element
+size is unrepresentable.)
+
+#### Verifying the build configuration
+
+The wire types are compile-time switches, so assert the ones your application
+depends on with the [`require!`] macro; a missing capability fails the build:
+
+```rust
+// Compile error unless this `sofab` was built with fp64 + array support and 64-bit values.
+sofab::require!(fp64, array, value64);
+```
+
+Accepted capabilities: `fixlen`, `array`, `sequence`, `fp64`, `value32`,
+`value64`. The same information is available as constants in [`sofab::config`]
+(`FIXLEN`, `ARRAY`, `SEQUENCE`, `FP64`, `VALUE_BITS`) for `const` assertions or
+logging.
+
+[`require!`]: https://sofa-buffers.github.io/corelib-rs-no-std/sofab/macro.require.html
+[`sofab::config`]: https://sofa-buffers.github.io/corelib-rs-no-std/sofab/config/index.html
+
 ## Why this design
 
 | Goal | How |
@@ -54,48 +126,40 @@ cargo add sofa-buffers-corelib-no-std
 
 ### String validity (strict UTF-8)
 
-A `string` field is UTF-8. Rust's `str`/`String` is a **Unicode string type**,
-so this port is **always strict** — the `SOFAB_STRICT_UTF8` option
-(CORELIB_PLAN §6.4) is a **no-op here, pinned ON**, and there is no primitive to
-expose (only byte-container targets need one):
+A `string` field is UTF-8. Rust's `str`/`String` is a Unicode string type, so
+this port is **always strict**: the `SOFAB_STRICT_UTF8` option is a **no-op
+here, pinned ON**, and no validator primitive is exposed.
 
-- **Encode is strict by construction.** `OStream::write_str` takes `&str`, which
-  is already guaranteed valid UTF-8 by the type system, so a `string` field can
-  never carry invalid bytes — no runtime check, and no UTF-8 validator in the
-  image. The §6.4 exemption is about the *API*, not one method, so `write_str`
-  is the **only** door to a `string` field: the byte-taking primitive
-  `write_fixlen(id, bytes, subtype)` — which exists for `fp32` / `fp64` /
-  `blob` — refuses `FixlenType::Str` with `Error::Argument`, before a byte
-  reaches the buffer, rather than emit an unchecked `string`. Holding bytes you
-  know are text? Validate them once yourself with `core::str::from_utf8` and
-  pass the `&str`; that leaves the validator out of firmware that has no use for
-  it. Put bytes that are *not* text in a `blob` (`write_blob`).
-- **Decode strictness lives in generated code.** The corelib hands a `string`
-  field's **raw bytes** to `Visitor::string` and never builds a `str`/`String`;
-  generated code materializes it with `core::str::from_utf8`, turning invalid
-  bytes into `Error::InvalidMsg` (the `INVALID` decode outcome). Invalid UTF-8 is
+- **Encode.** `OStream::write_str` takes `&str` and is the only door to a
+  `string` field; the byte-taking `write_fixlen(id, bytes, subtype)` — which
+  exists for `fp32` / `fp64` / `blob` — refuses `FixlenType::Str` with
+  `Error::Argument` before a byte reaches the buffer. Validate bytes you believe
+  are text with `core::str::from_utf8` and pass the `&str`; put bytes that are
+  *not* text in a `blob` (`write_blob`).
+- **Decode.** The corelib hands a `string` field's **raw bytes** to
+  `Visitor::string` and never builds a `str`/`String`; generated code
+  materializes it with `core::str::from_utf8`, turning invalid bytes into
+  `Error::InvalidMsg` (the `INVALID` decode outcome). Invalid UTF-8 is
   **rejected, never replaced** with `U+FFFD` or truncated. Embedded `U+0000` is
-  valid UTF-8 and round-trips byte-exact. std (`corelib-rs`) and no_std agree
-  (subsumes generator #80).
+  valid UTF-8 and round-trips byte-exact. std (`corelib-rs`) and `no_std` agree.
 
-The shared `invalid_utf8` negative vectors in `assets/test_vectors.json`
-(tracking corelib-c-cpp#97) are exercised by `tests/utf8_tests.rs` in both
-directions (needs the default `fixlen` feature): their `decode_outcome`
-(`invalid`) against the decode path, and their `encode_outcome`
-(`invalid_argument`) against `write_fixlen(.., FixlenType::Str)`, the only call
-on this port that could have presented those bytes as a `string`.
+The shared `invalid_utf8` negative vectors in `assets/test_vectors.json` are
+exercised by `tests/utf8_tests.rs` in both directions (needs the default
+`fixlen` feature): their `decode_outcome` (`invalid`) against the decode path,
+their `encode_outcome` (`invalid_argument`) against
+`write_fixlen(.., FixlenType::Str)`.
 
 ## Usage
 
 The codec has four use cases — serialize a message that fits in one buffer,
 serialize one too large for the buffer (streamed out in chunks), deserialize a
 whole message, and deserialize one arriving in chunks — plus the generated-code
-path that wraps them. Everything runs allocation-free on caller-owned buffers.
+path that wraps them. All run allocation-free on caller-owned buffers.
 
 ### Serialize
 
 `OStream::new` borrows a caller-owned, fixed-capacity buffer big enough for the
-whole message; write fields, then read the byte count:
+whole message; write fields, then read the byte count.
 
 ```rust
 use sofab::OStream;
@@ -113,9 +177,9 @@ let wire = &buf[..used];
 
 ### Serialize stream
 
-Give `OStream` a **tiny** window and a `Flush` sink (any `FnMut(&[u8])`, or a
-manual `impl Flush` on bare metal); when the window fills it drains to the sink, so
-the produced message can be far larger than RAM:
+Give `OStream` a tiny window and a `Flush` sink (any `FnMut(&[u8])`, or a manual
+`impl Flush` on bare metal); when the window fills it drains to the sink, so the
+produced message can be far larger than RAM.
 
 ```rust
 use sofab::OStream;
@@ -137,8 +201,8 @@ let mut out = Vec::new();                     // or a UART / socket / flash page
 ### Deserialize
 
 Decoding is **push-based**: implement `Visitor` and the decoder calls back the
-methods for the field kinds you care about; any method left at its default (empty)
-body transparently **skips** that field.
+methods for the field kinds you care about; any method left at its default
+(empty) body **skips** that field.
 
 ```rust
 use sofab::{IStream, Visitor, Id, Unsigned, Signed};
@@ -157,25 +221,23 @@ IStream::new().feed(wire, &mut sink).unwrap();
 
 ### Deserialize stream
 
-`IStream` resumes at any byte boundary, so feed it arbitrarily small chunks as they
-arrive off the wire — from any source; string/blob payloads reach the visitor in
-pieces, each `chunk` borrowing the bytes you fed.
+`IStream` resumes at any byte boundary, so feed it arbitrarily small chunks as
+they arrive off the wire; string/blob payloads reach the visitor in pieces, each
+`chunk` borrowing the bytes you fed.
 
-Every `feed` returns the three-valued decode outcome of the bytes seen *so far*
-(`MESSAGE_SPEC.md` §7): `Ok(())` means the stream is at a **field boundary**
-(`COMPLETE`); `Err(Error::Incomplete)` means it stopped **mid-field** — a
-first-class "feed me the next chunk" signal, *not* an error; `Err(Error::InvalidMsg)`
-means the bytes are malformed regardless of what follows. There is no
-`finish`/`finalize` step — end-of-input is the caller's own framing decision, so a
-whole-message caller simply requires the final outcome to be `Ok(())`.
+Every `feed` returns the three-valued decode outcome of the bytes seen *so far*:
+`Ok(())` means the stream is at a **field boundary** (`COMPLETE`);
+`Err(Error::Incomplete)` means it stopped **mid-field**, which is a "feed me the
+next chunk" signal rather than an error; `Err(Error::InvalidMsg)` means the bytes
+are malformed regardless of what follows. There is no `finish`/`finalize` step:
+end-of-input is the caller's framing decision, so a whole-message caller requires
+the final outcome to be `Ok(())`.
 
-`InvalidMsg` is **terminal and latched**: an `IStream` that has reported it reports
-it again from every later `feed`, without consuming the chunk or delivering another
-field to your visitor. That is what makes the verdict independent of where the chunk
-boundaries fall — a malformed prefix followed by a well-formed field is `INVALID`
-whether the two arrive in one `feed` or in two. To decode again after a malformed
-message, start a fresh decoder (`IStream::new()`); where to resynchronize the byte
-stream is a framing decision only the caller can make.
+`InvalidMsg` is **terminal and latched**: an `IStream` that has reported it
+reports it again from every later `feed`, without consuming the chunk or
+delivering another field to your visitor, so the verdict does not depend on where
+the chunk boundaries fall. To decode again after a malformed message, start a
+fresh decoder (`IStream::new()`).
 
 ```rust
 use sofab::{IStream, Visitor, Id, Error};
@@ -204,11 +266,9 @@ for piece in wire.chunks(4) {                 // one packet at a time, from any 
 A nested message is a **sequence**: `write_sequence_begin_lazy(id)` opens one and
 a closer ends it. MESSAGE_SPEC §2 **omits a sequence-typed field whose value
 equals its declared default**, and "not one child was written" is exactly that
-condition — but the header has to be on the wire *before* the children that
-decide it. Rather than buffer the sub-message (impossible without a heap), the
-encoder **holds the header back**: the ids of the innermost open sequences form a
-pending run, the first field write emits the whole run outermost-first, and the
-closer decides what an empty one does.
+condition, so the encoder **holds the header back**: the ids of the innermost
+open sequences form a pending run, the first field write emits the whole run
+outermost-first, and the closer decides what an empty one does.
 
 | call | effect |
 |------|--------|
@@ -221,15 +281,12 @@ of the value: `end` for a `struct`/`union` field and for an array *wrapper*;
 `end_keep` for a wrapper-array **element**, whose presence is what carries a
 dynamic array's length (§5.1), and for an array field that must encode
 "explicitly empty" against a non-empty declared default. Getting it wrong is not
-symmetric — `end_keep` where `end` would do costs one non-canonical empty frame
+symmetric: `end_keep` where `end` would do costs one non-canonical empty frame
 that every decoder normalizes away, while the reverse silently changes an
-array's decoded length. So "always framed" is false for a **field** and still
-true for an **element**.
+array's decoded length.
 
-Both closers require a sequence to actually be open: closing one too many is
-`Error::Argument`, writes nothing and changes no state. An end marker with no
-open sequence is `INVALID` on the wire (§5.2), so reporting success for it would
-hand back a message this crate's own decoder must reject.
+Both closers require a sequence to actually be open; closing one too many is
+`Error::Argument`, writes nothing and changes no state.
 
 ```rust
 let mut buf = [0u8; 32];
@@ -240,57 +297,48 @@ assert_eq!(os.bytes_used(), 0);             // omitted entirely: zero bytes
 ```
 
 **The bound: `LAZY_SEQ_DEPTH = 8`.** The pending run lives in a fixed array
-inside `OStream` — this port has no heap to grow one. CORELIB_PLAN §6 ("How deep
-the hold-back reaches") lets a **heap-free profile** bound the run and requires
-it to document the bound, because two encoders that disagree about it disagree
-about *bytes*, not about validity:
+inside `OStream`. CORELIB_PLAN §6 lets a **heap-free profile** bound the run,
+provided it documents the bound:
 
 - Up to **8** nested sequences are held back, and an all-default one at any of
   those depths is **omitted** — the canonical §2 encoding.
 - Open a 9th while eight are pending and the encoder **commits the run and frames
-  that sequence eagerly**. An all-default sequence beyond the window therefore
-  keeps its empty `begin`+`end` frame: still well-formed, still decodes to the
-  same value (it is the non-canonical form §2 already requires every decoder to
-  accept and normalize) — just not canonical. Ports that can allocate
-  (`corelib-rs` and the rest) hold back to the full `MAX_DEPTH` and are canonical
-  at every depth.
+  that sequence eagerly**. An all-default sequence beyond the window keeps its
+  empty `begin`+`end` frame: well-formed, decoding to the same value, just not
+  canonical. Ports that can allocate (`corelib-rs` and the rest) hold back to the
+  full `MAX_DEPTH` and are canonical at every depth.
 - `MAX_DEPTH` (255) is unaffected: it still bounds the nesting itself, and
   exceeding it is `Error::Argument`.
 
-The window is the price in RAM, which is why it is 8 and not 255: on Cortex-M0
-the pending array grows `OStream` from **16 B to 52 B** (`4 * LAZY_SEQ_DEPTH`
-plus the count) — see the RAM table under [Footprint](#footprint), where the
-`sequence`-enabled rows carry exactly that cost. A schema nesting deeper than the
-window still encodes **correctly**, it only keeps the empty frames beyond it.
+The window costs RAM: on Cortex-M0 the pending array grows `OStream` from
+**16 B to 52 B** (`4 * LAZY_SEQ_DEPTH` plus the count) — see the RAM table under
+[Footprint](#footprint), where the `sequence`-enabled rows carry exactly that
+cost.
 
 The value is **not configurable**: `sofab::LAZY_SEQ_DEPTH` is a public constant to
 read and test against, but no Cargo feature, `cfg` or environment variable
-changes it — every build of this crate holds back 8. A firmware that nests only
-two or three levels deep and wants those RAM bytes back has to edit the constant
-in a patched or vendored copy of the crate; that changes which bytes the encoder
-emits, so the window tests in
+changes it. Editing it in a patched or vendored copy changes which bytes the
+encoder emits, so the window tests in
 [`tests/ostream_tests.rs`](tests/ostream_tests.rs) have to be re-stated with it.
 
 **If the buffer runs out while a run is committing.** Held-back ids are encoder
 state, not buffer content, so no flush can split a run *before* it commits. One
-can land in the middle of one, and with a `Flush` sink that is uneventful — the
-bytes go to the sink and the run carries on. Without a sink the same point is
-`Error::BufferFull`, possibly *between* two headers of a single run, and the
-encoder then **keeps the ids it did not emit**, still as the innermost pending
-suffix. Install a bigger buffer with `buffer_set` and retry the failed write: it
-resumes at the cut. That recovery reaches exactly as far as the rest of this
-encoder does and no further — no writer here is atomic on failure, so a cut that
-falls *inside* a multi-byte header (id > 15), or inside any other varint, still
-leaves a partial message behind, exactly as it does for a scalar field. What is
-guaranteed is the structural half: a run never silently drops a `SEQUENCE_START`
-whose `SEQUENCE_END` still gets written.
+can land in the middle of one; with a `Flush` sink the bytes go to the sink and
+the run carries on. Without a sink the same point is `Error::BufferFull`,
+possibly *between* two headers of a single run, and the encoder then **keeps the
+ids it did not emit**, still as the innermost pending suffix. Install a bigger
+buffer with `buffer_set` and retry the failed write: it resumes at the cut. No
+writer here is atomic on failure, so a cut that falls *inside* a multi-byte
+header (id > 15), or inside any other varint, still leaves a partial message
+behind. What is guaranteed is the structural half: a run never silently drops a
+`SEQUENCE_START` whose `SEQUENCE_END` still gets written.
 
 ### Code generator
 
 The common real use is a schema compiled by **`sofabgen`** into typed structs
 whose `encode` / `decode` methods drive this runtime into fixed caller storage.
-This crate ships the *runtime*; generated code calls it exactly like this
-hand-written stand-in:
+This crate ships the *runtime*; generated code calls it like this hand-written
+stand-in:
 
 ```rust
 use sofab::{OStream, IStream, Visitor, Id, Signed, Result};
@@ -324,16 +372,15 @@ let got = Point::decode(&buf[..n]).unwrap();   // got.x == 3, got.y == 4
 
 ## Memory handling
 
-The defining property of the `no_std` port: **all storage is caller-supplied and
-nothing is ever boxed — no allocation in either direction.**
+All storage is caller-supplied and nothing is ever boxed: **no allocation in
+either direction.**
 
 - **Encode ([`OStream`])** — writes into the caller's `&mut [u8]`, borrowed for
   the stream's lifetime; each `write_*` copies into it immediately. Buffer full
   → `Error::BufferFull`, or drained via the [`Flush`] sink.
 - **`MIN_OUTPUT_BUFFER` = 1** — the smallest buffer this port accepts **for
-  streaming**, i.e. one installed *together with* a `Flush` sink. Every byte goes
-  through a single-byte push primitive that flushes and resumes on its own, so no
-  atomic unit has to land contiguously: a message of any size streams through a
+  streaming**, i.e. one installed *together with* a `Flush` sink. No atomic unit
+  has to land contiguously here, so a message of any size streams through a
   one-byte window and produces bytes identical to the one-shot encoding. The
   constant binds `OStream::with_flush` and `OStream::buffer_set`, which require
   `buffer.len() - offset >= MIN_OUTPUT_BUFFER` and return `Error::Argument`
@@ -346,21 +393,18 @@ nothing is ever boxed — no allocation in either direction.**
   encodes into a two-byte buffer).
 - **A mid-stream `buffer_set` drains the outgoing buffer first — when a sink is
   installed.** The swap consumes the buffer being replaced, so the bytes written
-  into it since the last flush are handed to the sink at the swap, before the new
-  buffer takes over: swapping buffers between fields emits exactly the one-shot
-  bytes, and a taking sink that installs a replacement never loses the tail of
-  the unit it took. The new installation's `offset` is where writing resumes, so
-  each unit re-arms its own framing-header room. **With no sink nothing is
-  drained** — there is nowhere to drain to, the caller still owns the buffer it
-  handed over and concatenates the pieces itself, which is what the documented
-  `Error::BufferFull` recovery (install a bigger buffer, retry the failed write)
-  relies on.
+  into it since the last flush reach the sink at the swap, before the new buffer
+  takes over: swapping buffers between fields emits exactly the one-shot bytes.
+  The new installation's `offset` is where writing resumes, so each unit re-arms
+  its own framing-header room. **With no sink nothing is drained** — the caller
+  still owns the buffer it handed over and concatenates the pieces itself, which
+  is what the `Error::BufferFull` recovery (install a bigger buffer, retry the
+  failed write) relies on.
 - **A returning callback says whether it copied or took the buffer.** Returning
   **without** installing anything means the sink copied: the active buffer stays
   active and the encoder resumes writing into it at offset `0`. A sink that
   **takes** the buffer — hands it to a transport, queues it for an asynchronous
-  write, gives it to DMA — must install a replacement before it returns, or the
-  encoder would keep writing into storage the transport now owns. Inside a
+  write, gives it to DMA — must install a replacement before it returns. Inside a
   callback the encoder is mutably borrowed by the call that invoked the sink, so
   `buffer_set` is out of reach; the sink installs through a **`Handover`**
   channel instead, which the caller creates, passes to `OStream::with_handover`
@@ -386,124 +430,35 @@ nothing is ever boxed — no allocation in either direction.**
   }
   ```
 
-  `Handover::install` is checked exactly like every other installation — offset
-  in range, `buffer.len() - offset >= MIN_OUTPUT_BUFFER`, `Error::Argument`
-  **where the buffer is handed over** — and the installed buffer's `offset` is
-  where writing resumes, so each flushed unit re-arms its own framing-header
-  room. `Handover::taken()` hands back the buffer the encoder stopped writing
-  into, which is what lets a pool recycle it: until the encoder gives up that
-  borrow, nobody else can touch the storage. The channel holds one retired
-  buffer, so reclaim it in every callback.
+  `Handover::install` is checked like every other installation — offset in range,
+  `buffer.len() - offset >= MIN_OUTPUT_BUFFER`, `Error::Argument` **where the
+  buffer is handed over** — and the installed buffer's `offset` is where writing
+  resumes. `Handover::taken()` hands back the buffer the encoder stopped writing
+  into, so a pool can recycle it; the channel holds one retired buffer, so
+  reclaim it in every callback.
 
-  Nothing about this costs anything on the streams that do not use it:
   `OStream::with_flush` (and the sink-less `OStream::new`) keeps a zero-sized
-  `NoHandoff`, so `size_of::<OStream>()` and the whole flash footprint are
-  unchanged — the take-and-replace path compiles away.
+  `NoHandoff`, so `size_of::<OStream>()` and the flash footprint are unchanged on
+  streams that never take a buffer.
 - **No pass-through.** This port never hands a sink memory that is not the
   installed output buffer; a `string`/`blob` run is copied through the buffer
   like anything else, so a sink may assume every slice it receives points into
-  the buffer it installed. Pass-through and the buffer-set operation are
-  mutually exclusive (§5.1), and since this port never passes through, a sink
-  may always install.
+  the buffer it installed. Pass-through and the buffer-set operation are mutually
+  exclusive (§5.1), so on this port a sink may always install.
 - **Decode ([`IStream`] + [`Visitor`])** — reads the caller's `&[u8]`, borrowed
   only for the `feed` call; values are delivered **by value** the instant they
-  decode (so destinations need not be address-stable). A string/blob
-  `chunk: &[u8]` **borrows the bytes you fed** and is valid only for that
-  callback — copy out anything you must keep. `PayloadAcc<N>` does exactly that
-  for a payload torn across chunks: `N` bytes of caller storage, no allocator,
-  the whole payload returned on the chunk that completes it — and returned
-  *borrowed*, without a copy, whenever it arrived contiguously. Your `Visitor`
-  decides where data lands and how to handle overflow. State lives in the fixed `IStream` struct
-  (one 8-byte fp accumulator), never allocating.
+  decode. A string/blob `chunk: &[u8]` **borrows the bytes you fed** and is valid
+  only for that callback — copy out anything you must keep. `PayloadAcc<N>` does
+  that for a payload torn across chunks: `N` bytes of caller storage, no
+  allocator, the whole payload returned on the chunk that completes it, and
+  returned *borrowed* whenever it arrived contiguously. Your `Visitor` decides
+  where data lands and how to handle overflow. State lives in the fixed
+  `IStream` struct (one 8-byte fp accumulator), never allocating.
 
 | | Encoder ([`OStream`]) | Decoder ([`IStream`] + [`Visitor`]) |
 |---|---|---|
 | Buffer | caller's `&mut [u8]`, borrowed for the stream's lifetime | caller's `&[u8]`, borrowed only for the `feed` call |
 | Allocation | none, ever | none, ever (state in the fixed `IStream` struct) |
-
-## Feature flags
-
-Every capability is **on by default**. The features positively *enable* wire
-types; turn them **off** (`default-features = false`, then re-enable what you
-need) to shrink the binary on tiny targets.
-
-> **A disabled feature removes the wire construct, not just the storage.** This
-> is a decode-side contract, and the sharp edge of these flags — read it before
-> turning one off.
->
-> - **The construct becomes unparseable.** The decoder does not keep a parser
->   for a wire type it can never deliver; that parser is most of what the flag
->   saves. A message carrying the construct is therefore **`INVALID`**
->   ([`Error::InvalidMsg`]) — not "the field is ignored", not "the field is
->   skipped". The build implements a *subset* of the wire format.
-> - **Interop narrows to peers that never send it — in any field.** Not "in no
->   field you care about": an id your schema does not know still has to be
->   parsed to be stepped over, so a peer that adds an unrelated `array` field
->   invalidates the whole message for an `array`-less build. Forward
->   compatibility with a growing schema needs the feature left **on**.
-> - **Fields before the rejection have already been delivered.** The decoder is
->   streaming: it rejects *at* the offending construct, and everything ahead of
->   it in the message already reached your [`Visitor`]. Those callbacks fired on
->   a message that turns out to be invalid, so the **outcome is the only truth**
->   — on `Err(Error::InvalidMsg)` an application must discard what it collected,
->   not keep a half-message. `INVALID` is also terminal: the decoder stays
->   rejecting until a fresh [`IStream::new`].
->
-> None of this applies to `value64`, which narrows the value *type* rather than
-> removing a construct; see its own note below.
-
-[`Error::InvalidMsg`]: https://sofa-buffers.github.io/corelib-rs-no-std/sofab/enum.Error.html
-[`IStream::new`]: https://sofa-buffers.github.io/corelib-rs-no-std/sofab/struct.IStream.html#method.new
-
-| Feature | Default | Enables |
-|---------|:------:|---------|
-| `fixlen` | ✅ | fp32, fp64, string, blob (`FIXLEN` / `FIXLENARRAY`) |
-| `array` | ✅ | array fields (`VARINTARRAY_*`, `FIXLENARRAY`) |
-| `sequence` | ✅ | nested sequences (`SEQUENCE_START` / `END`) |
-| `fp64` | ✅ | 64-bit floats (implies `fixlen`) |
-| `value64` | ✅ | 64-bit scalar value type (`u64`/`i64`); disable for 32-bit (`u32`/`i32`) |
-
-```toml
-# Smallest build: integers only, 32-bit values. The crate is still `sofab`.
-sofa-buffers-corelib-no-std = { version = "0.1", default-features = false }
-```
-
-
-> **`value64` — change only if you know what you are doing.**
-> It shrinks 64-bit varint math (smaller/faster on 32-bit MCUs) but has wire-
-> and API-level side effects:
-> - **Wire compatibility:** the format is width-agnostic, so messages whose values
->   all fit in 32 bits stay byte-identical and interoperable. A value beyond the
->   32-bit range from a 64-bit peer is **rejected** as malformed (`Error::InvalidMsg`) —
->   never silently truncated.
-> - **ABI:** the value types appear in public signatures, so 32-bit and 64-bit
->   builds are **not** ABI-compatible — don't mix them.
-> - **Field ids:** the effective field-id range shrinks, since the field header is a
->   varint of `(id << 3) | type`.
-> - **Conformance:** the shipped test vectors include 64-bit values and won't
->   decode in this mode.
-
-(Array element widths are compile-time type parameters, so an invalid element
-size is unrepresentable.)
-
-### Verifying the build configuration
-
-Because the wire types are compile-time switches, assert the ones your
-application depends on with the [`require!`] macro — a missing capability fails
-the **build**, not a device in the field:
-
-```rust
-// Compile error unless this `sofab` was built with fp64 + array support and 64-bit values.
-sofab::require!(fp64, array, value64);
-```
-
-Accepted capabilities: `fixlen`, `array`, `sequence`, `fp64`, `value32`,
-`value64`. The same information is available as constants in [`sofab::config`]
-(`FIXLEN`, `ARRAY`, `SEQUENCE`, `FP64`, `VALUE_BITS`) for `const` assertions or
-logging.
-
-[`require!`]: https://sofa-buffers.github.io/corelib-rs-no-std/sofab/macro.require.html
-[`sofab::config`]: https://sofa-buffers.github.io/corelib-rs-no-std/sofab/config/index.html
 
 ## Build & test
 
@@ -520,17 +475,10 @@ rustup target add thumbv7em-none-eabihf
 cargo build --lib --all-features --target thumbv7em-none-eabihf
 ```
 
-Integration tests live in `tests/`: `vectors_tests.rs` (replays the shared
-`assets/test_vectors.json`, feature-aware), `ostream_tests.rs`,
-`istream_tests.rs`, `roundtrip_tests.rs`, `api_tests.rs`, `config_tests.rs`,
-`utf8_tests.rs`, `utf8_chunk_offset_tests.rs`, `fixlen_header_tests.rs`,
-`fixlen_array_header_tests.rs`, `no_elision_tests.rs`, `buffer_full_tests.rs`,
-`visitor_default_tests.rs`, `bench_tools_tests.rs`, `bench_workloads_tests.rs`,
-and `readme_tests.rs`.
-Line coverage is measured by CI on every push with
-`cargo llvm-cov --all-features` and reported by the **Coverage** badge above —
-that badge is the current figure; no number is repeated here, where it would go
-stale. To exercise the whole feature powerset, use
+Integration tests live in `tests/`; `vectors_tests.rs` replays the shared
+`assets/test_vectors.json` and is feature-aware. Line coverage is measured by CI
+on every push with `cargo llvm-cov --all-features` and reported by the
+**Coverage** badge above. To exercise the whole feature powerset, use
 [`cargo-hack`](https://github.com/taiki-e/cargo-hack):
 
 ```bash
@@ -543,9 +491,8 @@ All of the above are the exact steps run in CI
 
 ## Benchmarks
 
-Three tools run the **same** reference workloads on the **same** data, measured
-the same way and printed in the same format as every other `corelib-*` port, so
-the numbers are directly comparable across languages:
+Three tools run the same reference workloads on the same data, printed in the
+same format as every other `corelib-*` port:
 
 ```bash
 cargo bench --bench perf     # per-op cost: HW cycles/op + MB/s
@@ -553,9 +500,8 @@ cargo bench --bench bench    # throughput in MB/s (MB = 1,000,000 bytes)
 bash benches/run_callgrind.sh  # instructions/op (Ir) + message size per workload
 ```
 
-The workloads, values and output grammar are not this repo's to choose: they come
-from the family-wide benchmark specification, and `bench` runs all four of its
-datasets —
+The workloads, values and output grammar come from the family-wide benchmark
+specification, and `bench` runs all four of its datasets —
 
 | dataset | what it is there for |
 |---|---|
@@ -565,44 +511,35 @@ datasets —
 | `composite` | 956 bytes covering what the flat three miss: a 64-element wrapper array, 320 bytes of 1/2/3/4-byte UTF-8, nesting at depth 3, a field equal to its default (so the encoder must *omit* it), and a two-byte field header. Decoded twice — normally, and with every field skipped |
 
 — and `170` / `1,000,005` / `956` are cross-port parity checks: both tools exit
-non-zero if their message sizes miss them, because a port that disagrees about the
-bytes is not running the same workload however good its MB/s looks. What each row
-*does* is asserted in the ordinary test job (`tests/bench_workloads_tests.rs`) and
-re-checked by the bench binary itself before it times anything — a chunked decode
-that failed on its first chunk, or a streaming encode whose sink is never called,
-would otherwise print a very fast number and no error.
+non-zero if their message sizes miss them. What each row *does* is asserted in
+the ordinary test job (`tests/bench_workloads_tests.rs`) and re-checked by the
+bench binary itself before it times anything.
 
 **The `blob 1MB` rows are not a statement about this port's speed** — five of its
 bytes are metadata and a million are payload, so its MB/s is memory bandwidth.
 Read the rows against each other instead: the one-shot/streaming gap is the cost
 of the divisible-run path, and on this port it is the widest thing in the suite
-under `Ir/op` (~0.2 instructions per byte against ~11). That is codegen, not flush
-logic: with no sink the payload loop has a single exit condition and LLVM turns it
-into a `memcpy`, while the streaming loop's per-byte "is the buffer full?" test —
-the same test that lets `MIN_OUTPUT_BUFFER` be **1** here — keeps it
-byte-at-a-time. In MB/s the one-shot row gives most of that back, because it is
-bandwidth-bound while the streaming row works inside a cache-resident 4 KB window.
+under `Ir/op` (~0.2 instructions per byte against ~11), the per-byte "is the
+buffer full?" test that lets `MIN_OUTPUT_BUFFER` be **1** here. In MB/s the
+one-shot row gives most of that back.
 
 The first two tools take a few seconds (a ~1 s CPU-time loop per workload) and
-both run in CI (the `Bench tools` job), so the documented commands stay working.
+both run in CI (the `Bench tools` job).
 [`benches/run_callgrind.sh`](benches/run_callgrind.sh) is the machine-independent
 one: it builds the bench binary, runs each workload once under Callgrind with
 collection toggled on the `run_<workload>` symbol, and prints a table of
 instructions retired per op (`Ir/op`, lower is better) next to the encoded
 message size. It needs `valgrind` on `PATH` and is slow, but its numbers do not
-depend on clock speed or scheduling — they are what the release notes
-quote. Under the hood it uses the `bench` binary's
-single-workload mode: `bench encode_typical` performs exactly one op and prints
-its size. Cargo's own flags (`--bench`, `--nocapture`, …) are ignored when
-looking for a workload name, so `cargo bench` still prints the full table.
+depend on clock speed or scheduling. It uses the `bench` binary's single-workload
+mode: `bench encode_typical` performs exactly one op and prints its size. Cargo's
+own flags (`--bench`, `--nocapture`, …) are ignored when looking for a workload
+name, so `cargo bench` still prints the full table.
 
-**Instruction counts without the script.** Where the script's prerequisites are
-missing (or to profile `perf`'s workloads instead), two environment variables
-make `perf` measurable the same way, and change nothing otherwise:
-`SOFAB_PERF_ONLY` (`encode` / `decode` / `encode_u64` / `decode_u64`) runs a
-single workload, and `SOFAB_PERF_ITERS=N` replaces the adaptive ~1 s loop with
-exactly N iterations. Run at two N and difference the totals — start-up and
-warm-up cancel:
+**Instruction counts without the script.** Two environment variables make `perf`
+measurable the same way, and change nothing otherwise: `SOFAB_PERF_ONLY`
+(`encode` / `decode` / `encode_u64` / `decode_u64`) runs a single workload, and
+`SOFAB_PERF_ITERS=N` replaces the adaptive ~1 s loop with exactly N iterations.
+Run at two N and difference the totals — start-up and warm-up cancel:
 
 ```bash
 cargo bench --bench perf --all-features --no-run   # prints the binary path
@@ -617,7 +554,7 @@ done                       # per-op Ir = (Ir(120000) - Ir(20000)) / 100000
 `tools/footprint.sh` measures the library's **flash** and **RAM** footprint by
 linking a `no_std` staticlib that exercises the full encode + decode API with the
 release profile (`opt-level="z"`, fat LTO, `panic="abort"`) and `--gc-sections`.
-CI runs it on every push:
+CI runs it on every push.
 
 ```bash
 tools/footprint.sh                             # Cortex-M0  (thumbv6m-none-eabi, default)
@@ -637,28 +574,25 @@ are zero and flash equals `.text`:
 | `+ fixlen` (fp32 / str / blob, 64-bit) | 1 131 B | 1 173 B | 1 433 B |
 | all wire types, 32-bit | 1 903 B | 1 905 B | 2 501 B |
 | **MAX** — all wire types, 64-bit (default) | **2 191 B** | **2 109 B** | **2 777 B** |
-| generated-shape visitor (MAX) | 4 217 B | 4 185 B | 5 281 B |
+| generated-shape visitor (MAX) | 4 173 B | 4 117 B | 5 265 B |
 
 The `sequence` rows carry the lazy-framing machinery of MESSAGE_SPEC §2 (the
 hold-back run, [above](#sequence-framing-and-the-hold-back-window)): about 200 B
 of flash on Cortex-M0 over an eager `begin`/`end` pair, plus the pending array's
-RAM in the table below. Roughly 60 B of that is `commit_pending` tracking how
-much of the run reached the buffer so a `BufferFull` in the middle of one keeps
-the ids it did not emit ([above](#sequence-framing-and-the-hold-back-window)) —
-the price of not emitting a `SEQUENCE_END` whose `SEQUENCE_START` was dropped.
+RAM in the table below. Roughly 60 B of that is `commit_pending`, which tracks
+how much of the run reached the buffer so a `BufferFull` in the middle of one
+keeps the ids it did not emit.
 
 The codec spans **≈0.6 KiB** (integer-only, 32-bit) to **≈2.1 KiB** (every wire
 type, 64-bit) of flash on Cortex-M0; disabling `value64` removes ~13% of the code
-by deleting the 64-bit shift helpers and halving every varint operation. The decoder carries no panic paths (all bounds are proven in-bounds),
-so the whole codec links without `core::panicking` — which is what keeps the
-RISC-V builds, lacking Thumb-2's density, close behind Cortex-M.
+by deleting the 64-bit shift helpers and halving every varint operation. The
+decoder carries no panic paths (all bounds are proven in-bounds), so the whole
+codec links without `core::panicking`.
 
 The **generated-shape visitor** row measures the same MAX build against a
 visitor mirroring sofabgen output (location stack, per-`(location, id)`
 dispatch, fixed-array fills, str/blob accumulation) instead of the tiny probe
-sink — the codec-plus-dispatch cost a real firmware actually links. Size
-changes must hold on this row, not just the probe-sink rows: the two can move
-in opposite directions when an inlining boundary shifts.
+sink. Size changes must hold on this row, not just the probe-sink rows.
 
 **RAM.** There is no heap and no static RAM — the only runtime state is the
 caller-provided `IStream` (decoder) and `OStream` (encoder), usually stack
@@ -674,24 +608,21 @@ allocated. Sizes are identical across these 32-bit targets:
 | all wire types, 32-bit | 32 B | 52 B | 84 B |
 | **MAX** — all wire types, 64-bit (default) | 32 B | 52 B | **84 B** |
 
-The decoder state is held at **32 bytes or less** in every configuration on
-purpose, and that is a flash figure as much as a RAM one: at or below that size
-the compiler zero-initializes an `IStream` with inline stores, while a larger one
-links a ~158-byte `__aeabi_memclr8` helper that a lean firmware needs for nothing
-else.
+The decoder state is held at **32 bytes or less** in every configuration, which
+is a flash figure as much as a RAM one: at or below that size the compiler
+zero-initializes an `IStream` with inline stores, while a larger one links a
+~158-byte `__aeabi_memclr8` helper.
 
-The `sequence` rows are where `OStream` grows from 12/16 B to 52 B: that is the
+The `sequence` rows are where `OStream` grows from 12/16 B to 52 B: the
 `LAZY_SEQ_DEPTH`-slot hold-back array
-([above](#sequence-framing-and-the-hold-back-window)) — `4 * 8` bytes of ids plus
-the count. It is the only per-stream cost of omitting all-default sequences, and
-it is fixed at build time — see
-[the bound](#sequence-framing-and-the-hold-back-window) for what a target that
-cannot spare it has to do.
+([above](#sequence-framing-and-the-hold-back-window)), `4 * 8` bytes of ids plus
+the count. It is the only per-stream cost of omitting all-default sequences and
+is fixed at build time.
 
-## Choosing between the two Rust corelibs
+### Choosing between the two Rust corelibs
 
 SofaBuffers ships **two** Rust cores with the same wire format and the same
-encoder/decoder API, tuned for opposite ends of the spectrum:
+encoder/decoder API:
 
 - **`corelib-rs-no-std`** (this crate) — `#![no_std]`, no allocator, fixed
   caller buffers, size-optimized profile. For **microcontrollers and
@@ -713,7 +644,7 @@ encoder/decoder API, tuned for opposite ends of the spectrum:
 | Optimized for | small `.text` + zero heap | raw throughput |
 | Arena result | ~1.4× micropb throughput; ~6.8 KB Cortex-M flash | ~1.5× prost throughput |
 
-Both crates run the **identical** `perf` and `bench` tools. In the multi-language
+Both crates run the identical `perf` and `bench` tools. In the multi-language
 [arena](https://github.com/sofa-buffers/arena) (best-of-5, encode+decode roundtrip
 of the same 434 B message) the size-tuned `no_std` build trails the speed-tuned
 `std` build by roughly 2×:
@@ -722,6 +653,5 @@ of the same 434 B message) the size-tuned `no_std` build trails the speed-tuned
 | --- | ---: | ---: | ---: |
 | typical message — encode + decode roundtrip (434 B) | 158.6 | 341.1 | 2.15× |
 
-That is the deliberate trade-off: pick this crate for embedded and footprint —
-where the `std` crate cannot build at all — and pick `corelib-rs` for servers
-and throughput.
+Pick this crate for embedded and footprint, where the `std` crate cannot build at
+all; pick `corelib-rs` for servers and throughput.
