@@ -41,6 +41,90 @@ The crates.io package is `sofa-buffers-corelib-no-std`; the compiled crate you
 cargo add sofa-buffers-corelib-no-std
 ```
 
+### Feature flags
+
+Every capability is **on by default**. The features positively *enable* wire
+types; turn them **off** (`default-features = false`, then re-enable what you
+need) to shrink the binary on tiny targets.
+
+> **A disabled feature removes the wire construct, not just the storage.** This
+> is a decode-side contract, and the sharp edge of these flags — read it before
+> turning one off.
+>
+> - **The construct becomes unparseable.** The decoder does not keep a parser
+>   for a wire type it can never deliver; that parser is most of what the flag
+>   saves. A message carrying the construct is therefore **`INVALID`**
+>   ([`Error::InvalidMsg`]) — not "the field is ignored", not "the field is
+>   skipped". The build implements a *subset* of the wire format.
+> - **Interop narrows to peers that never send it — in any field.** Not "in no
+>   field you care about": an id your schema does not know still has to be
+>   parsed to be stepped over, so a peer that adds an unrelated `array` field
+>   invalidates the whole message for an `array`-less build. Forward
+>   compatibility with a growing schema needs the feature left **on**.
+> - **Fields before the rejection have already been delivered.** The decoder is
+>   streaming: it rejects *at* the offending construct, and everything ahead of
+>   it in the message already reached your [`Visitor`]. Those callbacks fired on
+>   a message that turns out to be invalid, so the **outcome is the only truth**
+>   — on `Err(Error::InvalidMsg)` an application must discard what it collected,
+>   not keep a half-message. `INVALID` is also terminal: the decoder stays
+>   rejecting until a fresh [`IStream::new`].
+>
+> None of this applies to `value64`, which narrows the value *type* rather than
+> removing a construct; see its own note below.
+
+[`Error::InvalidMsg`]: https://sofa-buffers.github.io/corelib-rs-no-std/sofab/enum.Error.html
+[`IStream::new`]: https://sofa-buffers.github.io/corelib-rs-no-std/sofab/struct.IStream.html#method.new
+
+| Feature | Default | Enables |
+|---------|:------:|---------|
+| `fixlen` | ✅ | fp32, fp64, string, blob (`FIXLEN` / `FIXLENARRAY`) |
+| `array` | ✅ | array fields (`VARINTARRAY_*`, `FIXLENARRAY`) |
+| `sequence` | ✅ | nested sequences (`SEQUENCE_START` / `END`) |
+| `fp64` | ✅ | 64-bit floats (implies `fixlen`) |
+| `value64` | ✅ | 64-bit scalar value type (`u64`/`i64`); disable for 32-bit (`u32`/`i32`) |
+
+```toml
+# Smallest build: integers only, 32-bit values. The crate is still `sofab`.
+sofa-buffers-corelib-no-std = { version = "0.1", default-features = false }
+```
+
+
+> **`value64` — change only if you know what you are doing.**
+> It shrinks 64-bit varint math (smaller/faster on 32-bit MCUs) but has wire-
+> and API-level side effects:
+> - **Wire compatibility:** the format is width-agnostic, so messages whose values
+>   all fit in 32 bits stay byte-identical and interoperable. A value beyond the
+>   32-bit range from a 64-bit peer is **rejected** as malformed (`Error::InvalidMsg`) —
+>   never silently truncated.
+> - **ABI:** the value types appear in public signatures, so 32-bit and 64-bit
+>   builds are **not** ABI-compatible — don't mix them.
+> - **Field ids:** the effective field-id range shrinks, since the field header is a
+>   varint of `(id << 3) | type`.
+> - **Conformance:** the shipped test vectors include 64-bit values and won't
+>   decode in this mode.
+
+(Array element widths are compile-time type parameters, so an invalid element
+size is unrepresentable.)
+
+#### Verifying the build configuration
+
+Because the wire types are compile-time switches, assert the ones your
+application depends on with the [`require!`] macro — a missing capability fails
+the **build**, not a device in the field:
+
+```rust
+// Compile error unless this `sofab` was built with fp64 + array support and 64-bit values.
+sofab::require!(fp64, array, value64);
+```
+
+Accepted capabilities: `fixlen`, `array`, `sequence`, `fp64`, `value32`,
+`value64`. The same information is available as constants in [`sofab::config`]
+(`FIXLEN`, `ARRAY`, `SEQUENCE`, `FP64`, `VALUE_BITS`) for `const` assertions or
+logging.
+
+[`require!`]: https://sofa-buffers.github.io/corelib-rs-no-std/sofab/macro.require.html
+[`sofab::config`]: https://sofa-buffers.github.io/corelib-rs-no-std/sofab/config/index.html
+
 ## Why this design
 
 | Goal | How |
@@ -421,89 +505,6 @@ nothing is ever boxed — no allocation in either direction.**
 | Buffer | caller's `&mut [u8]`, borrowed for the stream's lifetime | caller's `&[u8]`, borrowed only for the `feed` call |
 | Allocation | none, ever | none, ever (state in the fixed `IStream` struct) |
 
-## Feature flags
-
-Every capability is **on by default**. The features positively *enable* wire
-types; turn them **off** (`default-features = false`, then re-enable what you
-need) to shrink the binary on tiny targets.
-
-> **A disabled feature removes the wire construct, not just the storage.** This
-> is a decode-side contract, and the sharp edge of these flags — read it before
-> turning one off.
->
-> - **The construct becomes unparseable.** The decoder does not keep a parser
->   for a wire type it can never deliver; that parser is most of what the flag
->   saves. A message carrying the construct is therefore **`INVALID`**
->   ([`Error::InvalidMsg`]) — not "the field is ignored", not "the field is
->   skipped". The build implements a *subset* of the wire format.
-> - **Interop narrows to peers that never send it — in any field.** Not "in no
->   field you care about": an id your schema does not know still has to be
->   parsed to be stepped over, so a peer that adds an unrelated `array` field
->   invalidates the whole message for an `array`-less build. Forward
->   compatibility with a growing schema needs the feature left **on**.
-> - **Fields before the rejection have already been delivered.** The decoder is
->   streaming: it rejects *at* the offending construct, and everything ahead of
->   it in the message already reached your [`Visitor`]. Those callbacks fired on
->   a message that turns out to be invalid, so the **outcome is the only truth**
->   — on `Err(Error::InvalidMsg)` an application must discard what it collected,
->   not keep a half-message. `INVALID` is also terminal: the decoder stays
->   rejecting until a fresh [`IStream::new`].
->
-> None of this applies to `value64`, which narrows the value *type* rather than
-> removing a construct; see its own note below.
-
-[`Error::InvalidMsg`]: https://sofa-buffers.github.io/corelib-rs-no-std/sofab/enum.Error.html
-[`IStream::new`]: https://sofa-buffers.github.io/corelib-rs-no-std/sofab/struct.IStream.html#method.new
-
-| Feature | Default | Enables |
-|---------|:------:|---------|
-| `fixlen` | ✅ | fp32, fp64, string, blob (`FIXLEN` / `FIXLENARRAY`) |
-| `array` | ✅ | array fields (`VARINTARRAY_*`, `FIXLENARRAY`) |
-| `sequence` | ✅ | nested sequences (`SEQUENCE_START` / `END`) |
-| `fp64` | ✅ | 64-bit floats (implies `fixlen`) |
-| `value64` | ✅ | 64-bit scalar value type (`u64`/`i64`); disable for 32-bit (`u32`/`i32`) |
-
-```toml
-# Smallest build: integers only, 32-bit values. The crate is still `sofab`.
-sofa-buffers-corelib-no-std = { version = "0.1", default-features = false }
-```
-
-
-> **`value64` — change only if you know what you are doing.**
-> It shrinks 64-bit varint math (smaller/faster on 32-bit MCUs) but has wire-
-> and API-level side effects:
-> - **Wire compatibility:** the format is width-agnostic, so messages whose values
->   all fit in 32 bits stay byte-identical and interoperable. A value beyond the
->   32-bit range from a 64-bit peer is **rejected** as malformed (`Error::InvalidMsg`) —
->   never silently truncated.
-> - **ABI:** the value types appear in public signatures, so 32-bit and 64-bit
->   builds are **not** ABI-compatible — don't mix them.
-> - **Field ids:** the effective field-id range shrinks, since the field header is a
->   varint of `(id << 3) | type`.
-> - **Conformance:** the shipped test vectors include 64-bit values and won't
->   decode in this mode.
-
-(Array element widths are compile-time type parameters, so an invalid element
-size is unrepresentable.)
-
-### Verifying the build configuration
-
-Because the wire types are compile-time switches, assert the ones your
-application depends on with the [`require!`] macro — a missing capability fails
-the **build**, not a device in the field:
-
-```rust
-// Compile error unless this `sofab` was built with fp64 + array support and 64-bit values.
-sofab::require!(fp64, array, value64);
-```
-
-Accepted capabilities: `fixlen`, `array`, `sequence`, `fp64`, `value32`,
-`value64`. The same information is available as constants in [`sofab::config`]
-(`FIXLEN`, `ARRAY`, `SEQUENCE`, `FP64`, `VALUE_BITS`) for `const` assertions or
-logging.
-
-[`require!`]: https://sofa-buffers.github.io/corelib-rs-no-std/sofab/macro.require.html
-[`sofab::config`]: https://sofa-buffers.github.io/corelib-rs-no-std/sofab/config/index.html
 
 ## Build & test
 
@@ -688,7 +689,7 @@ it is fixed at build time — see
 [the bound](#sequence-framing-and-the-hold-back-window) for what a target that
 cannot spare it has to do.
 
-## Choosing between the two Rust corelibs
+### Choosing between the two Rust corelibs
 
 SofaBuffers ships **two** Rust cores with the same wire format and the same
 encoder/decoder API, tuned for opposite ends of the spectrum:

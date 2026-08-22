@@ -154,3 +154,358 @@ fn benchmarks_section_states_the_parity_sizes() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// README shape and content (CORELIB_PLAN §9)
+// ---------------------------------------------------------------------------
+//
+// §9 fixes one structure for the whole corelib family — "do not change the
+// section ordering and do not invent new top-level sections" — so a reader who
+// knows one port's README navigates this one by position. Nothing inside the
+// library can notice when that shape drifts: an extra chapter, a missing badge
+// or a dead anchor is invisible to every other test here, so these checks read
+// the document.
+//
+// What they enforce:
+//
+//   1. §9.1  the centered header block: logo, `# SofaBuffers`, tagline, org link.
+//   2. §9.2  the badge block opening the library section carries CI, coverage
+//            and Docs badges, in that order.
+//   3. §9    the `## ` sections are exactly the prescribed list, in order.
+//   4. §9.4  no API-documentation section at any heading level.
+//   5. §9.8  Rust has two corelibs, so the comparison between them is the final
+//            *subsection* of `## Benchmarks`, not a chapter of its own.
+//   6. §9.5  the Usage chapter still shows each example the plan lists.
+//   7. §9.6  MIN_OUTPUT_BUFFER is stated *in the memory chapter*.
+//   8. §6.4  the strict-UTF-8 stance — see the test's own note: Rust is a
+//            Unicode-string target, so §6.4 grants it the omission and there is
+//            no knob to require.
+//   9. §6    the two heap-free allowances that make this port's bytes differ
+//            from `corelib-rs` stay documented.
+//  10. §6.1.1 no spelling outside the closed generated-object name set.
+//  11. every in-document link resolves to a heading.
+
+/// The section list §9 prescribes, in order. The first is the only one whose
+/// wording varies per port (`## SofaBuffers <Language> library`). Anything else
+/// at `## ` level is an invented section: demote it to a `###` subsection of
+/// the chapter it belongs to instead of adding a row here.
+const TOP_LEVEL_SECTIONS: [&str; 6] = [
+    "SofaBuffers Rust library (`no_std`)",
+    "Why this design",
+    "Usage",
+    "Memory handling",
+    "Build & test",
+    "Benchmarks",
+];
+
+/// One ATX heading: its level and its text.
+struct Heading {
+    level: usize,
+    text: &'static str,
+    line: usize,
+}
+
+/// README headings, with fenced code blocks blanked out — a `# comment` inside
+/// a ```sh example is not a chapter, and the Build & test snippets are full of
+/// them. Fences are matched after trimming, since an example nested in a list
+/// item is indented.
+fn headings() -> Vec<Heading> {
+    let mut out = Vec::new();
+    let mut fenced = false;
+    for (n, line) in README.lines().enumerate() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") {
+            fenced = !fenced;
+            continue;
+        }
+        if fenced || !trimmed.starts_with('#') || trimmed != line {
+            continue;
+        }
+        let level = line.len() - line.trim_start_matches('#').len();
+        let rest = &line[level..];
+        if level == 0 || level > 6 || !rest.starts_with(' ') {
+            continue;
+        }
+        out.push(Heading {
+            level,
+            text: rest.trim(),
+            line: n + 1,
+        });
+    }
+    assert!(
+        !out.is_empty(),
+        "README.md: no headings found; parser broken"
+    );
+    out
+}
+
+/// Slugify a heading the way GitHub does: lowercase, punctuation dropped,
+/// spaces to hyphens.
+fn github_anchor(title: &str) -> String {
+    title
+        .to_ascii_lowercase()
+        .chars()
+        .filter_map(|c| match c {
+            'a'..='z' | '0'..='9' | '-' | '_' => Some(c),
+            ' ' => Some('-'),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Does `hay` contain `needle` as a whole word (no identifier char either side)?
+fn contains_word(hay: &str, needle: &str) -> bool {
+    let boundary = |c: char| !(c.is_ascii_alphanumeric() || c == '_');
+    let mut from = 0;
+    while let Some(i) = hay[from..].find(needle) {
+        let start = from + i;
+        let end = start + needle.len();
+        let before_ok = hay[..start].chars().next_back().map_or(true, boundary);
+        let after_ok = hay[end..].chars().next().map_or(true, boundary);
+        if before_ok && after_ok {
+            return true;
+        }
+        from = end;
+    }
+    false
+}
+
+/// §9.1: the header block every port opens with, verbatim.
+#[test]
+fn header_block_is_the_generic_one() {
+    for (what, needle) in [
+        (
+            "centered logo",
+            r#"<p align="center"><img src="assets/sofabuffers_logo.png""#,
+        ),
+        ("tagline", "<b>Structured Objects For Anyone</b><br>"),
+        ("organization link", "https://github.com/sofa-buffers"),
+    ] {
+        assert!(README.contains(needle), "README.md: §9.1 {what} missing");
+    }
+    assert!(
+        README.lines().any(|l| l == "# SofaBuffers"),
+        "README.md: §9.1 `# SofaBuffers` title missing"
+    );
+}
+
+/// §9.2: the library section opens with a badge block carrying CI, coverage and
+/// a Docs badge, in that order, ahead of the GitHub link and the summary.
+#[test]
+fn badge_block_carries_ci_coverage_docs_in_order() {
+    let heading = format!("## {}", TOP_LEVEL_SECTIONS[0]);
+    let body = section(&heading);
+    let order: Vec<String> = body
+        .lines()
+        .skip_while(|l| l.trim().is_empty())
+        .take_while(|l| !l.trim().is_empty())
+        .filter_map(|l| {
+            let rest = l.strip_prefix("[![")?;
+            Some(rest[..rest.find(']')?].to_ascii_lowercase())
+        })
+        .collect();
+    assert_eq!(
+        order,
+        ["ci", "coverage", "docs"],
+        "README.md: §9.2 wants the badge block to open the library section with \
+         CI, coverage and Docs badges, in that order; found {order:?}"
+    );
+}
+
+/// §9: the top-level sections are fixed, in both membership and order.
+#[test]
+fn top_level_sections_are_the_prescribed_list() {
+    let got: Vec<&str> = headings()
+        .iter()
+        .filter(|h| h.level == 2)
+        .map(|h| h.text)
+        .collect();
+    assert_eq!(
+        got, TOP_LEVEL_SECTIONS,
+        "README.md: §9 fixes the top-level sections and their order — do not \
+         invent a chapter; demote it to a `###` subsection of the chapter it \
+         belongs to"
+    );
+}
+
+/// §9.4: the Docs badge is the single entry point to the API reference, so an
+/// API-documentation chapter is forbidden at *any* heading level — demoting one
+/// to `###` would not make it allowed.
+#[test]
+fn no_api_documentation_chapter() {
+    for h in headings() {
+        let title = h.text.to_ascii_lowercase();
+        assert!(
+            !matches!(
+                title.as_str(),
+                "api reference" | "api documentation" | "api docs" | "source documentation"
+            ),
+            "README.md:{}: §9.4 forbids an API-documentation chapter ({:?}); \
+             the Docs badge is the only pointer",
+            h.line,
+            h.text
+        );
+    }
+}
+
+/// §9.8: Rust ships two corelibs for two use cases, so the comparison between
+/// them is the *final subsection* of `## Benchmarks`, not a chapter after it.
+#[test]
+fn two_corelib_comparison_is_a_benchmarks_subsection() {
+    let hs = headings();
+    let idx = hs
+        .iter()
+        .position(|h| h.text.starts_with("Choosing between the two"))
+        .expect("README.md: §9.8 wants a subsection comparing the two Rust corelibs");
+    assert_eq!(
+        hs[idx].level, 3,
+        "README.md:{}: §9.8 makes the two-corelib comparison a `###` subsection",
+        hs[idx].line
+    );
+    let owner = hs[..idx]
+        .iter()
+        .rev()
+        .find(|h| h.level == 2)
+        .map(|h| h.text)
+        .unwrap_or("<none>");
+    assert_eq!(
+        owner, "Benchmarks",
+        "README.md: the two-corelib comparison sits under {owner:?}, not under \
+         `## Benchmarks` (§9.8)"
+    );
+}
+
+/// §9.5 lists the examples every port must carry, and they are what a reader
+/// opens Usage for: dropping one drops a use case, not prose. The wording is
+/// the family's; only the code inside each is per-language.
+#[test]
+fn usage_chapter_shows_every_prescribed_example() {
+    let hs = headings();
+    let usage = hs.iter().position(|h| h.text == "Usage").expect("## Usage");
+    let end = hs[usage + 1..]
+        .iter()
+        .position(|h| h.level == 2)
+        .map_or(hs.len(), |i| usage + 1 + i);
+    let subs: Vec<&str> = hs[usage + 1..end]
+        .iter()
+        .filter(|h| h.level == 3)
+        .map(|h| h.text)
+        .collect();
+    for want in [
+        "Serialize",
+        "Serialize stream",
+        "Deserialize",
+        "Deserialize stream",
+        "Code generator",
+    ] {
+        assert!(
+            subs.contains(&want),
+            "README.md: §9.5 wants a `### {want}` example in `## Usage`; it has {subs:?}"
+        );
+    }
+}
+
+/// §9.6 puts `MIN_OUTPUT_BUFFER` in the memory chapter specifically: it is the
+/// number a caller needs before it can size a streaming buffer, and the memory
+/// chapter is where they go to find out who allocates what, so stating it
+/// elsewhere does not reach them.
+#[test]
+fn memory_chapter_states_min_output_buffer() {
+    assert!(
+        section("## Memory handling").contains("MIN_OUTPUT_BUFFER"),
+        "README.md: §9.6 requires `MIN_OUTPUT_BUFFER` in the `## Memory handling` chapter"
+    );
+}
+
+/// §6.4, and which case this port is: Rust's `str`/`String` is a **Unicode
+/// string type**, so §6.4 makes this port always-strict, the `SOFAB_STRICT_UTF8`
+/// option a no-op, and grants such a target the right to omit the knob entirely
+/// — "documented as always-ON". There is therefore no knob to require here, and
+/// the mandatory-knob check byte-container ports run (corelib-go, corelib-cpp)
+/// is deliberately **skipped**. What is checked is the half §6.4 still asks for:
+/// that the always-strict stance is stated, and that it is stated as pinned ON
+/// rather than as a switch this port does not have.
+#[test]
+fn strict_utf8_stance_is_documented_as_always_on() {
+    let text = README.to_ascii_lowercase();
+    assert!(
+        text.contains("utf-8"),
+        "README.md: §6.4 requires the port's UTF-8 string validity to be documented"
+    );
+    if README.contains("SOFAB_STRICT_UTF8") {
+        assert!(
+            text.contains("always strict") || text.contains("pinned on"),
+            "README.md: §6.4 lets a Unicode-string target omit `SOFAB_STRICT_UTF8`, \
+             but naming it obliges the README to document it as always-ON here"
+        );
+    }
+}
+
+/// The two allowances this heap-free profile takes, which are exactly what make
+/// its bytes differ from `corelib-rs`: §6 lets it bound the lazy-sequence
+/// hold-back depth and §5.1 lets it declare its own `MIN_OUTPUT_BUFFER`. Both
+/// are conditional on being *documented*, so the constants must stay named.
+#[test]
+fn heap_free_profile_allowances_stay_documented() {
+    for (constant, clause) in [
+        ("LAZY_SEQ_DEPTH", "§6 (bounded hold-back run)"),
+        ("MIN_OUTPUT_BUFFER", "§5.1 (declared streaming minimum)"),
+    ] {
+        assert!(
+            README.contains(constant),
+            "README.md: `{constant}` is never stated, and {clause} allows this \
+             profile's bytes to differ from `corelib-rs` only while it is documented"
+        );
+    }
+}
+
+/// §6.1.1 closes the generated-object layer to encode / decode / try_decode /
+/// serialize / deserialize / decoder, and lists the spellings a port must not
+/// invent beside them. Teaching one in the docs sends a reader looking for a
+/// surface `sofabgen` does not emit, as effectively as emitting it would.
+#[test]
+fn no_name_outside_the_closed_generated_set() {
+    for bad in [
+        "marshal",
+        "unmarshal",
+        "serialize_to",
+        "to_bytes",
+        "from_bytes",
+        "decode_from",
+        "decode_into",
+    ] {
+        for (n, line) in README.lines().enumerate() {
+            assert!(
+                !contains_word(line, bad),
+                "README.md:{}: `{bad}` is outside the closed generated-object \
+                 name set (§6.1.1):\n  {}",
+                n + 1,
+                line.trim()
+            );
+        }
+    }
+}
+
+/// A heading that moves takes its anchor with it — the cheapest way for a
+/// restructuring to break navigation while breaking nothing a build can see.
+#[test]
+fn every_in_document_link_resolves() {
+    let anchors: Vec<String> = headings().iter().map(|h| github_anchor(h.text)).collect();
+    let mut found = 0;
+    let mut rest = README;
+    while let Some(i) = rest.find("](#") {
+        rest = &rest[i + 3..];
+        let end = rest.find(')').expect("unterminated in-document link");
+        let anchor = &rest[..end];
+        found += 1;
+        assert!(
+            anchors.iter().any(|a| a == anchor),
+            "README.md: link to #{anchor} matches no heading"
+        );
+        rest = &rest[end..];
+    }
+    assert!(
+        found > 0,
+        "README.md: no in-document links found; the scan is broken"
+    );
+}
