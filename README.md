@@ -632,7 +632,7 @@ encoder/decoder API:
 - **[`corelib-rs`](https://github.com/sofa-buffers/corelib-rs)** — the `std`
   port, `opt-level = 3`, allocates freely (owned `String`/`Vec`, one-shot
   `decode()`). For **servers and desktops** wanting maximum throughput and
-  ergonomic ownership; roughly **1.5× prost** per-message throughput.
+  ergonomic ownership; roughly **1.4× prost** per-message throughput.
 
 | | `corelib-rs-no-std` (this crate) | `corelib-rs` (`std`) |
 |---|---|---|
@@ -642,7 +642,7 @@ encoder/decoder API:
 | Decode model | push to a `Visitor`, zero-copy `chunk` views | owning one-shot `decode()` |
 | Release profile | `opt-level = "z"`, LTO, `panic = "abort"` | `opt-level = 3`, LTO |
 | Optimized for | small `.text` + zero heap | raw throughput |
-| Arena result | ~1.4× micropb throughput; ~6.8 KB Cortex-M flash | ~1.5× prost throughput |
+| Arena result | ~1.4× micropb throughput; ~6.8 KB Cortex-M flash | ~1.4× prost throughput |
 
 Both crates run the identical `perf` and `bench` tools. In the multi-language
 [arena](https://github.com/sofa-buffers/arena) (best-of-5, encode+decode roundtrip
