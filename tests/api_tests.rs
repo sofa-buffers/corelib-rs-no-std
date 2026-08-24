@@ -701,3 +701,26 @@ fn a_receiver_limit_rejection_has_its_own_category() {
         )]
     );
 }
+#[test]
+fn a_destination_too_short_is_an_argument_error_not_a_limit_or_a_malformation() {
+    // §6.3's three refusal tiers, from the bottom one: the message is
+    // well-formed and within every bound it declares — what does not fit is the
+    // storage *this caller* offered, which is `InvalidArgument`, "not
+    // `InvalidMessage` … not `LimitExceeded` (there is no configured limit to
+    // raise)". `PayloadAcc<N>` is the port's only such destination.
+    let mut acc = sofab::PayloadAcc::<4>::new();
+    assert_eq!(acc.feed(9, 0, b"nine byte"), Err(Error::Argument));
+    assert_eq!(acc.feed(9, 0, b"nine"), Err(Error::Argument));
+
+    // The same bytes reach the visitor regardless: the refusal is the
+    // destination's, never the decoder's verdict on the message.
+    let mut buf = [0u8; 32];
+    let n = {
+        let mut os = OStream::new(&mut buf);
+        os.write_str(1, "nine byte").unwrap();
+        os.bytes_used()
+    };
+    let mut rec = Recorder::new();
+    IStream::new().feed(&buf[..n], &mut rec).unwrap();
+    assert_eq!(rec.events, [Event::Str(1, b"nine byte".to_vec())]);
+}
