@@ -87,11 +87,13 @@ sofa-buffers-corelib-no-std = { version = "0.1", default-features = false }
 >   never silently truncated.
 > - **ABI:** the value types appear in public signatures, so 32-bit and 64-bit
 >   builds are **not** ABI-compatible.
-> - **Field ids:** the effective field-id range shrinks, since the field header is a
->   varint of `(id << 3) | type` accumulated in the value type. In this mode the
->   largest usable id is **`2^29 − 1`** (`0x1FFF_FFFF`) rather than the 64-bit
->   `ID_MAX`; the encoder **rejects** an id above it with `Error::Argument`, never
->   truncating it onto the wire.
+> - **Field ids:** the field-id range shrinks, since the field header is a varint
+>   of `(id << 3) | type` accumulated in the value type. `sofab::ID_MAX` **is**
+>   that range: it reads **`2^29 − 1`** (`0x1FFF_FFFF`) in this mode rather than
+>   the 64-bit `2^31 − 1`, mirroring the `SOFAB_ID_MAX` redefinition in a
+>   `SOFAB_DISABLE_INT64_SUPPORT` build of the C reference. The encoder
+>   **rejects** an id above it with `Error::Argument`, never truncating it onto
+>   the wire, and the decoder rejects a header carrying one as `InvalidMsg`.
 > - **Conformance:** the shipped test vectors include 64-bit values and won't
 >   decode in this mode.
 

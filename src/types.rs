@@ -10,34 +10,34 @@ pub const API_VERSION: u32 = 1;
 /// Field identifier type. Application-assigned; need not be contiguous.
 pub type Id = u32;
 
-/// Largest valid field id (`INT32_MAX`), matching `SOFAB_ID_MAX` in C.
-pub const ID_MAX: Id = i32::MAX as u32;
-
-/// Largest field id this build's encoder can put on the wire.
+/// Largest valid field id **in this build**.
 ///
-/// The field header is a varint of `(id << 3) | type` accumulated in
-/// [`Unsigned`], so the id is capped not only by the format ceiling [`ID_MAX`]
-/// but by what leaves room for the 3 type bits in the value type:
-/// `Unsigned::MAX >> 3`, intersected with [`ID_MAX`]. On a 64-bit build
-/// (`value64` on, the default) that width bound is far above [`ID_MAX`] and the
-/// format ceiling governs; a 32-bit (`value64` off) build lowers the effective
-/// ceiling to `2³² >> 3 == 2²⁹ − 1`. Mirrors the `SOFAB_ID_MAX` redefinition in
-/// a `SOFAB_DISABLE_INT64_SUPPORT` build of the C reference.
+/// The format ceiling is `INT32_MAX` (documentation §6.2), matching
+/// `SOFAB_ID_MAX` in C. A build whose value type is narrower than 64 bits lowers
+/// it: the field header is a varint of `(id << 3) | type` accumulated in
+/// [`Unsigned`], so the id is capped additionally by what leaves room for the 3
+/// type bits — `Unsigned::MAX >> 3`. On the default 64-bit build that width bound
+/// is far above the format ceiling and the ceiling governs; a 32-bit (`value64`
+/// off) build lowers this constant to `2³² >> 3 == 2²⁹ − 1`. Mirrors the
+/// `SOFAB_ID_MAX` redefinition in a `SOFAB_DISABLE_INT64_SUPPORT` build of the C
+/// reference.
 ///
-/// An id above this must be rejected with [`crate::Error::Argument`], never
-/// truncated onto the wire (documentation §5.1.2, §6.3).
+/// The constant is therefore the id range callers may actually use: an id above
+/// it is rejected by the encoder with [`crate::Error::Argument`], never truncated
+/// onto the wire, and by the decoder with [`crate::Error::InvalidMsg`]
+/// (documentation §5.1.2, §6.2, §6.3).
 // The `as u64` casts are load-bearing on a 32-bit (`value64`-off) build — where
 // `Unsigned` is `u32` and `Unsigned::MAX >> 3` must be widened to compare and
 // carry — but redundant on a 64-bit build where `Unsigned` already is `u64`.
 // Which config sees them as redundant is a compile-time switch, so allow the
 // lint here rather than fork the constant per feature.
 #[allow(clippy::unnecessary_cast)]
-pub(crate) const ID_MAX_ENCODE: Id = {
+pub const ID_MAX: Id = {
     // Compare in u64 so the `value64` width bound (which exceeds u32) does not
-    // wrap when narrowed; the chosen minimum is <= ID_MAX <= u32::MAX, so the
+    // wrap when narrowed; the chosen minimum is <= INT32_MAX <= u32::MAX, so the
     // final cast is lossless.
     let by_width = (Unsigned::MAX >> 3) as u64;
-    let by_format = ID_MAX as u64;
+    let by_format = i32::MAX as u64;
     (if by_width < by_format {
         by_width
     } else {
