@@ -191,10 +191,15 @@ jobs:
       # does not satisfy is fed to the decoder and must be rejected as INVALID,
       # rather than being skipped by the runner. A powerset that only ever
       # exercises what a leg enabled is not coverage.
-      - name: Test every feature combination (config + vector conformance)
+      #
+      # `id_max_tests` is here rather than in `test` because `ID_MAX` is one of
+      # the few constants whose *value* depends on the feature set: a
+      # `value64`-off leg lowers it to `2^29 - 1`. Running it only at the default
+      # width would leave the narrowed ceiling unpinned.
+      - name: Test every feature combination (config + vector conformance + ID_MAX)
         run: |
           cargo hack --feature-powerset test \
-            --test config_tests --test vectors_tests
+            --test config_tests --test vectors_tests --test id_max_tests
 
   coverage:
     name: Coverage
