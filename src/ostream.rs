@@ -586,7 +586,12 @@ impl<'a, F: Flush, H: Handoff<'a>> OStream<'a, F, H> {
     }
 
     fn write_id_type(&mut self, id: Id, wire_type: u8) -> Result<()> {
-        if id > ID_MAX {
+        // `ID_MAX_ENCODE`, not `ID_MAX`: the header is `(id << 3) | type`
+        // accumulated in `Unsigned`, so a `value64`-off build cannot carry an id
+        // whose top three bits fall off the value type. Reject it here rather
+        // than let `<<` silently drop them and report success (documentation
+        // §5.1.2). On a 64-bit build the two ceilings coincide.
+        if id > ID_MAX_ENCODE {
             return Err(Error::Argument);
         }
         // The single choke point every field write passes through, so also where a
@@ -867,7 +872,11 @@ impl<'a, F: Flush, H: Handoff<'a>> OStream<'a, F, H> {
         if self.depth >= MAX_DEPTH {
             return Err(Error::Argument);
         }
-        if id > ID_MAX {
+        // Same width-aware ceiling as `write_id_type`: this id reaches the wire
+        // either through the eager branch below or later via `commit_pending`,
+        // both of which shift it left by 3 into `Unsigned`. Guarding it on the
+        // way in keeps those two `<<` sites truncation-free.
+        if id > ID_MAX_ENCODE {
             return Err(Error::Argument);
         }
         // `get_mut` is the panic-free spelling of `self.npending < LAZY_SEQ_DEPTH`

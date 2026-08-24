@@ -94,6 +94,59 @@ fn over_wide_varint_is_rejected() {
     assert!(is.feed(&bytes, &mut Ignore).is_err());
 }
 
+/// The field header is `(id << 3) | type`, accumulated in the value type. With
+/// `value64` off that type is 32 bits, so any id `>= 2^29` has its top three
+/// bits shifted off the value word. The encoder must **reject** such an id
+/// (documentation §5.1.2 forbids reporting partial output as complete; §6.3
+/// makes an out-of-range id `InvalidArgument`), not truncate it onto the wire
+/// and return `Ok`. Boundary: `2^29 − 1` is the largest id that still fits;
+/// `2^29` is the first that does not.
+#[cfg(not(feature = "value64"))]
+#[test]
+fn encode_id_above_32bit_ceiling_is_rejected() {
+    use sofab::Error;
+    const CEILING: u32 = (1 << 29) - 1; // 0x1FFF_FFFF
+
+    // Largest id that fits: accepted, and it decodes back to the *same* id —
+    // proof the header reached the wire whole rather than being truncated.
+    #[derive(Default)]
+    struct V {
+        ids: Vec<u32>,
+    }
+    impl Visitor for V {
+        fn unsigned(&mut self, id: u32, _v: Unsigned) {
+            self.ids.push(id);
+        }
+    }
+    let mut buf = [0u8; 16];
+    let used = {
+        let mut os = OStream::new(&mut buf);
+        os.write_unsigned(CEILING, 1).unwrap();
+        os.bytes_used()
+    };
+    let mut v = V::default();
+    IStream::new().feed(&buf[..used], &mut v).unwrap();
+    assert_eq!(v.ids, [CEILING]);
+
+    // One past the ceiling: rejected, and nothing is emitted — not a truncated
+    // success that collapses two schema ids onto one on the wire.
+    let mut buf = [0u8; 16];
+    let mut os = OStream::new(&mut buf);
+    assert_eq!(os.write_unsigned(CEILING + 1, 1), Err(Error::Argument));
+    assert_eq!(os.bytes_used(), 0);
+
+    // The lazy sequence opener applies the same width-aware ceiling.
+    #[cfg(feature = "sequence")]
+    {
+        let mut buf = [0u8; 16];
+        let mut os = OStream::new(&mut buf);
+        assert_eq!(
+            os.write_sequence_begin_lazy(CEILING + 1),
+            Err(Error::Argument)
+        );
+    }
+}
+
 #[cfg(feature = "fixlen")]
 #[test]
 fn fixlen_roundtrip() {
