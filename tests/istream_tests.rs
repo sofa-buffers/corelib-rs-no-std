@@ -664,6 +664,75 @@ fn a_fed_chunk_may_be_overwritten_the_moment_feed_returns() {
     }
 }
 
+/// A visitor that materializes payloads through [`PayloadAcc`] — the shape
+/// generated code has on this profile — rather than through the suite's copying
+/// [`Recorder`]. It is the consumer that exercises the accumulator's contiguous
+/// path, which hands back a slice of the *fed buffer* itself.
+#[derive(Default)]
+struct AccVisitor {
+    acc: sofab::PayloadAcc<128>,
+    text: Vec<u8>,
+    blob: Vec<u8>,
+    ints: Vec<(sofab::Id, i64)>,
+}
+
+impl sofab::Visitor for AccVisitor {
+    fn signed(&mut self, id: sofab::Id, value: i64) {
+        self.ints.push((id, value));
+    }
+    fn string(&mut self, _id: sofab::Id, total: usize, offset: usize, chunk: &[u8]) {
+        if let Ok(Some(whole)) = self.acc.feed(total, offset, chunk) {
+            self.text = whole.to_vec();
+        }
+    }
+    fn blob(&mut self, _id: sofab::Id, total: usize, offset: usize, chunk: &[u8]) {
+        if let Ok(Some(whole)) = self.acc.feed(total, offset, chunk) {
+            self.blob = whole.to_vec();
+        }
+    }
+}
+
+#[test]
+fn the_whole_message_fed_in_one_call_survives_the_buffer_being_scrubbed() {
+    // §7.2 item 4, last bullet: "run `decode(buffer)`, scrub the whole buffer,
+    // and assert the decoded message is unchanged. The one-shot path has no view
+    // exemption (§6.7.1), and this is the test that proves it".
+    //
+    // This crate ships **no one-shot entry point** — `src/lib.rs` exports
+    // `IStream`, `OStream` and `PayloadAcc`, and there is no `decode(buffer)` —
+    // so the equivalent is the whole message in a single `feed`. That is the
+    // case the scrub test above cannot reach: it feeds at most 16 bytes of a
+    // ~130-byte message, so no call there ever carries a whole payload, and the
+    // contiguous delivery path is never the one being scrubbed.
+    //
+    // The visitor materializes through `PayloadAcc`, whose contiguous path
+    // returns a slice of the fed buffer: a value kept past the callback would
+    // read back the fill pattern here.
+    let text = "a string long enough that no chunked test ever delivers it whole";
+    let blob: Vec<u8> = (0..64u16).map(|i| i as u8).collect();
+
+    let mut buf = [0u8; 256];
+    let used = {
+        let mut os = sofab::OStream::new(&mut buf);
+        os.write_signed(1, -7).unwrap();
+        os.write_str(2, text).unwrap();
+        os.write_blob(3, &blob).unwrap();
+        os.write_signed(4, 300).unwrap();
+        os.bytes_used()
+    };
+
+    // The caller's buffer, fed whole and then destroyed.
+    let mut wire = buf[..used].to_vec();
+    let mut v = AccVisitor::default();
+    IStream::new().feed(&wire, &mut v).unwrap();
+    wire.fill(0xAA);
+    drop(wire);
+
+    assert_eq!(v.ints, [(1, -7), (4, 300)]);
+    assert_eq!(v.text, text.as_bytes());
+    assert_eq!(v.blob, blob);
+}
+
 // --- §5.2: INVALID is terminal ----------------------------------------------
 //
 // The decode-outcome table's last column says it for `INVALID`: "can more bytes

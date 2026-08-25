@@ -13,8 +13,11 @@
 //! nothing, links no allocator, and can sit in a `static`, in a decoder struct
 //! or on the stack. That is the one substantive difference from the `std` twin
 //! ([`corelib-rs`]'s `PayloadAcc`, which grows a `Vec`): storage here is finite,
-//! so "the announced payload does not fit" is a real outcome and is reported as
-//! [`Error::BufferFull`] rather than folded into "not complete yet".
+//! so "the announced payload does not fit" is a real outcome. It is reported as
+//! [`Error::Argument`] rather than folded into "not complete yet" — the message
+//! is well-formed and within every bound it declares, and what does not fit is
+//! the destination *this caller* offered, which is the third of CORELIB_PLAN
+//! §6.3's three refusal tiers (§6.6.3).
 //!
 //! Like the rest of the crate it is written **panic-free**: the copy goes
 //! through `get`/`get_mut` and `zip` rather than range indexing and
@@ -55,9 +58,10 @@ use crate::error::{Error, Result};
 ///
 /// The whole-payload case costs nothing: a chunk that already holds the field is
 /// returned **borrowed from the input buffer**, with no copy into the
-/// accumulator at all — and, because that path never touches the buffer, it
-/// serves a payload far larger than `N`. A message decoded from one contiguous
-/// slice takes it for every field.
+/// accumulator at all. A message decoded from one contiguous slice takes that
+/// path for every field. It is a shortcut, not a second capacity rule: a payload
+/// larger than `N` is refused on it exactly as it is when split, so the verdict
+/// does not depend on where a transport put the chunk boundaries.
 ///
 /// One accumulator serves a whole message: a payload always starts at
 /// `offset == 0`, which is where the previous one is dropped, so the buffer is
@@ -79,8 +83,8 @@ use crate::error::{Error, Result};
 ///   judgement — generated code latches that on [`crate::Visitor::fixlen_begin`]
 ///   or on the first chunk, before a byte is ever fed here, because an
 ///   over-length field is `INVALID` (MESSAGE_SPEC §7.1) whereas a payload too
-///   large for *this* buffer is [`Error::BufferFull`], the same verdict a
-///   fixed-capacity destination field yields when it overflows.
+///   large for *this* buffer is [`Error::Argument`] — a well-formed message
+///   meeting a destination this caller sized too small (CORELIB_PLAN §6.3).
 /// * **It does not act on an announced `total`.** `total` is decoded input: a
 ///   hostile message announces a gigabyte and then sends three bytes. Nothing
 ///   is reserved, cleared or moved on the strength of that number — only the
@@ -139,14 +143,15 @@ impl<const N: usize> PayloadAcc<N> {
     ///   It borrows either from `chunk` (whole-payload case, no copy) or from
     ///   the accumulator; either way it is valid until the next call.
     /// * `Ok(None)` — bytes are still outstanding; feed the next chunk.
-    /// * `Err(Error::BufferFull)` — the payload is split *and* longer than the
-    ///   `N` bytes this accumulator holds, so it can never be assembled here.
-    ///   Reported on the chunk that reveals it, before a byte is copied, and
-    ///   again for every further chunk of the same payload — never as a silent
-    ///   `Ok(None)` that would look like "still waiting" forever, and never as a
-    ///   truncated value. The same payload arriving *contiguously* is returned
-    ///   fine: the fast path hands back the caller's own bytes and needs no
-    ///   storage at all.
+    /// * `Err(Error::Argument)` — the payload is longer than the `N` bytes this
+    ///   accumulator holds, so it can never be delivered here. Reported on the
+    ///   first chunk that announces it, before a byte is copied, and again for
+    ///   every further chunk of the same payload — never as a silent `Ok(None)`
+    ///   that would look like "still waiting" forever, and never as a truncated
+    ///   value. **The chunking does not change it:** a payload that does not fit
+    ///   is refused whether it arrives whole or in pieces, so a consumer that
+    ///   uses `N` as its bound reaches one verdict per payload rather than one
+    ///   per transport.
     ///
     /// `offset` is read for two purposes. `offset == 0` marks the start of a
     /// payload and drops whatever the accumulator still held — that is what
@@ -178,10 +183,10 @@ impl<const N: usize> PayloadAcc<N> {
     /// assert_eq!(acc.feed(2, 0, b"o"), Ok(None));
     /// assert_eq!(acc.feed(2, 1, b"k"), Ok(Some(&b"ok"[..])));
     ///
-    /// // Split, and longer than the eight bytes of storage: refused rather
-    /// // than truncated. The same payload arriving whole is fine.
-    /// assert_eq!(acc.feed(9, 0, b"too"), Err(Error::BufferFull));
-    /// assert_eq!(acc.feed(9, 0, b"nine byte"), Ok(Some(&b"nine byte"[..])));
+    /// // Longer than the eight bytes of storage: refused rather than
+    /// // truncated — and refused identically whole or split.
+    /// assert_eq!(acc.feed(9, 0, b"too"), Err(Error::Argument));
+    /// assert_eq!(acc.feed(9, 0, b"nine byte"), Err(Error::Argument));
     /// ```
     pub fn feed<'a>(
         &'a mut self,
@@ -190,28 +195,33 @@ impl<const N: usize> PayloadAcc<N> {
         chunk: &'a [u8],
     ) -> Result<Option<&'a [u8]>> {
         if offset == 0 {
+            // A payload always starts here: drop whatever the accumulator still
+            // held, before any verdict on this one, so a field abandoned half
+            // way cannot contaminate the next.
             self.len = 0;
             self.complete = false;
-            if let Some(whole) = chunk.get(..total) {
-                // The whole field is here. Hand back the input slice: building
-                // the value from it directly is what saves the copy, and it is
-                // the common case — a message fed as one slice never splits a
-                // payload at all. It is also the only path that works for a
-                // payload larger than `N`, so the check below deliberately sits
-                // after it rather than before.
-                self.complete = true;
-                return Ok(Some(whole));
-            }
         } else if self.complete {
             return Ok(None);
         }
         if total > N {
-            // Announced longer than this buffer, and it is not arriving in one
-            // piece: say so now, on the first chunk, rather than accumulate `N`
-            // bytes and then have to admit the field cannot be finished. Ahead
-            // of the continuity test below, so every chunk of such a payload
-            // gets the same answer instead of the first one alone.
-            return Err(Error::BufferFull);
+            // Announced longer than the storage this caller offered. Refused
+            // here — ahead of both the contiguous shortcut and the continuity
+            // test — so the answer is the **same however the transport tore the
+            // field up**: a payload this destination cannot hold is refused
+            // whether it arrives whole or in pieces, and every chunk of it gets
+            // that same answer rather than the first one alone. Nothing is
+            // copied first.
+            return Err(Error::Argument);
+        }
+        if offset == 0 {
+            if let Some(whole) = chunk.get(..total) {
+                // The whole field is here, and it fits. Hand back the input
+                // slice: building the value from it directly is what saves the
+                // copy, and it is the common case — a message fed as one slice
+                // never splits a payload at all.
+                self.complete = true;
+                return Ok(Some(whole));
+            }
         }
         if offset != self.len {
             // Not the next piece of what this accumulator holds — a payload it
@@ -273,8 +283,9 @@ impl<const N: usize> PayloadAcc<N> {
         self.len
     }
 
-    /// Largest payload this accumulator can reassemble from more than one
-    /// chunk, i.e. `N`. A contiguous payload is not bound by it.
+    /// Largest payload this accumulator can deliver, i.e. `N`. It bounds every
+    /// payload, contiguous or split alike: a longer one is
+    /// [`Error::Argument`], never a truncated value.
     #[inline]
     pub const fn capacity(&self) -> usize {
         N

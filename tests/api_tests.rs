@@ -660,3 +660,67 @@ fn config_constants_reflect_features() {
 // A satisfied `require!` must compile to nothing. (An unsatisfied one is a
 // compile error, exercised in the macro's `compile_fail` doctest.)
 sofab::require!(fixlen, array, sequence, fp64, value64);
+
+// --- the error categories (CORELIB_PLAN §6.3) -------------------------------
+
+#[test]
+fn a_receiver_limit_rejection_has_its_own_category() {
+    // §6.3: a configured receiver cap (§6.2.1) is a **policy** rejection on
+    // well-formed bytes, and an implementation "MUST keep the two
+    // distinguishable to the caller … Either way it MUST NOT be reported as
+    // `InvalidMessage`". The corelib enforces no limit itself — the generated
+    // visitor holds the numbers — so what this port owes is the category, under
+    // the family's name, distinct from every other outcome.
+    let limit = Error::LimitExceeded;
+    assert_ne!(limit, Error::InvalidMsg, "policy is not malformation");
+    assert_ne!(limit, Error::Incomplete, "policy is not truncation");
+    assert_ne!(limit, Error::Argument, "policy is not a caller mistake");
+    assert_ne!(limit, Error::BufferFull);
+
+    // It travels the ordinary `Result` channel, so a generated decoder can hand
+    // it straight to its own caller.
+    let out: sofab::Result<()> = Err(Error::LimitExceeded);
+    assert!(matches!(out, Err(Error::LimitExceeded)));
+
+    // And it is genuinely never raised by the codec: the decoder has no limit
+    // to exceed, so a long payload decodes.
+    let mut buf = [0u8; 64];
+    let n = {
+        let mut os = OStream::new(&mut buf);
+        os.write_str(1, "a payload no corelib-side limit bounds")
+            .unwrap();
+        os.bytes_used()
+    };
+    let mut rec = Recorder::new();
+    IStream::new().feed(&buf[..n], &mut rec).unwrap();
+    assert_eq!(
+        rec.events,
+        [Event::Str(
+            1,
+            b"a payload no corelib-side limit bounds".to_vec()
+        )]
+    );
+}
+#[test]
+fn a_destination_too_short_is_an_argument_error_not_a_limit_or_a_malformation() {
+    // §6.3's three refusal tiers, from the bottom one: the message is
+    // well-formed and within every bound it declares — what does not fit is the
+    // storage *this caller* offered, which is `InvalidArgument`, "not
+    // `InvalidMessage` … not `LimitExceeded` (there is no configured limit to
+    // raise)". `PayloadAcc<N>` is the port's only such destination.
+    let mut acc = sofab::PayloadAcc::<4>::new();
+    assert_eq!(acc.feed(9, 0, b"nine byte"), Err(Error::Argument));
+    assert_eq!(acc.feed(9, 0, b"nine"), Err(Error::Argument));
+
+    // The same bytes reach the visitor regardless: the refusal is the
+    // destination's, never the decoder's verdict on the message.
+    let mut buf = [0u8; 32];
+    let n = {
+        let mut os = OStream::new(&mut buf);
+        os.write_str(1, "nine byte").unwrap();
+        os.bytes_used()
+    };
+    let mut rec = Recorder::new();
+    IStream::new().feed(&buf[..n], &mut rec).unwrap();
+    assert_eq!(rec.events, [Event::Str(1, b"nine byte".to_vec())]);
+}

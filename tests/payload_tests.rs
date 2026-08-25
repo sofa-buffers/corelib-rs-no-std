@@ -183,16 +183,33 @@ fn the_accumulator_is_reused_across_payloads() {
 }
 
 #[test]
-fn a_contiguous_payload_may_exceed_the_storage() {
-    // The fast path never touches the buffer, so what it can hand back is bound
-    // by the input, not by `N`. This is why the capacity check sits after it: a
-    // 1 KiB field decoded from one contiguous slice costs an accumulator of
-    // zero bytes.
-    let big = vec![0xA5u8; 1024];
-    let mut acc = PayloadAcc::<0>::new();
-    assert_eq!(acc.feed(big.len(), 0, &big), Ok(Some(&big[..])));
-    assert_eq!(acc.capacity(), 0);
-    assert_eq!(acc.buffered(), 0);
+fn the_capacity_verdict_does_not_depend_on_the_chunking() {
+    // The regression this pins: the capacity test used to sit *after* the
+    // contiguous shortcut, so the same payload against the same destination was
+    // accepted when it arrived whole and refused when a transport split it. A
+    // consumer that uses `N` as its bound then reached two different verdicts
+    // for one message, decided by where the chunk boundaries happened to fall.
+    let mut acc = PayloadAcc::<4>::new();
+    assert_eq!(acc.feed(9, 0, b"nine byte"), Err(Error::Argument), "whole");
+    assert_eq!(acc.feed(9, 0, b"nine"), Err(Error::Argument), "split");
+    assert_eq!(acc.buffered(), 0, "refused before a byte was copied");
+
+    // Exactly `N` is the boundary, and it passes on both routes.
+    let mut acc = PayloadAcc::<4>::new();
+    assert_eq!(acc.feed(4, 0, b"sofa"), Ok(Some(&b"sofa"[..])), "whole");
+    assert_eq!(acc.feed(4, 0, b"so"), Ok(None));
+    assert_eq!(acc.feed(4, 2, b"fa"), Ok(Some(&b"sofa"[..])), "split");
+}
+
+#[test]
+fn a_payload_larger_than_the_storage_is_an_argument_error() {
+    // CORELIB_PLAN §6.3, third tier: the bytes broke no schema bound and no
+    // receiver cap — they simply do not fit the destination *this caller*
+    // offered, which is `InvalidArgument`, not `InvalidMessage` (the message is
+    // well-formed) and not `LimitExceeded` (there is no limit to raise).
+    let mut acc = PayloadAcc::<4>::new();
+    assert_eq!(acc.feed(5, 0, b"sof"), Err(Error::Argument));
+    assert_ne!(acc.feed(5, 0, b"sof"), Err(Error::InvalidMsg));
 }
 
 #[test]
@@ -201,20 +218,16 @@ fn a_split_payload_larger_than_the_storage_is_refused() {
     // would be a silent data loss; returning "not complete yet" forever would
     // hide it as a hang.
     let mut acc = PayloadAcc::<4>::new();
-    assert_eq!(acc.feed(5, 0, b"sof"), Err(Error::BufferFull));
+    assert_eq!(acc.feed(5, 0, b"sof"), Err(Error::Argument));
     assert_eq!(acc.buffered(), 0, "refused before a byte was copied");
     // Every further chunk of the same payload says the same thing, so a caller
     // that reports the first error still gets a consistent answer if it does not.
-    assert_eq!(acc.feed(5, 3, b"ab"), Err(Error::BufferFull));
-    assert_eq!(
-        acc.feed(5, 0, b"sofab"),
-        Ok(Some(&b"sofab"[..])),
-        "contiguous"
-    );
+    assert_eq!(acc.feed(5, 3, b"ab"), Err(Error::Argument));
+    assert_eq!(acc.feed(5, 0, b"sofab"), Err(Error::Argument), "contiguous");
 
     // And the next payload that does fit is unaffected.
     let mut acc = PayloadAcc::<4>::new();
-    assert_eq!(acc.feed(5, 0, b"sof"), Err(Error::BufferFull));
+    assert_eq!(acc.feed(5, 0, b"sof"), Err(Error::Argument));
     assert_eq!(acc.feed(4, 0, b"so"), Ok(None));
     assert_eq!(acc.feed(4, 2, b"fa"), Ok(Some(&b"sofa"[..])));
 }
@@ -226,12 +239,12 @@ fn an_announced_total_costs_only_the_bytes_that_arrive() {
     // three bytes must not move a byte of storage — the announcement is refused
     // against the capacity that exists, not honoured against the one claimed.
     let mut acc = PayloadAcc::<64>::new();
-    assert_eq!(acc.feed(1 << 30, 0, b"three"), Err(Error::BufferFull));
+    assert_eq!(acc.feed(1 << 30, 0, b"three"), Err(Error::Argument));
     assert_eq!(acc.buffered(), 0);
 }
 
 #[test]
-fn capacity_reports_the_reassembly_bound() {
+fn capacity_reports_the_delivery_bound() {
     assert_eq!(PayloadAcc::<0>::new().capacity(), 0);
     assert_eq!(PayloadAcc::<143>::new().capacity(), 143);
 }
