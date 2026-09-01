@@ -34,6 +34,22 @@
 //! to its exact value, in order, and the message is fully consumed
 //! (`COMPLETE`) — an anchor read from the wrong offset still fails.
 //!
+//! **What that costs, and what buys it back.** Because the decoder walks the
+//! declined bytes on its ordinary path, the *receiver-side* half of this
+//! scenario cannot break independently of [`all_shared_vectors_conform`]: a
+//! decoder mutation that corrupts a skipped construct corrupts the read field
+//! next to it too, and both tests go red together. That is stated plainly so
+//! the skip tally is not read as 58 vectors' worth of a code path nothing else
+//! covers. What *is* its own is the chunking: this scenario sweeps **every
+//! two-way split** of each message ([`decode_with_skip_split`]), the only feed
+//! shape that makes the decoder resume a half-read construct and then keep
+//! consuming in the same call. Neither a whole feed nor a byte-at-a-time feed
+//! reaches it, so a mutation of that path — capping the bulk `fixlen` copy
+//! against `fixlen_total` instead of `fixlen_remaining`, say — turns this test
+//! red while [`all_shared_vectors_conform`] stays green. (Hand-written
+//! `istream_tests` cover that path too; the point is only that within *this*
+//! suite the skip scenario is no longer a strict subset of the plain one.)
+//!
 //! ## The skip matrix
 //!
 //! `assets/test_vectors.json` carries 58 vectors with `skip_ids`: the 36-vector
@@ -41,9 +57,9 @@
 //! as `[read P] [skipped S] [unsigned anchor]` chains), the 16-vector `skip`
 //! group (empty payloads, two-byte lengths/counts, `fp64` element length,
 //! three-byte header varints, and the skip at each message/sequence edge), and
-//! six older `sequence`/`composite` vectors. Every one of them runs here whole
-//! *and* one byte at a time, so a resync bug that a single-buffer feed hides
-//! has to show up at a chunk boundary.
+//! six older `sequence`/`composite` vectors. Every one of them runs here whole,
+//! one byte at a time, *and* once per two-way split of the message, so a resync
+//! bug that a single-buffer feed hides has to show up at a chunk boundary.
 //!
 //! ## No fixed size in the loader
 //!
@@ -604,6 +620,38 @@ fn decode_with_skip_chunked(bytes: &[u8], skip: &[Id]) -> Vec<Event> {
     rec.events
 }
 
+/// The same decode fed as exactly **two** chunks, split at byte `at`.
+///
+/// Neither of the other two feeds reaches the decoder's resume-then-continue
+/// path. A whole feed never resumes; a one-byte feed resumes on every byte but
+/// always with a one-byte remainder, so anything that recomputes a *length*
+/// against the new chunk gets the same answer either way. A two-way split is
+/// the only shape where the decoder resumes a construct it was in the middle of
+/// and then has more bytes to consume in the same call — which is precisely
+/// what `IStream::feed`'s bulk `fixlen` path does (`take =
+/// rest.len().min(fixlen_remaining)`, with a non-zero `offset`).
+///
+/// Sweeping *every* split point puts that boundary inside each declined
+/// construct in turn: its header varint, its length word, its element count,
+/// its payload, and the byte after it. This is the assertion that gives the
+/// skip scenario bite of its own in this port — see the "What `skip` means in
+/// *this* port" note at the top of the file for why the receiver-side skip
+/// alone does not.
+fn decode_with_skip_split(bytes: &[u8], at: usize, skip: &[Id]) -> Vec<Event> {
+    let mut rec = SkipRecorder::new(skip);
+    let mut is = IStream::new();
+    match is.feed(&bytes[..at], &mut rec) {
+        Ok(()) | Err(Error::Incomplete) => {}
+        Err(e) => panic!("skip split decode (head of {at}): {e:?}"),
+    }
+    assert_eq!(
+        is.feed(&bytes[at..], &mut rec),
+        Ok(()),
+        "skip split decode (split at {at}) ended mid-message, not COMPLETE",
+    );
+    rec.events
+}
+
 // --- the suite --------------------------------------------------------------
 
 #[test]
@@ -872,6 +920,7 @@ fn skip_ids_vectors_conform() {
     let mut seen = 0;
     let mut gated = 0;
     let mut checks = 0;
+    let mut splits = 0;
     let mut by_group: BTreeMap<&str, usize> = BTreeMap::new();
     let mut constructs: BTreeSet<String> = BTreeSet::new();
 
@@ -922,9 +971,24 @@ fn skip_ids_vectors_conform() {
             "[{name}] skip chunked decode mismatch",
         );
         checks += 1;
+
+        // Every two-way split of the message, so each declined construct is cut
+        // at every byte inside it and the decoder has to resume *and then keep
+        // going* in the same feed. See `decode_with_skip_split`.
+        for at in 1..bytes.len() {
+            assert_eq!(
+                decode_with_skip_split(&bytes, at, &skip_ids),
+                want,
+                "[{name}] skip split decode mismatch (split at {at} of {})",
+                bytes.len(),
+            );
+            checks += 1;
+            splits += 1;
+        }
     }
 
     report("skip", seen, gated, checks);
+    println!("[vectors] skip: {splits} two-way splits swept");
     println!("[vectors] skip: groups {by_group:?}");
     println!(
         "[vectors] skip: declined constructs ({}) {:?}",
@@ -947,6 +1011,13 @@ fn skip_ids_vectors_conform() {
     {
         assert_eq!(gated, 0, "nothing can be gated out with every feature on");
         assert_eq!(seen, 58, "expected all 58 shared skip vectors");
+        // The split sweep is the skip scenario's own assertion (see
+        // `decode_with_skip_split`); pin its size so it cannot shrink to a
+        // token one-split-per-vector without failing here.
+        assert!(
+            splits > 2_000,
+            "expected a full two-way split sweep, got {splits} splits",
+        );
         assert_eq!(by_group.get("skip/matrix"), Some(&36), "skip/matrix group");
         assert_eq!(by_group.get("skip"), Some(&16), "skip group");
         // Not vacuous: every skippable construct is actually declined

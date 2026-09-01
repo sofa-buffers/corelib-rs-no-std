@@ -1,5 +1,10 @@
 name: CI
 
+# Every job here — the `vectors` job included — runs on a push to `main` and on
+# every pull request. The `push` filter is deliberate: on a feature branch the
+# `pull_request` event is what runs CI, so a branch pushed *without* a PR open
+# gets no run at all. Opening the PR (or `workflow_dispatch`) is what triggers
+# it; without the filter every PR branch would run twice for the same commit.
 on:
   push:
     branches: [main]
