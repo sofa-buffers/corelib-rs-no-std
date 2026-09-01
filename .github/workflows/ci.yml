@@ -1,5 +1,10 @@
 name: CI
 
+# Every job here — the `vectors` job included — runs on a push to `main` and on
+# every pull request. The `push` filter is deliberate: on a feature branch the
+# `pull_request` event is what runs CI, so a branch pushed *without* a PR open
+# gets no run at all. Opening the PR (or `workflow_dispatch`) is what triggers
+# it; without the filter every PR branch would run twice for the same commit.
 on:
   push:
     branches: [main]
@@ -133,28 +138,35 @@ jobs:
       # once. The suite is `requires`-aware: each config runs the vectors it can
       # represent and skips the rest. `if: ${{ !cancelled() }}` on the later steps
       # keeps every config running even after one fails (old `fail-fast: false`).
+      #
+      # `-- --nocapture` is what puts the tally in the log. Rust's harness
+      # captures stdout for a passing test, so without it the run says "ok" and
+      # nothing about how much ran — and a config silently running a fraction of
+      # the matrix is precisely the failure this suite has to make visible. Each
+      # step prints, per scenario, how many vectors ran, how many `requires`
+      # gated out, and how many checks that came to.
       - name: Vectors — full, 64-bit
-        run: cargo test --test vectors_tests --all-features --verbose
+        run: cargo test --test vectors_tests --all-features --verbose -- --nocapture
 
       - name: Vectors — integers only, 32-bit
         if: ${{ !cancelled() }}
-        run: cargo test --test vectors_tests --no-default-features --verbose
+        run: cargo test --test vectors_tests --no-default-features --verbose -- --nocapture
 
       - name: Vectors — full wire, 32-bit width
         if: ${{ !cancelled() }}
-        run: cargo test --test vectors_tests --no-default-features --features fixlen,array,sequence,fp64 --verbose
+        run: cargo test --test vectors_tests --no-default-features --features fixlen,array,sequence,fp64 --verbose -- --nocapture
 
       - name: Vectors — integers only, 64-bit
         if: ${{ !cancelled() }}
-        run: cargo test --test vectors_tests --no-default-features --features value64 --verbose
+        run: cargo test --test vectors_tests --no-default-features --features value64 --verbose -- --nocapture
 
       - name: Vectors — scalars + floats only
         if: ${{ !cancelled() }}
-        run: cargo test --test vectors_tests --no-default-features --features fixlen,fp64,value64 --verbose
+        run: cargo test --test vectors_tests --no-default-features --features fixlen,fp64,value64 --verbose -- --nocapture
 
       - name: Vectors — no fixlen
         if: ${{ !cancelled() }}
-        run: cargo test --test vectors_tests --no-default-features --features array,sequence,value64 --verbose
+        run: cargo test --test vectors_tests --no-default-features --features array,sequence,value64 --verbose -- --nocapture
 
   features:
     name: Features
