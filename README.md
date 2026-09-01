@@ -536,8 +536,22 @@ cargo build --lib --all-features --target thumbv7em-none-eabihf
 ```
 
 Integration tests live in `tests/`; `vectors_tests.rs` replays the shared
-`assets/test_vectors.json` and is feature-aware. The file's `sequence_growth`
-block does **not** apply to this port: those cases assert how a container grows
+`assets/test_vectors.json` and is feature-aware. Every vector is encoded (whole
+and through 1/3/7-byte flush buffers) and decoded (whole and one byte at a
+time); the 58 vectors carrying `skip_ids` additionally run the **skip**
+scenario, in which a receiver leaves those ids unread at every nesting level —
+a skipped sequence id drops the whole sub-sequence — and every remaining field
+must still decode to its exact value with the message fully consumed. That
+scenario runs whole *and* byte-at-a-time, so each skipped construct is crossed
+by a chunk boundary. The suite prints, per scenario, how many vectors ran, how
+many `requires` gated out and how many checks that came to; the Rust harness
+captures stdout for a passing test, so add `-- --nocapture` to see it:
+
+```bash
+cargo test --test vectors_tests --all-features -- --nocapture
+```
+
+The file's `sequence_growth` block does **not** apply to this port: those cases assert how a container grows
 as sequence-array elements arrive, and this profile never grows one — it has no
 allocator, and every destination is fixed-capacity caller storage — so the block
 is excluded rather than run. Line coverage is measured by CI on every push with
