@@ -94,7 +94,7 @@ use common::{decode, decode_one_byte_at_a_time, hex_to_bytes, Event};
 use serde_json::Value;
 #[cfg(feature = "array")]
 use sofab::ArrayKind;
-use sofab::{Error, Flush, IStream, Id, OStream, Signed, Unsigned, Visitor};
+use sofab::{Error, Flush, IStream, Id, OStream, Signed, Status, Unsigned, Visitor};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// The shared vectors, embedded from the verbatim asset copy.
@@ -592,7 +592,11 @@ impl Visitor for SkipRecorder<'_> {
 fn decode_with_skip(bytes: &[u8], skip: &[Id]) -> Vec<Event> {
     let mut rec = SkipRecorder::new(skip);
     let mut is = IStream::new();
-    is.feed(bytes, &mut rec).expect("skip decode");
+    assert_eq!(
+        is.feed(bytes, &mut rec),
+        Ok(Status::Complete),
+        "skip decode"
+    );
     rec.events
 }
 
@@ -604,17 +608,17 @@ fn decode_with_skip(bytes: &[u8], skip: &[Id]) -> Vec<Event> {
 fn decode_with_skip_chunked(bytes: &[u8], skip: &[Id]) -> Vec<Event> {
     let mut rec = SkipRecorder::new(skip);
     let mut is = IStream::new();
-    let mut last: Result<(), Error> = Ok(());
+    let mut last: Result<Status, Error> = Ok(Status::Complete);
     for &b in bytes {
         last = is.feed(&[b], &mut rec);
         match last {
-            Ok(()) | Err(Error::Incomplete) => {}
+            Ok(Status::Complete) | Ok(Status::Incomplete) => {}
             Err(e) => panic!("skip chunked decode: {e:?}"),
         }
     }
     assert_eq!(
         last,
-        Ok(()),
+        Ok(Status::Complete),
         "skip chunked decode ended mid-message, not COMPLETE",
     );
     rec.events
@@ -641,12 +645,12 @@ fn decode_with_skip_split(bytes: &[u8], at: usize, skip: &[Id]) -> Vec<Event> {
     let mut rec = SkipRecorder::new(skip);
     let mut is = IStream::new();
     match is.feed(&bytes[..at], &mut rec) {
-        Ok(()) | Err(Error::Incomplete) => {}
+        Ok(Status::Complete) | Ok(Status::Incomplete) => {}
         Err(e) => panic!("skip split decode (head of {at}): {e:?}"),
     }
     assert_eq!(
         is.feed(&bytes[at..], &mut rec),
-        Ok(()),
+        Ok(Status::Complete),
         "skip split decode (split at {at}) ended mid-message, not COMPLETE",
     );
     rec.events
@@ -792,7 +796,7 @@ fn unsupported_vectors_are_rejected_not_ignored() {
 
         let mut rec = common::Recorder::new();
         let mut is = IStream::new();
-        let mut chunked = Ok(());
+        let mut chunked = Ok(Status::Complete);
         for b in &bytes {
             chunked = is.feed(&[*b], &mut rec);
             if chunked == Err(Error::InvalidMsg) {

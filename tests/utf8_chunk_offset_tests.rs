@@ -37,7 +37,7 @@ mod common;
 
 use common::{hex_to_bytes, push_varint};
 use serde_json::Value;
-use sofab::{Error, IStream, Id, Unsigned, Visitor};
+use sofab::{Error, IStream, Id, Status, Unsigned, Visitor};
 
 /// The shared vectors, embedded from the verbatim asset copy.
 const VECTORS_JSON: &str = include_str!("../assets/test_vectors.json");
@@ -152,7 +152,7 @@ impl Visitor for Strict {
 ///
 /// A corelib-level `INVALID` fails the test outright: every frame built here is
 /// structurally well-formed, so the only verdict under test is the consumer's.
-fn feed_pieces(bytes: &[u8], pieces: &[usize]) -> (Strict, Vec<Result<(), Error>>) {
+fn feed_pieces(bytes: &[u8], pieces: &[usize]) -> (Strict, Vec<Result<Status, Error>>) {
     assert_eq!(
         pieces.iter().sum::<usize>(),
         bytes.len(),
@@ -176,7 +176,7 @@ fn feed_pieces(bytes: &[u8], pieces: &[usize]) -> (Strict, Vec<Result<(), Error>
 }
 
 /// One `feed` of the whole message.
-fn feed_whole(bytes: &[u8]) -> (Strict, Result<(), Error>) {
+fn feed_whole(bytes: &[u8]) -> (Strict, Result<Status, Error>) {
     let (sink, outcomes) = feed_pieces(bytes, &[bytes.len()]);
     let last = *outcomes.last().unwrap();
     (sink, last)
@@ -198,8 +198,8 @@ fn a_chunk_offset_is_field_relative_never_buffer_relative() {
     let (first, ra) = feed_whole(&early);
     let (behind_ballast, rb) = feed_whole(&late);
 
-    assert_eq!(ra, Ok(()));
-    assert_eq!(rb, Ok(()));
+    assert_eq!(ra, Ok(Status::Complete));
+    assert_eq!(rb, Ok(Status::Complete));
     assert_eq!(first.calls, [(payload.len(), 0, payload.len())]);
     assert_eq!(
         behind_ballast.calls, first.calls,
@@ -222,7 +222,11 @@ fn an_invalid_sequence_past_the_bytes_fed_so_far_is_rejected() {
     // One shot: the corelib is satisfied (it validates nothing) and the consumer
     // is not.
     let (one_shot, outcome) = feed_whole(&msg);
-    assert_eq!(outcome, Ok(()), "structurally the frame is COMPLETE");
+    assert_eq!(
+        outcome,
+        Ok(Status::Complete),
+        "structurally the frame is COMPLETE"
+    );
     assert_eq!(one_shot.verdict, Some(Err(Error::InvalidMsg)));
 
     // Now with the offending bytes alone in the final chunk. Their field offset
@@ -230,7 +234,7 @@ fn an_invalid_sequence_past_the_bytes_fed_so_far_is_rejected() {
     // shared vector produces, and the one an offset-sensitive validator gets
     // wrong.
     let (split, outcomes) = feed_pieces(&msg, &[msg.len() - 2, 2]);
-    assert_eq!(outcomes.last(), Some(&Ok(())));
+    assert_eq!(outcomes.last(), Some(&Ok(Status::Complete)));
     assert_eq!(
         split.calls.last(),
         Some(&(62, 60, 2)),
@@ -262,7 +266,7 @@ fn the_verdict_survives_every_split_point_and_a_byte_at_a_time_feed() {
     // The pathological split: one byte per feed, so every payload byte arrives
     // in its own callback at its own offset.
     let (sink, outcomes) = feed_pieces(&msg, &vec![1; msg.len()]);
-    assert_eq!(outcomes.last(), Some(&Ok(())));
+    assert_eq!(outcomes.last(), Some(&Ok(Status::Complete)));
     assert_eq!(sink.verdict, Some(Err(Error::InvalidMsg)));
     let expected: Vec<(usize, usize, usize)> =
         (0..payload.len()).map(|i| (payload.len(), i, 1)).collect();
@@ -286,7 +290,11 @@ fn every_shared_invalid_payload_stays_invalid_late_in_the_buffer() {
         msg.extend_from_slice(&string_field(id, &raw));
 
         let (whole, outcome) = feed_whole(&msg);
-        assert_eq!(outcome, Ok(()), "[{name}] the frame itself is well-formed");
+        assert_eq!(
+            outcome,
+            Ok(Status::Complete),
+            "[{name}] the frame itself is well-formed"
+        );
         assert_eq!(
             whole.verdict,
             Some(Err(Error::InvalidMsg)),
@@ -332,10 +340,10 @@ fn a_multibyte_sequence_split_at_a_chunk_boundary_stays_valid() {
     let (sink, outcomes) = feed_pieces(&msg, &[lead + 1, msg.len() - lead - 1]);
     assert_eq!(
         outcomes[0],
-        Err(Error::Incomplete),
+        Ok(Status::Incomplete),
         "a split multi-byte sequence is a well-formed prefix",
     );
-    assert_eq!(outcomes[1], Ok(()));
+    assert_eq!(outcomes[1], Ok(Status::Complete));
     assert_eq!(sink.verdict, Some(Ok(())), "the payload is valid UTF-8");
     assert_eq!(&sink.dst[..text.len()], text.as_bytes());
 }
@@ -353,12 +361,12 @@ fn a_malformed_byte_is_not_reported_before_the_payload_completes() {
 
     let mut sink = Strict::new();
     let mut is = IStream::new();
-    assert_eq!(is.feed(&msg[..head], &mut sink), Err(Error::Incomplete));
+    assert_eq!(is.feed(&msg[..head], &mut sink), Ok(Status::Incomplete));
     assert_eq!(
         sink.verdict, None,
         "no verdict may be reported mid-payload (§6.4)",
     );
-    assert_eq!(is.feed(&msg[head..], &mut sink), Ok(()));
+    assert_eq!(is.feed(&msg[head..], &mut sink), Ok(Status::Complete));
     assert_eq!(sink.verdict, Some(Err(Error::InvalidMsg)));
 }
 
@@ -381,6 +389,6 @@ fn a_string_the_consumer_never_reads_is_never_validated() {
     msg.extend_from_slice(&unsigned_field(2, 7));
 
     let mut sink = OnlyUnsigned::default();
-    assert_eq!(IStream::new().feed(&msg, &mut sink), Ok(()));
+    assert_eq!(IStream::new().feed(&msg, &mut sink), Ok(Status::Complete));
     assert_eq!(sink.seen, [(2, 7)]);
 }

@@ -1,7 +1,15 @@
 //! Error and result types.
 //!
 //! Mirrors the C `sofab_ret_t` status codes (minus `OK`, which Rust models as
-//! `Ok(())`).
+//! the `Ok` arm) and the std port's (`corelib-rs`) [`Error`], so code moves
+//! between the two Rust crates unchanged.
+//!
+//! **`INCOMPLETE` is not here, by design.** CORELIB_PLAN §5.2.1 calls it a
+//! first-class decode *outcome* and not an error, and §6.3 keeps the per-`feed`
+//! result ("the three-valued outcome … *not* a code from this table") apart from
+//! this table. It is therefore carried in the success arm, as
+//! [`crate::Status::Incomplete`]; what remains here is what genuinely failed, so
+//! `?` propagates real errors instead of the commonest normal case.
 
 /// Errors returned by the encoder and decoder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -23,26 +31,11 @@ pub enum Error {
     ///
     /// Malformed **regardless of what follows** — a terminal `INVALID` outcome
     /// (`MESSAGE_SPEC.md` §7). Corresponds to `SOFAB_RET_E_INVALID_MSG`.
+    ///
+    /// This is distinct from [`crate::Status::Incomplete`]: a truncated message
+    /// is *not* malformed, it is merely unfinished — and it is not an error at
+    /// all, so it never reaches this enum.
     InvalidMsg,
-
-    /// The consumed bytes end **inside** a field — an unterminated varint (the
-    /// `0x80` continuation flag was set but the stream stopped), a fixlen /
-    /// string / blob payload shorter than its declared length, or a nested
-    /// sequence that is not yet closed.
-    ///
-    /// This is the `INCOMPLETE` outcome of `MESSAGE_SPEC.md` §7 and is
-    /// **explicitly not an error**: it is a first-class, distinct result that a
-    /// decoder MUST report rather than fold into either neighbour. Feeding more
-    /// bytes may complete the field (turning the next outcome into `Ok(())`) or
-    /// reveal it as malformed ([`Error::InvalidMsg`]). The decoder never decides
-    /// on the caller's behalf that this prefix is "truncated" — end-of-input is
-    /// the caller's own framing decision (§7.1), so there is deliberately no
-    /// `finish`/`finalize` step that would reclassify it.
-    ///
-    /// It rides the `Result` channel (as `Err`) purely so `feed` keeps a single
-    /// return type; a streaming caller reads it as "feed me the next chunk", a
-    /// one-shot / framed caller as "truncated at my layer".
-    Incomplete,
 
     /// A receiver-configured decode limit was exceeded: a field the **schema**
     /// leaves unbounded carried more elements or more bytes than this receiver

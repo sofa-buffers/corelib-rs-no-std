@@ -14,7 +14,7 @@
 //! (Every [`Visitor`] method has a default no-op impl, so each tiny recorder
 //! below overrides only the callbacks for the type it checks.)
 
-use sofab::{IStream, OStream, Signed, Unsigned, Visitor};
+use sofab::{IStream, OStream, Signed, Status, Unsigned, Visitor};
 
 // Scalars (unsigned / signed / boolean) are always available — no feature gate.
 #[test]
@@ -42,7 +42,10 @@ fn scalars_roundtrip() {
         os.bytes_used()
     };
     let mut v = V::default();
-    IStream::new().feed(&buf[..used], &mut v).unwrap();
+    assert_eq!(
+        IStream::new().feed(&buf[..used], &mut v),
+        Ok(Status::Complete)
+    );
     assert_eq!(v.u, [(1, 42), (3, 1)]); // boolean decodes as unsigned 1
     assert_eq!(v.s, [(2, -7)]);
 }
@@ -77,7 +80,10 @@ fn wide_value_roundtrips() {
         os.bytes_used()
     };
     let mut v = V::default();
-    IStream::new().feed(&buf[..used], &mut v).unwrap();
+    assert_eq!(
+        IStream::new().feed(&buf[..used], &mut v),
+        Ok(Status::Complete)
+    );
     assert_eq!(v.u, [big]);
 }
 
@@ -125,7 +131,10 @@ fn encode_id_above_32bit_ceiling_is_rejected() {
         os.bytes_used()
     };
     let mut v = V::default();
-    IStream::new().feed(&buf[..used], &mut v).unwrap();
+    assert_eq!(
+        IStream::new().feed(&buf[..used], &mut v),
+        Ok(Status::Complete)
+    );
     assert_eq!(v.ids, [CEILING]);
 
     // One past the ceiling: rejected, and nothing is emitted — not a truncated
@@ -198,7 +207,10 @@ fn fixlen_roundtrip() {
         os.bytes_used()
     };
     let mut v = V::default();
-    IStream::new().feed(&buf[..used], &mut v).unwrap();
+    assert_eq!(
+        IStream::new().feed(&buf[..used], &mut v),
+        Ok(Status::Complete)
+    );
     assert_eq!(v.fp32, [(1, 1.5f32.to_bits())]);
     assert_eq!(v.strs, [(2, b"hi".to_vec())]);
     assert_eq!(v.blobs, [(3, vec![9, 8, 7])]);
@@ -223,7 +235,10 @@ fn fp64_roundtrip() {
         os.bytes_used()
     };
     let mut v = V::default();
-    IStream::new().feed(&buf[..used], &mut v).unwrap();
+    assert_eq!(
+        IStream::new().feed(&buf[..used], &mut v),
+        Ok(Status::Complete)
+    );
     assert_eq!(v.fp64, [(1, 2.5f64.to_bits())]);
 }
 
@@ -284,11 +299,11 @@ fn float_payload_survives_byte_at_a_time_feed() {
 
     let mut v = V::default();
     let mut is = IStream::new();
-    let mut last = Ok(());
+    let mut last = Ok(Status::Complete);
     for &b in &buf[..used] {
         last = is.feed(&[b], &mut v);
     }
-    assert_eq!(last, Ok(()));
+    assert_eq!(last, Ok(Status::Complete));
     assert_eq!(v.fp32, f32s.map(f32::to_bits));
     #[cfg(feature = "fp64")]
     assert_eq!(v.fp64, f64s.map(f64::to_bits));
@@ -323,7 +338,10 @@ fn integer_array_roundtrip() {
         os.bytes_used()
     };
     let mut v = V::default();
-    IStream::new().feed(&buf[..used], &mut v).unwrap();
+    assert_eq!(
+        IStream::new().feed(&buf[..used], &mut v),
+        Ok(Status::Complete)
+    );
     assert_eq!(v.begins, [(1, 3), (2, 2)]);
     assert_eq!(v.u, [10, 20, 30]);
     assert_eq!(v.s, [-1, -2]);
@@ -348,7 +366,10 @@ fn float_array_roundtrip() {
         os.bytes_used()
     };
     let mut v = V::default();
-    IStream::new().feed(&buf[..used], &mut v).unwrap();
+    assert_eq!(
+        IStream::new().feed(&buf[..used], &mut v),
+        Ok(Status::Complete)
+    );
     assert_eq!(v.fp32, [1.0f32.to_bits(), 2.0f32.to_bits()]);
 }
 
@@ -381,7 +402,10 @@ fn sequence_roundtrip() {
         os.bytes_used()
     };
     let mut v = V::default();
-    IStream::new().feed(&buf[..used], &mut v).unwrap();
+    assert_eq!(
+        IStream::new().feed(&buf[..used], &mut v),
+        Ok(Status::Complete)
+    );
     assert_eq!(v.frames, [Some(1), None]);
     assert_eq!(v.u, [(2, 99)]);
 }

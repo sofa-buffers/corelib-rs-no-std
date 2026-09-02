@@ -4,7 +4,7 @@
 mod common;
 
 use common::{Event, Recorder};
-use sofab::{Error, IStream, OStream, MIN_OUTPUT_BUFFER};
+use sofab::{Error, IStream, OStream, Status, MIN_OUTPUT_BUFFER};
 
 // --- the buffer-installation contract (CORELIB_PLAN §5.1, §7.2 item 4) -------
 //
@@ -612,7 +612,7 @@ fn large_blob_streams_in_small_chunks() {
     for chunk in buf[..used].chunks(7) {
         // Mid-blob chunks report INCOMPLETE (§7); the final chunk completes it.
         match is.feed(chunk, &mut rec) {
-            Ok(()) | Err(Error::Incomplete) => {}
+            Ok(Status::Complete) | Ok(Status::Incomplete) => {}
             Err(e) => panic!("chunked blob decode: {e:?}"),
         }
     }
@@ -629,7 +629,7 @@ fn default_constructors_work() {
 
     let mut rec = Recorder::new();
     let mut is = IStream::default();
-    is.feed(&buf[..used], &mut rec).unwrap();
+    assert_eq!(is.feed(&buf[..used], &mut rec), Ok(Status::Complete));
     assert_eq!(rec.events, [Event::Unsigned(1, 0)]);
 }
 
@@ -673,9 +673,21 @@ fn a_receiver_limit_rejection_has_its_own_category() {
     // the family's name, distinct from every other outcome.
     let limit = Error::LimitExceeded;
     assert_ne!(limit, Error::InvalidMsg, "policy is not malformation");
-    assert_ne!(limit, Error::Incomplete, "policy is not truncation");
     assert_ne!(limit, Error::Argument, "policy is not a caller mistake");
     assert_ne!(limit, Error::BufferFull);
+
+    // "Policy is not truncation" is now asserted across the two arms rather
+    // than inside one enum: truncation is the `INCOMPLETE` **outcome**, which
+    // §5.2.1 says is not an error, so it comes back in the success arm while a
+    // limit rejection is an error. A truncated feed therefore cannot even be
+    // confused with one.
+    let truncated = IStream::new().feed(&[0x80], &mut Recorder::new());
+    assert_eq!(
+        truncated,
+        Ok(Status::Incomplete),
+        "policy is not truncation"
+    );
+    assert_ne!(truncated, Err(limit));
 
     // It travels the ordinary `Result` channel, so a generated decoder can hand
     // it straight to its own caller.
@@ -692,7 +704,10 @@ fn a_receiver_limit_rejection_has_its_own_category() {
         os.bytes_used()
     };
     let mut rec = Recorder::new();
-    IStream::new().feed(&buf[..n], &mut rec).unwrap();
+    assert_eq!(
+        IStream::new().feed(&buf[..n], &mut rec),
+        Ok(Status::Complete)
+    );
     assert_eq!(
         rec.events,
         [Event::Str(
@@ -721,6 +736,9 @@ fn a_destination_too_short_is_an_argument_error_not_a_limit_or_a_malformation() 
         os.bytes_used()
     };
     let mut rec = Recorder::new();
-    IStream::new().feed(&buf[..n], &mut rec).unwrap();
+    assert_eq!(
+        IStream::new().feed(&buf[..n], &mut rec),
+        Ok(Status::Complete)
+    );
     assert_eq!(rec.events, [Event::Str(1, b"nine byte".to_vec())]);
 }

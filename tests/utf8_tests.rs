@@ -30,7 +30,7 @@ mod common;
 
 use common::{hex_to_bytes, Event, Recorder};
 use serde_json::Value;
-use sofab::{Error, FixlenType, IStream, OStream};
+use sofab::{Error, FixlenType, IStream, OStream, Status};
 
 /// The shared vectors, embedded from the verbatim asset copy.
 const VECTORS_JSON: &str = include_str!("../assets/test_vectors.json");
@@ -51,7 +51,10 @@ fn invalid_utf8_vectors() -> Vec<Value> {
 /// the `INVALID` outcome the generated `inv`-flag path reports).
 fn decode_and_materialize(bytes: &[u8]) -> Result<Vec<Event>, Error> {
     let mut rec = Recorder::new();
-    IStream::new().feed(bytes, &mut rec)?; // structural frame validity: corelib's job
+    // Structural frame validity is the corelib's job. A one-shot consumer
+    // accepts only COMPLETE (§5.2.4) — and `?` now carries only the outcomes
+    // that are genuinely errors.
+    assert_eq!(IStream::new().feed(bytes, &mut rec)?, Status::Complete);
     materialize(&rec.events)?;
     Ok(rec.events)
 }
@@ -63,11 +66,13 @@ fn decode_and_materialize_chunked(bytes: &[u8]) -> Result<Vec<Event>, Error> {
     let mut is = IStream::new();
     for &b in bytes {
         match is.feed(&[b], &mut rec) {
-            Ok(()) | Err(Error::Incomplete) => {}
+            Ok(Status::Complete) | Ok(Status::Incomplete) => {}
             Err(e) => return Err(e),
         }
     }
-    is.feed(&[], &mut rec)?; // clean boundary or Incomplete
+    // The end-of-input probe: the same one-shot judgement as above, reached
+    // through `feed`'s own return value rather than a finalize step (§5.2.4).
+    assert_eq!(is.feed(&[], &mut rec)?, Status::Complete);
     materialize(&rec.events)?;
     Ok(rec.events)
 }

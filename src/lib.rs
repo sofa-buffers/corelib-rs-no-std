@@ -73,7 +73,7 @@
 //! ## Example
 //!
 //! ```
-//! use sofab::{OStream, IStream, Visitor, Id, Unsigned};
+//! use sofab::{OStream, IStream, Status, Visitor, Id, Unsigned};
 //!
 //! // --- encode ---
 //! let mut buf = [0u8; 32];
@@ -93,7 +93,7 @@
 //! }
 //! let mut sink = Sink::default();
 //! let mut is = IStream::new();
-//! is.feed(&buf[..used], &mut sink).unwrap();
+//! assert_eq!(is.feed(&buf[..used], &mut sink), Ok(Status::Complete));
 //! assert_eq!((sink.a, sink.b), (42, -7));
 //! ```
 
@@ -110,7 +110,7 @@ mod types;
 mod varint;
 
 pub use error::{Error, Result};
-pub use istream::{IStream, Visitor};
+pub use istream::{IStream, Status, Visitor};
 pub use ostream::{Flush, Handoff, Handover, NoFlush, NoHandoff, OStream, MIN_OUTPUT_BUFFER};
 pub use types::{Id, Signed, Unsigned, API_VERSION, ID_MAX};
 

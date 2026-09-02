@@ -23,7 +23,7 @@
 // Each consumer (bench binary, test crate) uses a subset of the datasets.
 #![allow(dead_code)]
 
-use sofab::{Flush, IStream, Id, OStream, Signed, Unsigned, Visitor};
+use sofab::{Flush, IStream, Id, OStream, Signed, Status, Unsigned, Visitor};
 use std::fmt::Write as _;
 
 /// Elements in the `u64 array (1000)` dataset.
@@ -370,9 +370,9 @@ pub fn stream_blob(blob: &[u8]) -> Streamed {
 /// Every chunk but the last leaves the decode INCOMPLETE, which is an outcome
 /// and not an error (CORELIB_PLAN §5.2) — only the last one is expected to be
 /// COMPLETE, and that is the caller's assertion to make.
-pub fn feed_chunked<V: Visitor>(wire: &[u8], visitor: &mut V) -> sofab::Result<()> {
+pub fn feed_chunked<V: Visitor>(wire: &[u8], visitor: &mut V) -> sofab::Result<Status> {
     let mut is = IStream::new();
-    let mut last = Err(sofab::Error::Incomplete);
+    let mut last = Ok(Status::Incomplete);
     for chunk in wire.chunks(BLOB_CHUNK) {
         last = is.feed(chunk, visitor);
     }
@@ -416,8 +416,9 @@ pub fn self_check(blob: &[u8], blob_wire: &[u8], comp_wire: &[u8]) {
     let mut sink = BlobSink::new(&mut dst);
     let last = feed_chunked(blob_wire, &mut sink);
     let written = sink.written;
-    assert!(
-        last.is_ok(),
+    assert_eq!(
+        last,
+        Ok(Status::Complete),
         "chunked blob decode ended {last:?}, not COMPLETE"
     );
     assert_eq!(written, BLOB_LEN, "chunked blob decode: bytes delivered");
@@ -427,9 +428,11 @@ pub fn self_check(blob: &[u8], blob_wire: &[u8], comp_wire: &[u8]) {
     // the UTF-8 string, four sequences on the wire (field 4 omitted, not
     // framed), and the scalars from the depth-3 nest and the two-byte header.
     let mut seen = Seen::default();
-    IStream::new()
-        .feed(comp_wire, &mut seen)
-        .expect("composite decodes COMPLETE");
+    assert_eq!(
+        IStream::new().feed(comp_wire, &mut seen),
+        Ok(Status::Complete),
+        "composite decodes COMPLETE"
+    );
     assert_eq!(seen.strings, 65, "composite: wrapper elements + string");
     assert_eq!(
         seen.sequences, 4,

@@ -855,9 +855,11 @@ fn closing_with_no_open_sequence_is_an_argument_error() {
         // What did reach the buffer is a message the decoder accepts.
         let mut rec = common::Recorder::new();
         let mut is = sofab::IStream::new();
-        is.feed(&buf[..used], &mut rec).unwrap_or_else(|e| {
-            panic!("closer {closer}: encoder emitted undecodable bytes: {e:?}")
-        });
+        assert_eq!(
+            is.feed(&buf[..used], &mut rec),
+            Ok(sofab::Status::Complete),
+            "closer {closer}: encoder emitted undecodable bytes"
+        );
     }
 }
 

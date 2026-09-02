@@ -10,7 +10,7 @@
 //! `baremetal.rs` is the companion that proves the same package links with no
 //! host `std` at all.
 
-use sofab::{Error, IStream, Id, OStream, Signed, Unsigned, Visitor};
+use sofab::{IStream, Id, OStream, Signed, Status, Unsigned, Visitor};
 
 #[derive(Default)]
 struct Probe {
@@ -58,27 +58,34 @@ fn main() {
 
     // Decode it back in one feed.
     let mut probe = Probe::default();
-    IStream::new()
-        .feed(wire, &mut probe)
-        .expect("decode the message just encoded");
+    assert_eq!(
+        IStream::new().feed(wire, &mut probe),
+        Ok(Status::Complete),
+        "decode the message just encoded"
+    );
     assert_eq!(probe.a, 42, "field 1 round-tripped");
     assert_eq!(probe.b, -7, "field 2 round-tripped");
     assert_eq!(&probe.s[..probe.s_len], b"hi", "field 3 round-tripped");
 
     // The same message one byte at a time: the decoder must suspend at every
     // boundary and land on the identical value. A cut inside a field reports
-    // `Incomplete` — that is the suspend, not a failure — while a cut on a
-    // field boundary is `Ok`, because a message ends wherever its last field
-    // does. Both are acceptable mid-stream; anything else is a real error.
+    // `Status::Incomplete` — that is the suspend, not a failure — while a cut
+    // on a field boundary is `Status::Complete`, because a message ends wherever
+    // its last field does. Both are acceptable mid-stream; anything else is a
+    // real error.
     let mut chunked = Probe::default();
     let mut is = IStream::new();
     for (i, byte) in wire.iter().enumerate() {
         let outcome = is.feed(core::slice::from_ref(byte), &mut chunked);
         if i + 1 == wire.len() {
-            outcome.expect("the final byte completes the message");
+            assert_eq!(
+                outcome,
+                Ok(Status::Complete),
+                "the final byte completes the message"
+            );
         } else {
             assert!(
-                matches!(outcome, Ok(()) | Err(Error::Incomplete)),
+                matches!(outcome, Ok(Status::Complete) | Ok(Status::Incomplete)),
                 "byte {i} must suspend or complete, never fail: {outcome:?}",
             );
         }

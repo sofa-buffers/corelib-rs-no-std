@@ -17,7 +17,7 @@
 #[path = "../benches/support/workloads.rs"]
 mod workloads;
 
-use sofab::{IStream, OStream};
+use sofab::{IStream, OStream, Status};
 use workloads::*;
 
 /// `u64 array (1000)`: the dataset generator BENCH_SPEC spells out, and its
@@ -32,9 +32,11 @@ fn u64_array_dataset_is_the_specified_one() {
 
     let wire = u64_array_wire(&src);
     let mut seen = Seen::default();
-    IStream::new()
-        .feed(&wire, &mut seen)
-        .expect("u64 array decodes COMPLETE");
+    assert_eq!(
+        IStream::new().feed(&wire, &mut seen),
+        Ok(Status::Complete),
+        "u64 array decodes COMPLETE"
+    );
     assert_eq!(seen.scalars.len(), N, "every element is delivered");
     assert_eq!(seen.scalars[1], (1, K as i64));
 }
@@ -44,9 +46,11 @@ fn u64_array_dataset_is_the_specified_one() {
 fn typical_message_carries_its_seven_fields() {
     let wire = typical_wire();
     let mut seen = Seen::default();
-    IStream::new()
-        .feed(&wire, &mut seen)
-        .expect("typical decodes COMPLETE");
+    assert_eq!(
+        IStream::new().feed(&wire, &mut seen),
+        Ok(Status::Complete),
+        "typical decodes COMPLETE"
+    );
     assert_eq!(seen.sequences, 1, "id 7 is a sequence");
     assert_eq!(seen.strings, 1, "id 5 is a string");
     assert_eq!(seen.payload, "sofab".len());
@@ -120,7 +124,11 @@ fn chunked_blob_decode_ends_complete() {
     let mut sink = BlobSink::new(&mut dst);
     let last = feed_chunked(&wire, &mut sink);
     let written = sink.written;
-    assert!(last.is_ok(), "last chunk ended {last:?}, not COMPLETE");
+    assert_eq!(
+        last,
+        Ok(Status::Complete),
+        "last chunk ended {last:?}, not COMPLETE"
+    );
     assert_eq!(written, BLOB_LEN, "payload bytes delivered");
     assert!(
         dst == blob,
@@ -157,9 +165,11 @@ fn composite_message_exercises_the_paths_it_was_added_for() {
     assert_eq!(wire.len(), COMPOSITE_SIZE);
 
     let mut seen = Seen::default();
-    IStream::new()
-        .feed(&wire, &mut seen)
-        .expect("composite decodes COMPLETE");
+    assert_eq!(
+        IStream::new().feed(&wire, &mut seen),
+        Ok(Status::Complete),
+        "composite decodes COMPLETE"
+    );
 
     // Field 1's 64 wrapper elements plus field 2's string.
     assert_eq!(seen.strings, COMPOSITE_ELEMENTS as usize + 1);
@@ -229,9 +239,11 @@ fn composite_carries_the_multi_byte_headers() {
 fn composite_skip_all_still_walks_the_whole_message() {
     let wire = composite_wire();
     let mut sink = SkipAll;
-    IStream::new()
-        .feed(&wire, &mut sink)
-        .expect("skip-all walks to the end and reports COMPLETE");
+    assert_eq!(
+        IStream::new().feed(&wire, &mut sink),
+        Ok(Status::Complete),
+        "skip-all walks to the end and reports COMPLETE"
+    );
 }
 
 /// The self-check the bench binary runs before it times anything — asserted here

@@ -22,6 +22,64 @@ use crate::ArrayKind;
 #[cfg(feature = "fixlen")]
 use crate::FixlenType;
 
+/// The decode outcome of one [`IStream::feed`] call: where the decoder stands
+/// after the bytes it has consumed so far.
+///
+/// CORELIB_PLAN §5.2.1 names three outcomes — `COMPLETE`, `INCOMPLETE`,
+/// `INVALID` — and §5.2.4 makes the returned status *the* answer: there is no
+/// `finish`/`finalize` step and no second accessor to ask again, so the two
+/// cannot drift apart. This port splits the three across `Result`'s two arms:
+///
+/// | outcome | how it arrives |
+/// |---|---|
+/// | `COMPLETE` | `Ok(Status::Complete)` |
+/// | `INCOMPLETE` | `Ok(Status::Incomplete)` |
+/// | `INVALID` | `Err(`[`Error::InvalidMsg`]`)` |
+///
+/// `INCOMPLETE` is **not** an error (§5.2.1) and so lives in the success arm
+/// with `COMPLETE`; `INVALID` is malformed input and rides the error channel
+/// with the `InvalidMessage` code §6.3 pairs it with — as does the terminal
+/// [`Error::LimitExceeded`] a generated visitor reports, for which §6.3
+/// explicitly admits the error channel as an alternative to a fourth outcome.
+/// `?` therefore propagates exactly the terminal verdicts and leaves the
+/// ordinary streaming case — every chunk but the last — to be matched:
+///
+/// ```
+/// use sofab::{IStream, Status, Visitor};
+/// struct Sink;
+/// impl Visitor for Sink {}
+///
+/// # fn run() -> sofab::Result<()> {
+/// let mut is = IStream::new();
+/// for chunk in [&[0x08u8][..], &[42u8][..]] {
+///     match is.feed(chunk, &mut Sink)? {
+///         Status::Complete => {}   // a valid message may end here
+///         Status::Incomplete => {} // mid-field: feed the next chunk
+///     }
+/// }
+/// # Ok(())
+/// # }
+/// # run().unwrap();
+/// ```
+///
+/// It is `#[must_use]` on purpose: a caller that drops the value has thrown the
+/// verdict away, and there is no second place to get it back from.
+#[must_use]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Status {
+    /// The consumed bytes end **exactly** at a field boundary with no sequence
+    /// left open: a valid message *may* end here (more valid fields could still
+    /// extend it).
+    Complete,
+
+    /// The consumed bytes end **inside** a field — an unterminated varint, a
+    /// fixlen / string / blob payload shorter than its declared length, or an
+    /// open sequence. Not a rejection: the decoder keeps its partial state, and
+    /// the caller feeds the next chunk to continue. Whether that is acceptable
+    /// is the caller's call, because only the caller knows its framing (§5.2.4).
+    Incomplete,
+}
+
 /// Receives decoded fields from an [`IStream`].
 ///
 /// Every method has a default empty implementation, so an implementor overrides
@@ -332,14 +390,17 @@ impl IStream {
     /// Feed a chunk of encoded bytes, pushing decoded fields to `visitor`, and
     /// report the three-valued decode outcome of everything consumed *so far*
     /// (`MESSAGE_SPEC.md` §7). The same status holds for a one-shot `feed` of a
-    /// whole message and for each `feed` of a streamed chunk sequence:
+    /// whole message and for each `feed` of a streamed chunk sequence — and
+    /// **there is no separate finalize step and no second accessor**: this
+    /// return value is the whole answer (CORELIB_PLAN §5.2.4).
     ///
-    /// * `Ok(())` — **`COMPLETE`**: the consumed bytes end **exactly** at a
-    ///   field boundary; a valid message may end here (more fields may follow).
-    /// * [`Err(Error::Incomplete)`](Error::Incomplete) — **`INCOMPLETE`**: the
-    ///   bytes end **inside** a field (an unterminated varint, a fixlen / string
-    ///   / blob payload short of its declared length) or with a sequence still
-    ///   open. Not an error — the partial tail is retained and feeding more
+    /// * `Ok(`[`Status::Complete`]`)` — **`COMPLETE`**: the consumed bytes end
+    ///   **exactly** at a field boundary; a valid message may end here (more
+    ///   fields may follow).
+    /// * `Ok(`[`Status::Incomplete`]`)` — **`INCOMPLETE`**: the bytes end
+    ///   **inside** a field (an unterminated varint, a fixlen / string / blob
+    ///   payload short of its declared length) or with a sequence still open.
+    ///   Not an error (§5.2.1) — the partial tail is retained and feeding more
     ///   bytes may complete it. End-of-input is the caller's decision, so there
     ///   is no `finish`/`finalize` step.
     /// * [`Err(Error::InvalidMsg)`](Error::InvalidMsg) — **`INVALID`**: the
@@ -368,7 +429,7 @@ impl IStream {
     /// state internally. Because the verdict is latched, it does not depend on
     /// where the chunk boundaries fall: feeding a stream one byte at a time
     /// yields the same outcome as feeding it whole.
-    pub fn feed<V: Visitor>(&mut self, data: &[u8], visitor: &mut V) -> Result<()> {
+    pub fn feed<V: Visitor>(&mut self, data: &[u8], visitor: &mut V) -> Result<Status> {
         // §5.2: `INVALID` is terminal. This is what keeps the next chunk from
         // being parsed as if the message were still intact.
         if self.core.state == State::Invalid {
@@ -407,16 +468,17 @@ impl IStream {
         }
 
         // §7: the outcome is a property of the bytes consumed so far, read
-        // straight off the decoder's own state — no separate finalization gate.
-        // Malformed input already returned `Err(Error::InvalidMsg)` above via
-        // `?`; reaching here means the bytes are well-formed, so they are either
-        // `COMPLETE` (at a field boundary) or `INCOMPLETE` (mid-field / open
-        // sequence). We surface `INCOMPLETE` distinctly instead of silently
-        // accepting a partial tail as a finished message.
+        // straight off the decoder's own state — no separate finalization gate,
+        // and nowhere else to ask. Malformed input already returned
+        // `Err(Error::InvalidMsg)` above; reaching here means the bytes are
+        // well-formed, so they are either `COMPLETE` (at a field boundary) or
+        // `INCOMPLETE` (mid-field / open sequence). We surface `INCOMPLETE`
+        // distinctly instead of silently accepting a partial tail as a finished
+        // message.
         if self.at_field_boundary() {
-            Ok(())
+            Ok(Status::Complete)
         } else {
-            Err(Error::Incomplete)
+            Ok(Status::Incomplete)
         }
     }
 
@@ -424,9 +486,10 @@ impl IStream {
     /// so every site that produces one is a single `return Err(self.latch(e))`.
     ///
     /// Only [`Error::InvalidMsg`] latches: it is the one outcome §5.2 declares
-    /// terminal. `Incomplete` never reaches here — it is computed from the state
-    /// after the loop, never returned by a step — and must not be latched even
-    /// if it ever did: feeding more bytes is exactly how it is resolved.
+    /// terminal. [`Status::Incomplete`] never reaches here at all — it is not an
+    /// error, and is computed from the state after the loop rather than returned
+    /// by a step — and must not be latched even if it ever did: feeding more
+    /// bytes is exactly how it is resolved.
     ///
     /// `cold` + `inline(never)`: this runs once per broken message, on the way
     /// out, and keeping it out of the per-byte loop's body leaves the loop (and
@@ -445,6 +508,15 @@ impl IStream {
     /// in progress, and no sequence left open. This is the only state from which
     /// the consumed bytes form a `COMPLETE` message (§7); any other state means
     /// the bytes end mid-field or with an open sequence and is `INCOMPLETE`.
+    ///
+    /// It stays **private on purpose**. There is deliberately no
+    /// `finish`/`finalize` and no public status accessor: the verdict is
+    /// obtained solely from [`feed`](Self::feed)'s return value at every byte
+    /// boundary, so there is only one place the answer can come from and nothing
+    /// to drift out of step with it (CORELIB_PLAN §5.2.4, §5.3.1). To probe
+    /// end-of-input without more bytes, feed an empty chunk — `feed(&[], v)`
+    /// returns `Ok(Status::Complete)` iff the stream ended at a clean boundary,
+    /// `Ok(Status::Incomplete)` otherwise.
     fn at_field_boundary(&self) -> bool {
         if self.core.state != State::Idle || self.core.shift != 0 {
             // Mid-value, mid-payload, or a partial header varint pending.
