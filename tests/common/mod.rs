@@ -13,7 +13,7 @@
 
 #[cfg(feature = "array")]
 use sofab::ArrayKind;
-use sofab::{Error, IStream, Id, Signed, Unsigned, Visitor};
+use sofab::{Error, IStream, Id, Signed, Status, Unsigned, Visitor};
 
 /// One decoded event, recorded in order by [`Recorder`].
 #[derive(Debug, Clone, PartialEq)]
@@ -113,7 +113,7 @@ impl Visitor for Recorder {
 /// Feed `bytes` in one shot; return the three-valued outcome (§7) *and* every
 /// event the visitor saw. Both halves matter to a suite asserting what was
 /// announced before the bytes ran out.
-pub fn feed(bytes: &[u8]) -> (Result<(), Error>, Vec<Event>) {
+pub fn feed(bytes: &[u8]) -> (Result<Status, Error>, Vec<Event>) {
     let mut rec = Recorder::new();
     let mut is = IStream::new();
     let outcome = is.feed(bytes, &mut rec);
@@ -124,7 +124,7 @@ pub fn feed(bytes: &[u8]) -> (Result<(), Error>, Vec<Event>) {
 /// outcome is `COMPLETE`.
 pub fn decode(bytes: &[u8]) -> Vec<Event> {
     let (outcome, events) = feed(bytes);
-    outcome.expect("decode failed");
+    assert_eq!(outcome, Ok(Status::Complete), "decode failed");
     events
 }
 
@@ -137,7 +137,7 @@ pub fn decode_one_byte_at_a_time(bytes: &[u8]) -> Vec<Event> {
     let mut is = IStream::new();
     for &b in bytes {
         match is.feed(&[b], &mut rec) {
-            Ok(()) | Err(Error::Incomplete) => {}
+            Ok(Status::Complete) | Ok(Status::Incomplete) => {}
             Err(e) => panic!("chunked decode: {e:?}"),
         }
     }

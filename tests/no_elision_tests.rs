@@ -131,7 +131,7 @@ mod encode {
 #[cfg(feature = "array")]
 mod roundtrip {
     use crate::common::{Event, Recorder};
-    use sofab::{ArrayKind, IStream, OStream, Unsigned};
+    use sofab::{ArrayKind, IStream, OStream, Status, Unsigned};
 
     #[test]
     fn a_trailing_default_run_survives_the_roundtrip() {
@@ -145,7 +145,7 @@ mod roundtrip {
 
         let mut rec = Recorder::default();
         let mut is = IStream::new();
-        is.feed(&buf[..used], &mut rec).unwrap();
+        assert_eq!(is.feed(&buf[..used], &mut rec), Ok(Status::Complete));
 
         // The array header announces the full length, and every element — the
         // trailing defaults included — comes back out.

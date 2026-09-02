@@ -22,7 +22,7 @@
     feature = "sequence"
 ))]
 
-use sofab::{Error, IStream, Id, OStream, Unsigned, Visitor};
+use sofab::{IStream, Id, OStream, Status, Unsigned, Visitor};
 
 /// A message using **every** wire type: both varint kinds, fp32/fp64, string,
 /// blob, all three array kinds, and a nested sequence with children — with
@@ -77,7 +77,7 @@ fn a_consumer_that_handles_nothing_still_walks_every_wire_type() {
     let mut sink = Ignore;
     assert_eq!(
         IStream::new().feed(&msg, &mut sink),
-        Ok(()),
+        Ok(Status::Complete),
         "an unread field must leave the decoder at the next field boundary",
     );
 
@@ -86,11 +86,11 @@ fn a_consumer_that_handles_nothing_still_walks_every_wire_type() {
     let mut is = IStream::new();
     for (i, b) in msg.iter().enumerate() {
         match is.feed(&[*b], &mut sink) {
-            Ok(()) | Err(Error::Incomplete) => {}
+            Ok(Status::Complete) | Ok(Status::Incomplete) => {}
             Err(e) => panic!("byte {i}: {e:?}"),
         }
     }
-    assert_eq!(is.feed(&[], &mut sink), Ok(()));
+    assert_eq!(is.feed(&[], &mut sink), Ok(Status::Complete));
 }
 
 #[test]
@@ -102,7 +102,7 @@ fn dropping_the_other_kinds_leaves_the_handled_fields_exact() {
     let msg = message_of_every_wire_type();
 
     let mut sink = OnlyUnsigned::default();
-    assert_eq!(IStream::new().feed(&msg, &mut sink), Ok(()));
+    assert_eq!(IStream::new().feed(&msg, &mut sink), Ok(Status::Complete));
     assert_eq!(sink.seen, [(1, 42), (11, 5), (13, 7), (13, 8), (14, 99)]);
 
     // Same, one byte per feed: the chunk boundaries fall inside skipped payloads
@@ -111,7 +111,7 @@ fn dropping_the_other_kinds_leaves_the_handled_fields_exact() {
     let mut is = IStream::new();
     for b in &msg {
         match is.feed(&[*b], &mut chunked) {
-            Ok(()) | Err(Error::Incomplete) => {}
+            Ok(Status::Complete) | Ok(Status::Incomplete) => {}
             Err(e) => panic!("chunked: {e:?}"),
         }
     }

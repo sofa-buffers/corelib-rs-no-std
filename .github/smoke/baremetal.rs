@@ -14,7 +14,7 @@
 #![no_std]
 
 use core::panic::PanicInfo;
-use sofab::{IStream, Id, OStream, Signed, Unsigned, Visitor};
+use sofab::{IStream, Id, OStream, Signed, Status, Unsigned, Visitor};
 
 #[derive(Default)]
 struct Probe {
@@ -59,8 +59,10 @@ pub extern "C" fn sofab_smoke_roundtrip() -> u32 {
         return 3;
     }
 
+    // The status `feed` returns is the whole verdict: `Ok` alone is not enough,
+    // because a decode that stopped mid-field is `Ok(Status::Incomplete)`.
     let mut probe = Probe::default();
-    if IStream::new().feed(&buf[..used], &mut probe).is_err() {
+    if IStream::new().feed(&buf[..used], &mut probe) != Ok(Status::Complete) {
         return 4;
     }
     if probe.a != 42 {

@@ -11,7 +11,7 @@
 mod common;
 
 use common::{feed, push_varint, Event};
-use sofab::{Error, Id, OStream, Unsigned, ID_MAX};
+use sofab::{Error, Id, OStream, Status, Unsigned, ID_MAX};
 
 /// Encode with a fresh stack buffer and return the produced bytes.
 fn encode<F: FnOnce(&mut OStream)>(f: F) -> Vec<u8> {
@@ -43,7 +43,7 @@ fn id_max_is_the_lower_of_the_format_ceiling_and_the_width_bound() {
 fn id_max_encodes_and_round_trips() {
     let bytes = encode(|os| os.write_unsigned(ID_MAX, 0).unwrap());
     let (outcome, events) = feed(&bytes);
-    assert_eq!(outcome, Ok(()));
+    assert_eq!(outcome, Ok(Status::Complete));
     assert_eq!(events, [Event::Unsigned(ID_MAX, 0)]);
 }
 
@@ -88,6 +88,6 @@ fn decoding_exactly_id_max_is_valid() {
     bytes.push(0x00);
 
     let (outcome, events) = feed(&bytes);
-    assert_eq!(outcome, Ok(()));
+    assert_eq!(outcome, Ok(Status::Complete));
     assert_eq!(events, [Event::Unsigned(ID_MAX as Id, 0)]);
 }

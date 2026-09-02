@@ -33,7 +33,7 @@
 mod common;
 
 use common::{feed, push_varint, Event, Recorder};
-use sofab::{ArrayKind, Error, IStream, OStream};
+use sofab::{ArrayKind, Error, IStream, OStream, Status};
 
 /// Wrap `body` in the finding's frame: sequence 100 (`arrays`) → sequence 10
 /// (`nested`) → `body` → two sequence-ends.
@@ -66,7 +66,7 @@ fn row2_mistyped_over_count_is_announced_as_fp64_after_the_word() {
     // so the header event has to carry `Fp64` — not a collapsed fixlen kind.
     let bytes = fixlen_array(0x08, 0x41, 64);
     let (outcome, events) = feed(&bytes);
-    assert_eq!(outcome, Ok(()));
+    assert_eq!(outcome, Ok(Status::Complete));
 
     let mut expected = frame_begin();
     expected.push(Event::ArrayBegin(0, ArrayKind::Fp64, 8));
@@ -119,14 +119,14 @@ fn row4_truncated_between_the_words_is_incomplete_and_announces_nothing() {
     // has been announced that a consumer could reject on.
     let mut bytes = vec![0xa6, 0x06, 0x56, 0x05, 0x08];
     let (outcome, events) = feed(&bytes);
-    assert_eq!(outcome, Err(Error::Incomplete));
+    assert_eq!(outcome, Ok(Status::Incomplete));
     assert_eq!(events, frame_begin());
 
     // One more byte — the `fixlen_word` — and the array is announced, still
     // INCOMPLETE (the payload is missing) but now decidable.
     bytes.push(0x41);
     let (outcome, events) = feed(&bytes);
-    assert_eq!(outcome, Err(Error::Incomplete));
+    assert_eq!(outcome, Ok(Status::Incomplete));
     let mut expected = frame_begin();
     expected.push(Event::ArrayBegin(0, ArrayKind::Fp64, 8));
     assert_eq!(events, expected);
@@ -142,7 +142,7 @@ fn row3_matching_over_count_is_announced_as_fp32() {
     // `Fp32` together with the count 8. The corelib itself knows no schema and
     // accepts; the driver's INVALID verdict is built on exactly this event.
     let (outcome, events) = feed(&fixlen_array(0x08, 0x20, 32));
-    assert_eq!(outcome, Ok(()));
+    assert_eq!(outcome, Ok(Status::Complete));
     let mut expected = frame_begin();
     expected.push(Event::ArrayBegin(0, ArrayKind::Fp32, 8));
     expected.extend((0..8).map(|_| Event::Fp32(0, 0.0f32.to_bits())));
@@ -160,7 +160,7 @@ fn row5_matching_over_count_is_announced_before_any_payload_byte() {
     // for these bytes is INCOMPLETE.
     let bytes = vec![0xa6, 0x06, 0x56, 0x05, 0x08, 0x20];
     let (outcome, events) = feed(&bytes);
-    assert_eq!(outcome, Err(Error::Incomplete));
+    assert_eq!(outcome, Ok(Status::Incomplete));
     let mut expected = frame_begin();
     expected.push(Event::ArrayBegin(0, ArrayKind::Fp32, 8));
     assert_eq!(events, expected);
@@ -173,7 +173,7 @@ fn row6_control_decodes_and_reencodes_byte_identically() {
     // `a6 06 56 05 03 20 00*12 07 07`: an in-bound, correctly typed fp32[3].
     let bytes = fixlen_array(0x03, 0x20, 12);
     let (outcome, events) = feed(&bytes);
-    assert_eq!(outcome, Ok(()));
+    assert_eq!(outcome, Ok(Status::Complete));
     let mut expected = frame_begin();
     expected.push(Event::ArrayBegin(0, ArrayKind::Fp32, 3));
     expected.extend((0..3).map(|_| Event::Fp32(0, 0.0f32.to_bits())));
@@ -204,7 +204,7 @@ fn zero_count_mistyped_array_is_announced_once_with_its_subtype() {
     // `Fp64` and count 0 — and no payload is read. Moving the call site must not
     // drop the zero-count case.
     let (outcome, events) = feed(&fixlen_array(0x00, 0x41, 0));
-    assert_eq!(outcome, Ok(()));
+    assert_eq!(outcome, Ok(Status::Complete));
     let mut expected = frame_begin();
     expected.push(Event::ArrayBegin(0, ArrayKind::Fp64, 0));
     expected.push(Event::SequenceEnd);
@@ -229,7 +229,7 @@ fn empty_fp32_and_fp64_arrays_stay_distinguishable() {
 fn zero_count_array_truncated_before_its_word_is_incomplete() {
     // `05 00` is not yet a whole array header: the word is still owed.
     let (outcome, events) = feed(&[0x05, 0x00]);
-    assert_eq!(outcome, Err(Error::Incomplete));
+    assert_eq!(outcome, Ok(Status::Incomplete));
     assert!(events.is_empty());
 }
 
@@ -297,7 +297,7 @@ fn count_at_array_max_waits_for_the_word_without_announcing() {
     let mut bytes = vec![0x05];
     push_varint(&mut bytes, (1u64 << 31) - 1);
     let (outcome, events) = feed(&bytes);
-    assert_eq!(outcome, Err(Error::Incomplete));
+    assert_eq!(outcome, Ok(Status::Incomplete));
     assert!(events.is_empty());
 }
 
@@ -317,11 +317,11 @@ fn integer_array_header_still_fires_on_the_count_word() {
     expected.extend((0..8).map(|_| Event::Unsigned(0, 0)));
     expected.push(Event::SequenceEnd);
     expected.push(Event::SequenceEnd);
-    assert_eq!(feed(&bytes), (Ok(()), expected));
+    assert_eq!(feed(&bytes), (Ok(Status::Complete), expected));
 
     // …and it is already announced when only the count has arrived.
     let (outcome, events) = feed(&bytes[..5]);
-    assert_eq!(outcome, Err(Error::Incomplete));
+    assert_eq!(outcome, Ok(Status::Incomplete));
     let mut expected = frame_begin();
     expected.push(Event::ArrayBegin(0, ArrayKind::Unsigned, 8));
     assert_eq!(events, expected);
@@ -351,7 +351,7 @@ fn each_occurrence_at_one_id_carries_its_own_subtype() {
     body.extend_from_slice(&[0x05, 0x01, 0x41]);
     body.resize(7 + 3 + 8, 0x00);
     let (outcome, events) = feed(&framed(&body));
-    assert_eq!(outcome, Ok(()));
+    assert_eq!(outcome, Ok(Status::Complete));
 
     let mut expected = frame_begin();
     expected.push(Event::ArrayBegin(0, ArrayKind::Fp32, 1));

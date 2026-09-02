@@ -7,7 +7,7 @@
 mod common;
 
 use common::{decode, push_varint, Event, Recorder};
-use sofab::{ArrayKind, Error, IStream, Unsigned};
+use sofab::{ArrayKind, Error, IStream, Status, Unsigned};
 
 #[test]
 fn decode_unsigned() {
@@ -161,23 +161,29 @@ fn streaming_chunked_feed_matches_oneshot() {
     // final byte (completing the string) returns COMPLETE.
     let mut rec = Recorder::new();
     let mut is = IStream::new();
-    let mut last = Ok(());
+    let mut last = Ok(Status::Complete);
     for b in msg {
         last = is.feed(&[b], &mut rec);
-        assert!(matches!(last, Ok(()) | Err(Error::Incomplete)));
+        assert!(matches!(
+            last,
+            Ok(Status::Complete) | Ok(Status::Incomplete)
+        ));
     }
-    assert_eq!(last, Ok(()));
+    assert_eq!(last, Ok(Status::Complete));
     assert_eq!(rec.events, oneshot);
 
     // Feed in awkward 3-byte chunks.
     let mut rec2 = Recorder::new();
     let mut is2 = IStream::new();
-    let mut last2 = Ok(());
+    let mut last2 = Ok(Status::Complete);
     for chunk in msg.chunks(3) {
         last2 = is2.feed(chunk, &mut rec2);
-        assert!(matches!(last2, Ok(()) | Err(Error::Incomplete)));
+        assert!(matches!(
+            last2,
+            Ok(Status::Complete) | Ok(Status::Incomplete)
+        ));
     }
-    assert_eq!(last2, Ok(()));
+    assert_eq!(last2, Ok(Status::Complete));
     assert_eq!(rec2.events, oneshot);
 }
 
@@ -228,7 +234,7 @@ fn nesting_at_max_depth_is_accepted() {
     let starts = [0x06u8; 255];
     let mut rec = Recorder::new();
     let mut is = IStream::new();
-    assert_eq!(is.feed(&starts, &mut rec), Err(Error::Incomplete));
+    assert_eq!(is.feed(&starts, &mut rec), Ok(Status::Incomplete));
 }
 
 #[test]
@@ -280,7 +286,7 @@ fn max_u64_varint_is_accepted() {
     ];
     let mut rec = Recorder::new();
     let mut is = IStream::new();
-    assert_eq!(is.feed(&bytes, &mut rec), Ok(()));
+    assert_eq!(is.feed(&bytes, &mut rec), Ok(Status::Complete));
     assert_eq!(rec.events, [Event::Unsigned(6, u64::MAX)]);
 }
 
@@ -314,7 +320,7 @@ fn last_varint_byte_accepts_exactly_the_bits_that_fit() {
             let expected = (!(0 as Unsigned) >> room) | ((terminator as Unsigned) << carried);
             assert_eq!(
                 outcome,
-                Ok(()),
+                Ok(Status::Complete),
                 "terminator {terminator:#04x} fits in {width} bits and must decode",
             );
             assert_eq!(rec.events, [Event::Unsigned(6, expected)]);
@@ -397,7 +403,7 @@ fn oversized_fixlen_length_is_invalid() {
 // to INVALID. `outcome` returns the raw status of a one-shot feed.
 
 /// Feed `bytes` in one shot and return the raw three-valued decode outcome.
-fn outcome(bytes: &[u8]) -> Result<(), Error> {
+fn outcome(bytes: &[u8]) -> Result<Status, Error> {
     let mut rec = Recorder::new();
     let mut is = IStream::new();
     is.feed(bytes, &mut rec)
@@ -408,7 +414,7 @@ fn lone_continuation_byte_is_incomplete() {
     // A lone 0x80 is a well-formed *prefix* of a varint (continuation bit set,
     // no terminator): the caller may still complete it. INCOMPLETE, not INVALID
     // (§7, called out by name in the spec).
-    assert_eq!(outcome(&[0x80]), Err(Error::Incomplete));
+    assert_eq!(outcome(&[0x80]), Ok(Status::Incomplete));
 }
 
 #[test]
@@ -425,49 +431,49 @@ fn oversized_varint_is_invalid_not_incomplete() {
 #[test]
 fn complete_message_is_ok() {
     // Header + full value, ending exactly at a field boundary: COMPLETE.
-    assert_eq!(outcome(&[0x00, 0x80, 0x01]), Ok(())); // unsigned id0 = 128
+    assert_eq!(outcome(&[0x00, 0x80, 0x01]), Ok(Status::Complete)); // unsigned id0 = 128
 }
 
 #[test]
 fn header_without_value_is_incomplete() {
     // Header announces an unsigned value but no value byte arrives: mid-field.
-    assert_eq!(outcome(&[0x00]), Err(Error::Incomplete));
+    assert_eq!(outcome(&[0x00]), Ok(Status::Incomplete));
 }
 
 #[test]
 fn truncated_varint_value_is_incomplete() {
     // Header + a partial multi-byte value (continuation set, no terminator).
-    assert_eq!(outcome(&[0x00, 0x80]), Err(Error::Incomplete));
+    assert_eq!(outcome(&[0x00, 0x80]), Ok(Status::Incomplete));
 }
 
 #[test]
 fn truncated_fixlen_payload_is_incomplete() {
     // fp32 header declares a 4-byte payload; only 2 bytes arrive.
-    assert_eq!(outcome(&[0x02, 0x20, 0x00, 0x00]), Err(Error::Incomplete));
+    assert_eq!(outcome(&[0x02, 0x20, 0x00, 0x00]), Ok(Status::Incomplete));
 }
 
 #[test]
 fn truncated_string_payload_is_incomplete() {
     // string id0 len 12; only 2 of the 12 payload bytes are delivered.
-    assert_eq!(outcome(&[0x02, 0x62, 0x48, 0x65]), Err(Error::Incomplete));
+    assert_eq!(outcome(&[0x02, 0x62, 0x48, 0x65]), Ok(Status::Incomplete));
 }
 
 #[test]
 fn open_sequence_is_incomplete() {
     // A sequence-start with no matching sequence-end: valid so far, not closed.
-    assert_eq!(outcome(&[0x06]), Err(Error::Incomplete));
+    assert_eq!(outcome(&[0x06]), Ok(Status::Incomplete));
 }
 
 #[test]
 fn truncated_array_element_is_incomplete() {
     // Array of 2 unsigned; header + count + first element, second missing.
-    assert_eq!(outcome(&[0x03, 0x02, 0x01]), Err(Error::Incomplete));
+    assert_eq!(outcome(&[0x03, 0x02, 0x01]), Ok(Status::Incomplete));
 }
 
 #[test]
 fn empty_input_is_complete() {
     // Zero bytes end (trivially) exactly at a field boundary.
-    assert_eq!(outcome(&[]), Ok(()));
+    assert_eq!(outcome(&[]), Ok(Status::Complete));
 }
 
 // --- §7.2 item 5: the id ceiling binds *every* header ------------------------
@@ -543,7 +549,7 @@ fn reencode(events: &[Event]) -> Vec<u8> {
 fn tolerated(noncanonical: &[u8], canonical: &[u8]) {
     assert_eq!(
         outcome(noncanonical),
-        Ok(()),
+        Ok(Status::Complete),
         "non-canonical but well-formed input must not be rejected",
     );
     let events = decode(noncanonical);
@@ -609,9 +615,9 @@ fn a_fixlen_word_cut_after_a_reserved_subtype_byte_is_incomplete() {
     // Nothing else in the malformed/truncation suites exercises this rule — a
     // dangling `0x80` carries no settled sub-field to peek at, and
     // `reserved_fixlen_subtype_is_invalid` above feeds the *complete* word.
-    assert_eq!(outcome(&[0x02, 0x84]), Err(Error::Incomplete));
-    assert_eq!(outcome(&[0x02, 0x8C]), Err(Error::Incomplete)); // subtype 0x5
-    assert_eq!(outcome(&[0x02, 0xB4]), Err(Error::Incomplete)); // subtype 0x4, longer
+    assert_eq!(outcome(&[0x02, 0x84]), Ok(Status::Incomplete));
+    assert_eq!(outcome(&[0x02, 0x8C]), Ok(Status::Incomplete)); // subtype 0x5
+    assert_eq!(outcome(&[0x02, 0xB4]), Ok(Status::Incomplete)); // subtype 0x4, longer
 
     // Completing the same word settles it — and *then* the reserved subtype is
     // INVALID. The two outcomes differ only in where the bytes stop, which is
@@ -619,7 +625,7 @@ fn a_fixlen_word_cut_after_a_reserved_subtype_byte_is_incomplete() {
     assert_eq!(outcome(&[0x02, 0x84, 0x00]), Err(Error::InvalidMsg));
 
     // The same for a fixlen array's second word, reached after the count.
-    assert_eq!(outcome(&[0x05, 0x01, 0x84]), Err(Error::Incomplete));
+    assert_eq!(outcome(&[0x05, 0x01, 0x84]), Ok(Status::Incomplete));
 }
 
 // --- §7.2 item 4: a fed chunk is borrowed only for the duration of `feed` ----
@@ -655,7 +661,7 @@ fn a_fed_chunk_may_be_overwritten_the_moment_feed_returns() {
             let n = piece.len();
             scratch[..n].copy_from_slice(piece);
             match is.feed(&scratch[..n], &mut rec) {
-                Ok(()) | Err(Error::Incomplete) => {}
+                Ok(Status::Complete) | Ok(Status::Incomplete) => {}
                 Err(e) => panic!("chunked decode (chunk={chunk_size}): {e:?}"),
             }
             scratch.fill(0xAA); // the caller reuses the buffer straight away
@@ -724,7 +730,7 @@ fn the_whole_message_fed_in_one_call_survives_the_buffer_being_scrubbed() {
     // The caller's buffer, fed whole and then destroyed.
     let mut wire = buf[..used].to_vec();
     let mut v = AccVisitor::default();
-    IStream::new().feed(&wire, &mut v).unwrap();
+    assert_eq!(IStream::new().feed(&wire, &mut v), Ok(Status::Complete));
     wire.fill(0xAA);
     drop(wire);
 
@@ -849,7 +855,7 @@ fn the_chunked_verdict_matches_the_one_shot_verdict_for_malformed_input() {
         let mut chunked = Recorder::new();
         let mut is = IStream::new();
         let mut seen_invalid = false;
-        let mut last = Ok(());
+        let mut last = Ok(Status::Complete);
         for byte in &wire {
             last = is.feed(&[*byte], &mut chunked);
             if seen_invalid {

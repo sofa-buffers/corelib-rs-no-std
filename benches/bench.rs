@@ -35,7 +35,7 @@
 //!
 //! Run with:  `cargo bench --bench bench`
 
-use sofab::{IStream, OStream};
+use sofab::{IStream, OStream, Status};
 use std::hint::black_box;
 
 #[path = "support/workload_arg.rs"]
@@ -93,7 +93,9 @@ pub fn run_encode_typical(out: &mut [u8]) -> usize {
 pub fn run_decode_u64_array(wire: &[u8]) -> u64 {
     let mut sink = Checksum::default();
     let mut is = IStream::new();
-    is.feed(black_box(wire), &mut sink).unwrap();
+    // `unwrap` still rejects malformed input; the COMPLETE half of the verdict
+    // is asserted once, outside the timed code, in `self_check`.
+    let _ = is.feed(black_box(wire), &mut sink).unwrap();
     black_box(sink.acc)
 }
 
@@ -102,7 +104,9 @@ pub fn run_decode_u64_array(wire: &[u8]) -> u64 {
 pub fn run_decode_typical(wire: &[u8]) -> u64 {
     let mut sink = Checksum::default();
     let mut is = IStream::new();
-    is.feed(black_box(wire), &mut sink).unwrap();
+    // `unwrap` still rejects malformed input; the COMPLETE half of the verdict
+    // is asserted once, outside the timed code, in `self_check`.
+    let _ = is.feed(black_box(wire), &mut sink).unwrap();
     black_box(sink.acc)
 }
 
@@ -160,7 +164,9 @@ pub fn run_encode_composite(out: &mut [u8]) -> usize {
 pub fn run_decode_composite(wire: &[u8]) -> u64 {
     let mut sink = Checksum::default();
     let mut is = IStream::new();
-    is.feed(black_box(wire), &mut sink).unwrap();
+    // `unwrap` still rejects malformed input; the COMPLETE half of the verdict
+    // is asserted once, outside the timed code, in `self_check`.
+    let _ = is.feed(black_box(wire), &mut sink).unwrap();
     black_box(sink.acc)
 }
 
@@ -175,7 +181,7 @@ pub fn run_decode_composite(wire: &[u8]) -> u64 {
 pub fn run_decode_composite_skip(wire: &[u8]) -> bool {
     let mut sink = SkipAll;
     let mut is = IStream::new();
-    black_box(is.feed(black_box(wire), &mut sink).is_ok())
+    black_box(is.feed(black_box(wire), &mut sink) == Ok(Status::Complete))
 }
 
 /// How long one batch of operations runs before the clock is read again.
@@ -309,13 +315,13 @@ fn main() {
     let dec_u64 = measure(ba, || {
         let mut sink = Checksum::default();
         let mut is = IStream::new();
-        is.feed(black_box(&u64_buf), &mut sink).unwrap();
+        let _ = is.feed(black_box(&u64_buf), &mut sink).unwrap();
         black_box(sink.acc);
     });
     let dec_typ = measure(bt, || {
         let mut sink = Checksum::default();
         let mut is = IStream::new();
-        is.feed(black_box(&typ_buf), &mut sink).unwrap();
+        let _ = is.feed(black_box(&typ_buf), &mut sink).unwrap();
         black_box(sink.acc);
     });
 
@@ -354,7 +360,7 @@ fn main() {
     let dec_comp = measure(bc, || {
         let mut sink = Checksum::default();
         let mut is = IStream::new();
-        is.feed(black_box(&comp_buf), &mut sink).unwrap();
+        let _ = is.feed(black_box(&comp_buf), &mut sink).unwrap();
         black_box(sink.acc);
     });
     // Written out rather than calling `run_decode_composite_skip`: that entry
@@ -365,7 +371,7 @@ fn main() {
     let dec_comp_skip = measure(bc, || {
         let mut sink = SkipAll;
         let mut is = IStream::new();
-        is.feed(black_box(&comp_buf), &mut sink).unwrap();
+        let _ = is.feed(black_box(&comp_buf), &mut sink).unwrap();
     });
 
     println!("=== SofaBuffers Rust (no_std) throughput (CPU time, MB/s) ===");
