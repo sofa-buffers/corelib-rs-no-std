@@ -79,6 +79,39 @@
 //! profile never grows one — no allocator, every destination fixed-capacity
 //! caller storage (see the README's "Testing" section). The loader ignores a
 //! top-level block it does not run rather than failing or warning on it.
+//!
+//! ## Header-ceiling cases — `header_limits`
+//!
+//! The file's fourth block: bytes that **declare** a length or count and then
+//! **end**, with no payload behind them (`02 a2 06` — a 100-byte string
+//! declared at id 0, and the message stops there). The ceiling is decided at
+//! that word, before the payload is asked for, so the answer is the ceiling's
+//! and it is **terminal** — never `INCOMPLETE`, which §5.2.1 defines as the
+//! outcome more bytes *can* change.
+//!
+//! Which ceiling speaks is the subject, and the two give opposite answers on
+//! the same word: a schema `maxlen` breach is `invalid` (MESSAGE_SPEC §7.1), a
+//! §6.2.1 receiver-cap breach is `limit_exceeded`. `header_string_over_cap` and
+//! `header_string_schema_bounded` carry the *identical* bytes and differ only in
+//! which ceiling the case configures.
+//!
+//! **This profile runs the schema-bounded pair and skips the other eight.**
+//! `receiver_caps` is a profile capability, declared by a port whose generated
+//! code carries §6.2.1 caps *distinct from* schema bounds; this one refuses
+//! schema-unbounded fields at generate time, so it has no such cap and does not
+//! declare the tag. In this block an unsatisfied `requires` tag means **skip**,
+//! for every tag — the cases assert a rejection with a specific *category*, so a
+//! build that cannot represent the construct would reject it for an unrelated
+//! reason and appear to pass while testing nothing. The skips are counted,
+//! printed and asserted ([`header_limits_cases_conform`]), never silent.
+//!
+//! The ceiling itself is generated code's, as everywhere in this family: the
+//! corelib is schema-agnostic and enforces no limit of its own (`error.rs`,
+//! [`Error::LimitExceeded`]). What it owes — and what these cases exercise — is
+//! that the length word is *reported* at the word, through
+//! [`Visitor::fixlen_begin`], before any payload byte, so the consumer holding
+//! the bound can answer there. `header_limits_cases_conform` models that
+//! consumer.
 //! ## `requires`-aware feature gating
 //!
 //! Each vector may carry a top-level `requires` array naming the optional
@@ -682,6 +715,8 @@ fn shared_vectors_present_and_parsed() {
         doc.get("sequence_growth").is_some(),
         "sequence_growth block (carried, not run here)",
     );
+    // `header_limits` *is* run here, in part: see `header_limits_cases_conform`.
+    assert!(doc.get("header_limits").is_some(), "header_limits block");
 }
 
 #[test]
@@ -1102,5 +1137,584 @@ fn loader_reads_every_vector_whole() {
          max id {max_id}, max array {max_elements} elements, max payload {max_payload} bytes, \
          {fp64_arrays} fp64 arrays",
         vectors.len(),
+    );
+}
+
+// --- the `header_limits` block ----------------------------------------------
+//
+// See the module-level "Header-ceiling cases" note for what this port runs and
+// what it skips.
+
+/// The outcome vocabulary of a header-ceiling case.
+///
+/// Four values, because the block's whole subject is keeping two of them apart:
+/// a schema bound answers `invalid`, a §6.2.1 receiver cap answers
+/// `limit_exceeded`, and neither may answer `incomplete` — §5.2.1 defines that
+/// as the outcome more bytes *can* change, and after a ceiling has fired
+/// nothing can.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HeaderOutcome {
+    Incomplete,
+    Complete,
+    Invalid,
+    LimitExceeded,
+}
+
+impl HeaderOutcome {
+    fn parse(s: &str) -> Self {
+        match s {
+            "incomplete" => HeaderOutcome::Incomplete,
+            "complete" => HeaderOutcome::Complete,
+            "invalid" => HeaderOutcome::Invalid,
+            "limit_exceeded" => HeaderOutcome::LimitExceeded,
+            other => panic!("unknown header_limits outcome `{other}`"),
+        }
+    }
+
+    fn is_rejection(self) -> bool {
+        matches!(self, HeaderOutcome::Invalid | HeaderOutcome::LimitExceeded)
+    }
+}
+
+/// Which ceiling a case configures. A case carries `schema` **or** `limits`,
+/// never both: §6.2.1 forbids applying a receiver cap to a field the schema
+/// already bounds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ceiling<'a> {
+    /// `"schema": { "maxlen": N }` — a breach is `invalid` (MESSAGE_SPEC §7.1).
+    SchemaMaxlen(usize),
+    /// `"limits": { "max_dyn_…": N }` — a breach is `limit_exceeded` (§6.2.1).
+    /// This profile has no such cap; the cases carrying one are gated out.
+    ReceiverCap(&'a str, usize),
+}
+
+impl<'a> Ceiling<'a> {
+    /// The key a case's ceiling is grouped under, for the paired-control check.
+    fn key(&self) -> &'a str {
+        match *self {
+            Ceiling::SchemaMaxlen(_) => "schema.maxlen",
+            Ceiling::ReceiverCap(k, _) => k,
+        }
+    }
+}
+
+/// The ceiling a header-ceiling case configures for its run.
+fn header_ceiling(case: &Value) -> Ceiling<'_> {
+    let schema = case.get("schema").and_then(|s| s.get("maxlen"));
+    let limits = case.get("limits").and_then(Value::as_object);
+    match (schema, limits) {
+        (Some(m), None) => {
+            Ceiling::SchemaMaxlen(m.as_u64().expect("maxlen is an integer") as usize)
+        }
+        (None, Some(l)) => {
+            assert_eq!(l.len(), 1, "a case configures exactly one receiver cap");
+            let (k, v) = l.iter().next().unwrap();
+            Ceiling::ReceiverCap(
+                k.as_str(),
+                v.as_u64().expect("a cap is an integer") as usize,
+            )
+        }
+        (Some(_), Some(_)) => panic!("a case carries `schema` and `limits` — §6.2.1 forbids both"),
+        (None, None) => panic!("a header-ceiling case carries no ceiling at all"),
+    }
+}
+
+/// Whether one `requires` tag of a header-ceiling case holds for this build and
+/// this profile.
+///
+/// **An unsatisfied tag means SKIP here, for every tag** — unlike a *vector*,
+/// where an unsatisfied wire-construct tag turns the vector into a negative
+/// case. These cases already assert a rejection *with a specific category*, so a
+/// build that cannot represent the construct would reject it for an unrelated
+/// reason and appear to pass while testing nothing.
+///
+/// `receiver_caps` is a **profile** capability: a port declares it when its
+/// generated code carries §6.2.1 receiver caps *distinct from* schema bounds.
+/// This profile refuses schema-unbounded fields at generate time (see the
+/// module note), so it has no such cap and does not declare the tag —
+/// inventing one to make the cases run would test a ceiling nothing here
+/// implements. An unknown tag is treated the same way: a capability that did not
+/// exist when this reader was written is one this port has not shown it has.
+fn header_tag_satisfied(tag: &str) -> bool {
+    match tag {
+        // Wire constructs: whether this *build* can represent them.
+        "fixlen" => cfg!(feature = "fixlen"),
+        "array" => cfg!(feature = "array"),
+        "sequence" => cfg!(feature = "sequence"),
+        "fp64" => cfg!(feature = "fp64"),
+        "int64" => cfg!(feature = "value64"),
+        // Everything else: whether this *profile* declares the capability.
+        other => header_profile_capability(other),
+    }
+}
+
+/// Whether this profile declares the named profile capability. It declares
+/// none — see [`header_tag_satisfied`] for why `receiver_caps` in particular is
+/// not one of them, and why an unrecognised tag is answered the same way.
+fn header_profile_capability(_tag: &str) -> bool {
+    false
+}
+
+fn header_case_supported(requires: &[&str]) -> bool {
+    requires.iter().all(|r| header_tag_satisfied(r))
+}
+
+/// The consumer half of a schema-bounded field, as generated code would carry
+/// it: the `maxlen` lives here, the corelib knows nothing about it, and the
+/// bound is latched at [`Visitor::fixlen_begin`] — the length word, before any
+/// payload byte (`istream.rs`, and `fixlen_header_tests`).
+#[cfg(feature = "fixlen")]
+#[derive(Debug)]
+struct SchemaBoundedField {
+    field_id: Id,
+    maxlen: usize,
+    /// The `total` the corelib announced at the length word, if it announced one.
+    announced: Option<usize>,
+    /// The bound was breached by the announced length.
+    breached: bool,
+    /// Every callback the decoder made, so "a further feed consumed nothing"
+    /// can be asserted rather than assumed.
+    deliveries: usize,
+}
+
+#[cfg(feature = "fixlen")]
+impl Visitor for SchemaBoundedField {
+    fn fixlen_begin(&mut self, id: Id, subtype: sofab::FixlenType, total: usize) {
+        self.deliveries += 1;
+        // The subtype is the one *on the wire*: a field whose schema declares
+        // something else is a §7.3 skip, not a `maxlen` measurement (§4.8).
+        if id == self.field_id && subtype == sofab::FixlenType::Str && total > self.maxlen {
+            self.breached = true;
+        }
+        if id == self.field_id {
+            self.announced = Some(total);
+        }
+    }
+    fn string(&mut self, _id: Id, _total: usize, _offset: usize, _chunk: &[u8]) {
+        self.deliveries += 1;
+    }
+    fn blob(&mut self, _id: Id, _total: usize, _offset: usize, _chunk: &[u8]) {
+        self.deliveries += 1;
+    }
+    fn unsigned(&mut self, _id: Id, _value: Unsigned) {
+        self.deliveries += 1;
+    }
+}
+
+/// A receiver for one case: the corelib's decoder plus the generated code that
+/// holds the ceiling. `feed` is the whole contract the block asserts — the
+/// outcome per chunk, and terminality across chunks.
+#[cfg(feature = "fixlen")]
+struct HeaderReceiver {
+    stream: IStream,
+    field: SchemaBoundedField,
+    /// A latched terminal verdict. Once a ceiling has answered, §6.3 makes the
+    /// rejection terminal: a further feed **re-raises** it and consumes nothing.
+    verdict: Option<HeaderOutcome>,
+}
+
+#[cfg(feature = "fixlen")]
+impl HeaderReceiver {
+    fn new(field_id: Id, maxlen: usize) -> Self {
+        Self {
+            stream: IStream::new(),
+            field: SchemaBoundedField {
+                field_id,
+                maxlen,
+                announced: None,
+                breached: false,
+                deliveries: 0,
+            },
+            verdict: None,
+        }
+    }
+
+    fn feed(&mut self, chunk: &[u8]) -> HeaderOutcome {
+        if let Some(v) = self.verdict {
+            return v; // terminal: re-raised, and the bytes are not consumed
+        }
+        let status = self.stream.feed(chunk, &mut self.field);
+        // The schema bound is decided at the length word, so it is read before
+        // the decoder's own outcome: for a message that ends *at* that word the
+        // decoder says INCOMPLETE and the bound says INVALID, and §5.2 makes
+        // INVALID dominate.
+        if self.field.breached {
+            self.verdict = Some(HeaderOutcome::Invalid);
+            return HeaderOutcome::Invalid;
+        }
+        match status {
+            Ok(Status::Complete) => HeaderOutcome::Complete,
+            Ok(Status::Incomplete) => HeaderOutcome::Incomplete,
+            Err(Error::InvalidMsg) => {
+                self.verdict = Some(HeaderOutcome::Invalid);
+                HeaderOutcome::Invalid
+            }
+            Err(Error::LimitExceeded) => {
+                self.verdict = Some(HeaderOutcome::LimitExceeded);
+                HeaderOutcome::LimitExceeded
+            }
+            Err(e) => panic!("unexpected decoder error {e:?}"),
+        }
+    }
+}
+
+/// Feed one case's bytes under a `maxlen` and return the receiver and the
+/// outcome of the last feed.
+///
+/// `chunks`, where present, is how the bytes are delivered — the verdict is a
+/// property of the bytes and not of the split (§7.2 item 4), so the chunks must
+/// reassemble to `serialized`, and a decoder that compares before the varint is
+/// complete sees a truncated number.
+#[cfg(feature = "fixlen")]
+fn feed_header_case(case: &Value, field_id: Id, maxlen: usize) -> (HeaderReceiver, HeaderOutcome) {
+    let name = case["name"].as_str().expect("case name");
+    let bytes = hex_to_bytes(case["serialized"].as_str().expect("serialized"));
+    let chunks: Vec<Vec<u8>> = match case.get("chunks") {
+        Some(cs) => cs
+            .as_array()
+            .expect("chunks is an array")
+            .iter()
+            .map(|c| hex_to_bytes(c.as_str().expect("a chunk is a hex string")))
+            .collect(),
+        None => vec![bytes.clone()],
+    };
+    assert_eq!(
+        chunks.concat(),
+        bytes,
+        "[{name}] `chunks` do not reassemble `serialized`",
+    );
+
+    let mut rx = HeaderReceiver::new(field_id, maxlen);
+    let mut outcome = HeaderOutcome::Incomplete;
+    for chunk in &chunks {
+        outcome = rx.feed(chunk);
+    }
+    (rx, outcome)
+}
+
+/// Run one header-ceiling case; returns the number of checks it made.
+#[cfg(feature = "fixlen")]
+fn run_header_case(case: &Value) -> usize {
+    let name = case["name"].as_str().expect("case name");
+    let field_id = field_id_of_value(&case["field_id"]);
+    let declared = case["declared"].as_u64().expect("declared") as usize;
+    let expected = HeaderOutcome::parse(case["expect"]["outcome"].as_str().expect("outcome"));
+    let terminal = case["expect"]["terminal"].as_bool().unwrap_or(false);
+
+    let maxlen = match header_ceiling(case) {
+        Ceiling::SchemaMaxlen(n) => n,
+        Ceiling::ReceiverCap(k, _) => panic!(
+            "[{name}] configures the receiver cap `{k}`, which this profile does not have — \
+             the case should have been gated out by `receiver_caps`",
+        ),
+    };
+
+    let (mut rx, outcome) = feed_header_case(case, field_id, maxlen);
+    assert_eq!(outcome, expected, "[{name}] outcome");
+    let mut checks = 1;
+
+    // The ceiling can only answer at the word if the word was reported there:
+    // the announced length is the number generated code judges, and the case's
+    // `declared` is what it must be.
+    assert_eq!(
+        rx.field.announced,
+        Some(declared),
+        "[{name}] the length word declaring {declared} was not announced at the header",
+    );
+    checks += 1;
+
+    if terminal {
+        assert!(
+            expected.is_rejection(),
+            "[{name}] `terminal` is set on a non-rejection",
+        );
+        // A further feed re-raises rather than consuming: the payload the header
+        // declared, arriving late, cannot lift a verdict already reached (§6.3,
+        // §5.2.1).
+        let before = rx.field.deliveries;
+        let late_payload = vec![b'x'; declared];
+        assert_eq!(
+            rx.feed(&late_payload),
+            expected,
+            "[{name}] a further feed changed the verdict — the rejection is not terminal",
+        );
+        assert_eq!(
+            rx.field.deliveries, before,
+            "[{name}] a further feed was consumed after the rejection",
+        );
+        checks += 2;
+    } else {
+        // The in-ceiling control, and the half that keeps the block honest: not
+        // only must these bytes answer INCOMPLETE, the state must really be the
+        // one more bytes lift — its declared payload completes the message.
+        assert_eq!(
+            expected,
+            HeaderOutcome::Incomplete,
+            "[{name}] a non-terminal case that is not INCOMPLETE",
+        );
+        let payload = vec![b'x'; declared];
+        assert_eq!(
+            rx.feed(&payload),
+            HeaderOutcome::Complete,
+            "[{name}] the in-ceiling control did not complete once its payload arrived",
+        );
+        checks += 1;
+    }
+    checks
+}
+
+/// Every case in the block needs `fixlen` or `array`, and every `array` case
+/// also needs `receiver_caps`, which this profile never declares — so a build
+/// without `fixlen` runs none of them and this is never reached.
+#[cfg(not(feature = "fixlen"))]
+fn run_header_case(case: &Value) -> usize {
+    unreachable!(
+        "header-ceiling case `{}` ran in a build without `fixlen`",
+        case["name"],
+    )
+}
+
+#[test]
+fn header_limits_block_is_well_formed() {
+    // The block's own invariants, asserted before anything is run and
+    // independently of what this build can execute: a case this port skips is
+    // still a case whose shape it can check, and the README makes a missing
+    // in-ceiling control a bug in the block rather than an omission to tolerate.
+    let doc: Value = serde_json::from_str(VECTORS_JSON).unwrap();
+    let cases = doc["header_limits"]
+        .as_array()
+        .expect("the header_limits block");
+    assert_eq!(cases.len(), 10, "the ten header-ceiling cases");
+
+    // ceiling key -> (rejections, in-ceiling controls)
+    let mut pairs: BTreeMap<&str, (usize, usize)> = BTreeMap::new();
+
+    for case in cases {
+        let name = case["name"].as_str().expect("case name");
+        let requires = parse_requires(case);
+        let ceiling = header_ceiling(case);
+        let outcome = HeaderOutcome::parse(case["expect"]["outcome"].as_str().expect("outcome"));
+        let terminal = case["expect"].get("terminal").and_then(Value::as_bool);
+
+        assert!(
+            case.get("field_id").is_some() && case.get("declared").is_some(),
+            "[{name}] a header-ceiling case names its field and its declared length",
+        );
+        assert!(
+            !case["serialized"].as_str().expect("serialized").is_empty(),
+            "[{name}] carries the header bytes",
+        );
+
+        // Which ceiling speaks decides the category — and which tag gates it.
+        match ceiling {
+            Ceiling::ReceiverCap(k, _) => {
+                assert!(
+                    requires.contains(&"receiver_caps"),
+                    "[{name}] configures the cap `{k}` but is not gated by `receiver_caps`",
+                );
+                if outcome.is_rejection() {
+                    assert_eq!(
+                        outcome,
+                        HeaderOutcome::LimitExceeded,
+                        "[{name}] a cap breach is `limit_exceeded` (§6.2.1)",
+                    );
+                }
+            }
+            Ceiling::SchemaMaxlen(_) => {
+                assert!(
+                    !requires.contains(&"receiver_caps"),
+                    "[{name}] a schema-bounded case needs no receiver cap",
+                );
+                if outcome.is_rejection() {
+                    assert_eq!(
+                        outcome,
+                        HeaderOutcome::Invalid,
+                        "[{name}] a schema-bound breach is `invalid` (MESSAGE_SPEC §7.1)",
+                    );
+                }
+            }
+        }
+
+        // `terminal` marks the rejections, and only them: INCOMPLETE is
+        // precisely the state more bytes can lift.
+        assert_eq!(
+            terminal,
+            if outcome.is_rejection() {
+                Some(true)
+            } else {
+                None
+            },
+            "[{name}] `expect.terminal` must be set on a rejection and absent otherwise",
+        );
+
+        let slot = pairs.entry(ceiling.key()).or_insert((0, 0));
+        if outcome.is_rejection() {
+            slot.0 += 1;
+        } else {
+            slot.1 += 1;
+        }
+    }
+
+    // Every rejection is paired with the same shape at a length its ceiling
+    // admits. Without the control the block proves nothing: a port that rejects
+    // every short read passes all six rejection cases and is badly broken.
+    for (key, (rejections, controls)) in &pairs {
+        if *rejections > 0 {
+            assert!(
+                *controls > 0,
+                "ceiling `{key}` has {rejections} rejection case(s) and no in-ceiling control",
+            );
+        }
+    }
+    println!("[vectors] header_limits: ceilings (rejections, controls) {pairs:?}");
+}
+
+#[test]
+fn header_limits_cases_conform() {
+    // Bytes that *declare* a length or count and then end. The ceiling is
+    // decided at that word, before the payload is asked for, so the answer is
+    // the ceiling's and it is terminal — never INCOMPLETE (§5.2.1, §6.2.1,
+    // §6.3).
+    let doc: Value = serde_json::from_str(VECTORS_JSON).unwrap();
+    let cases = doc["header_limits"]
+        .as_array()
+        .expect("the header_limits block");
+
+    let mut ran: Vec<&str> = Vec::new();
+    let mut gated: Vec<(&str, Vec<&str>)> = Vec::new();
+    let mut checks = 0;
+
+    for case in cases {
+        let name = case["name"].as_str().expect("case name");
+        let requires = parse_requires(case);
+        if !header_case_supported(&requires) {
+            // The skip is recorded and asserted below, not silent: a block that
+            // is quietly ignored looks exactly like a block that passes.
+            gated.push((name, requires));
+            continue;
+        }
+        ran.push(name);
+        checks += run_header_case(case);
+    }
+
+    println!(
+        "[vectors] header_limits: {} cases ran, {} gated out by `requires`, {checks} checks",
+        ran.len(),
+        gated.len(),
+    );
+    println!("[vectors] header_limits: ran {ran:?}");
+    for (name, requires) in &gated {
+        let missing: Vec<&&str> = requires
+            .iter()
+            .filter(|r| !header_tag_satisfied(r))
+            .collect();
+        println!("[vectors] header_limits: skipped {name} — needs {missing:?}");
+    }
+
+    assert_eq!(
+        ran.len() + gated.len(),
+        cases.len(),
+        "every case is either run or accounted for as a skip",
+    );
+    // A skip is only legitimate for a tag this build/profile really lacks.
+    for (name, requires) in &gated {
+        assert!(
+            requires.iter().any(|r| !header_tag_satisfied(r)),
+            "[{name}] was skipped although every tag it needs is satisfied",
+        );
+    }
+
+    // What this profile owes, pinned exactly. `receiver_caps` is not declared
+    // here — this profile refuses schema-unbounded fields at generate time, so
+    // there is no §6.2.1 cap to exercise — but the schema-bounded pair needs no
+    // cap and must run. It is also the pair that keeps the two categories apart:
+    // `header_string_schema_bounded` carries the *identical* bytes to
+    // `header_string_over_cap` and differs only in which ceiling is configured.
+    #[cfg(feature = "fixlen")]
+    {
+        assert_eq!(
+            ran,
+            [
+                "header_string_schema_bounded",
+                "header_string_schema_bounded_in_bound"
+            ],
+            "the schema-bounded pair must run on this profile",
+        );
+        assert_eq!(gated.len(), 8, "the eight cap-bound cases are skipped");
+        for (name, requires) in &gated {
+            assert!(
+                requires.contains(&"receiver_caps"),
+                "[{name}] was skipped for something other than the undeclared \
+                 `receiver_caps` — a wire construct this build lacks is a \
+                 different kind of skip and should be named as such",
+            );
+        }
+    }
+    // Without `fixlen` there is no scalar length word to judge, and every
+    // `array` case is cap-bound: the whole block gates out.
+    #[cfg(not(feature = "fixlen"))]
+    assert!(
+        ran.is_empty(),
+        "no header-ceiling case can run without `fixlen`",
+    );
+}
+
+/// The negative control: with the ceiling lifted, the rejections fall back to
+/// `INCOMPLETE`.
+///
+/// This is what shows the verdicts come from the ceiling and not from something
+/// incidental — a decoder that rejected these bytes for its own reasons (a
+/// length it dislikes, a truncated varint) would answer the same way with no
+/// ceiling configured, and the block would be measuring nothing. It is also the
+/// assertion that this corelib **enforces no limit of its own** (`error.rs`,
+/// [`Error::LimitExceeded`]): schema bounds and receiver caps are the
+/// consumer's, so with none configured the header word is merely the start of a
+/// field whose payload has not arrived.
+///
+/// Gated on `fixlen` with the machinery it uses; a build without it runs no
+/// header-ceiling case for there to be a control over.
+#[cfg(feature = "fixlen")]
+#[test]
+fn header_limits_verdicts_come_from_the_ceiling() {
+    let doc: Value = serde_json::from_str(VECTORS_JSON).unwrap();
+    let cases = doc["header_limits"].as_array().unwrap();
+
+    let mut rejections = 0;
+    let mut fell_back = 0;
+    for case in cases {
+        if !header_case_supported(&parse_requires(case)) {
+            continue;
+        }
+        let name = case["name"].as_str().unwrap();
+        let field_id = field_id_of_value(&case["field_id"]);
+        let expected = HeaderOutcome::parse(case["expect"]["outcome"].as_str().unwrap());
+
+        // `usize::MAX` is the ceiling lifted: no declared length can breach it.
+        let (_, lifted) = feed_header_case(case, field_id, usize::MAX);
+        if expected.is_rejection() {
+            rejections += 1;
+            assert_eq!(
+                lifted,
+                HeaderOutcome::Incomplete,
+                "[{name}] rejected with no ceiling configured — the verdict does \
+                 not come from the ceiling",
+            );
+            fell_back += 1;
+        } else {
+            assert_eq!(
+                lifted, expected,
+                "[{name}] an in-ceiling control changed when the ceiling was lifted",
+            );
+        }
+    }
+    println!(
+        "[vectors] header_limits: ceilings lifted — {fell_back} of {rejections} rejection(s) \
+         fell back to INCOMPLETE",
+    );
+    // On this profile exactly one rejection runs: the schema-bounded case. The
+    // other five are cap-bound and gated out by `receiver_caps`.
+    assert_eq!(
+        rejections, 1,
+        "expected the one schema-bounded rejection to run on this profile",
     );
 }
