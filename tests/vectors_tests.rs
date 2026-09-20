@@ -112,6 +112,46 @@
 //! [`Visitor::fixlen_begin`], before any payload byte, so the consumer holding
 //! the bound can answer there. `header_limits_cases_conform` models that
 //! consumer.
+//!
+//! ## Boolean tolerance — `boolean_tolerant`
+//!
+//! The file's sixth block, and the only one whose bytes no conforming encoder
+//! produces: `2`, `256` and `2^64-1` sitting at a boolean position. CORELIB_PLAN
+//! §4.4 is *canonical on encode, tolerant on decode* — an encoder MUST write
+//! `true` as `1`, a decoder MUST read **every** value other than `0` as `true`,
+//! and a re-encode emits `1`. A boolean carries no width bound at all, unlike an
+//! `enum` or a `bitfield` (MESSAGE_SPEC §1), so `256` is not INVALID.
+//!
+//! The positive `vectors` array cannot reach that half of the rule: its bytes
+//! come from replaying `fields` through a conforming encoder, which never emits
+//! a non-canonical boolean. Hence a hand-authored, decode-then-re-encode block.
+//!
+//! **Both halves are asserted for every case**, because the three defects §4.4
+//! is written against land in three different places: answering INVALID for
+//! `256` shows up in the outcome; truncating `256` to `false` shows up only in
+//! the stored value, with a perfect `COMPLETE` beside it; storing the raw `2`
+//! unnormalized shows up only in the re-encoded bytes, since `2` is true under
+//! every truthiness test there is.
+//!
+//! **The surfaces, in this port.** A boolean has no wire type of its own — it is
+//! an unsigned integer (`0b000`), and a boolean array rides the unsigned-varint
+//! array (`0b011`) — and this corelib is schema-agnostic, so it has no boolean
+//! *reader*: `boolean` is a schema type. The read surface modelled here is the
+//! consumer's, the single `!= 0` test generated code applies to the delivered
+//! [`Unsigned`] (`BooleanReader`); the write surface is the corelib's own
+//! [`OStream::write_boolean`], plus [`OStream::write_array_unsigned`] at `u8`
+//! width for the array cases (this port has no boolean-array writer, and the
+//! declared element width never reaches the wire — §4.7).
+//!
+//! **`requires` means REJECT here, not skip.** §4.4 lifts the width bound the
+//! *type* carries, not the one a *build* carries: §6.2.2 makes a narrowed scalar
+//! width a permitted profile variation and §6.2 makes a varint that does not fit
+//! the built width INVALID (§5.2.2). So on a `value64`-off build the two
+//! `int64`-tagged cases must be **rejected**, and on an `array`-off build the
+//! two array cases likewise — skipping them would assert nothing at all in
+//! exactly the build most likely to truncate. The five untagged cases are the
+//! block's unconditional floor and run positively in every configuration.
+//!
 //! ## `requires`-aware feature gating
 //!
 //! Each vector may carry a top-level `requires` array naming the optional
@@ -717,6 +757,14 @@ fn shared_vectors_present_and_parsed() {
     );
     // `header_limits` *is* run here, in part: see `header_limits_cases_conform`.
     assert!(doc.get("header_limits").is_some(), "header_limits block");
+    // `boolean_tolerant` is run here whole: see `boolean_tolerant_cases_conform`
+    // and the shape guard in `boolean_tolerant_block_is_well_formed`. A copy of
+    // the corpus that predates the block would fail here rather than iterate
+    // zero cases and pass.
+    assert!(
+        doc.get("boolean_tolerant").is_some(),
+        "boolean_tolerant block",
+    );
 }
 
 #[test]
@@ -1717,4 +1765,485 @@ fn header_limits_verdicts_come_from_the_ceiling() {
         rejections, 1,
         "expected the one schema-bounded rejection to run on this profile",
     );
+}
+
+// --- the `boolean_tolerant` block -------------------------------------------
+//
+// See the module-level "Boolean tolerance" note for what the block pins and how
+// this port models the boolean surfaces.
+
+/// The poison a destination slot carries before the feed (§8.4).
+///
+/// Neither `0` nor `1`, so a decoder that never writes the slot cannot pass the
+/// `[false]` case against zeroed storage.
+const BOOLEAN_POISON: u8 = 0xAA;
+
+/// The boolean **read** surface, modelled receiver-side.
+///
+/// This corelib is schema-agnostic, so it has no boolean reader of its own:
+/// `boolean` is a *schema* type and rides the plain unsigned wire type
+/// (CORELIB_PLAN §4.4). The boolean read surface in this port is therefore the
+/// consumer's — the single `!= 0` test generated code applies to the
+/// [`Unsigned`] the visitor is handed — and it is exactly where the defects §4.4
+/// is written against would land: a decoder that truncated the varint to the
+/// destination width before delivering it hands over `0` for `256`, and the
+/// `!= 0` then reads `false` while the outcome stays `COMPLETE`.
+///
+/// The destination holds the **byte representation** of each decoded boolean.
+/// `#![forbid(unsafe_code)]` — and Rust's object model, under which a `bool` may
+/// only ever hold the representations of `false` and `true` — rule out poisoning
+/// a `bool` slot with [`BOOLEAN_POISON`] and reading it back, so this is the
+/// byte-copy form of that check: the visitor normalizes to a real `bool` and
+/// stores `b as u8`, which is that `bool`'s representation byte by definition.
+/// A slot still holding the poison after the feed is a decoder that never wrote.
+struct BooleanReader {
+    id: Id,
+    slots: Vec<u8>,
+    written: usize,
+    /// Elements that arrived past the end of the destination. Recorded rather
+    /// than asserted: this runs inside the decoder, and an assertion that fires
+    /// there can be swallowed or leave the stream in a state that masks the
+    /// failure (§11.10). Everything here is asserted after `feed` returns.
+    overflow: usize,
+    /// What `array_begin` announced: the wire element count, and whether the
+    /// kind it named was the unsigned array. `None` if no array header arrived.
+    announced: Option<(usize, bool)>,
+}
+
+impl BooleanReader {
+    fn new(id: Id, len: usize) -> Self {
+        Self {
+            id,
+            slots: vec![BOOLEAN_POISON; len],
+            written: 0,
+            overflow: 0,
+            announced: None,
+        }
+    }
+}
+
+impl Visitor for BooleanReader {
+    fn unsigned(&mut self, id: Id, value: Unsigned) {
+        if id != self.id {
+            return;
+        }
+        // The boolean read surface, in full: one test against zero, no mask, no
+        // width narrowing. `as u8` on the resulting `bool` is its representation
+        // byte, so what lands in the destination is `0` or `1` and nothing else.
+        let normalized: bool = value != 0;
+        match self.slots.get_mut(self.written) {
+            Some(slot) => {
+                *slot = normalized as u8;
+                self.written += 1;
+            }
+            None => self.overflow += 1,
+        }
+    }
+
+    #[cfg(feature = "array")]
+    fn array_begin(&mut self, id: Id, kind: ArrayKind, count: usize) {
+        if id == self.id {
+            self.announced = Some((count, kind == ArrayKind::Unsigned));
+        }
+    }
+}
+
+/// Re-encode what the decoder produced, through this port's boolean **write**
+/// surface, at the case's own field id.
+///
+/// Scalar: [`OStream::write_boolean`], which is the canonical-on-encode half of
+/// §4.4 — it writes `value as Unsigned`, so a `true` can only ever leave as `1`.
+///
+/// Array: this port has no boolean-array writer, and §9 allows the unsigned-array
+/// writer fed the normalized 0/1 values at any element width, because the
+/// declared element width never reaches the wire (CORELIB_PLAN §4.7). `u8` is
+/// the narrowest width on offer, which is the point of choosing it: a value that
+/// had *not* been normalized could not be smuggled through it unnoticed.
+fn reencode_booleans(id: Id, decoded: &[bool]) -> core::result::Result<Vec<u8>, Error> {
+    // The longest re-encode in the block is seven bytes; 64 is room to spare, so
+    // a `BufferFull` here would be a real encoder failure and not a short buffer.
+    //
+    // Nothing is left buffered when this returns (§16): a stream installed with
+    // [`OStream::new`] has no [`Flush`] sink, so every byte written is in `buf`
+    // and `bytes_used` is the whole message — the same shape `encode_fields`
+    // uses. (`write_sequence_begin_lazy` is the one writer that holds output
+    // back, and this block has no sequences.)
+    let mut buf = vec![0u8; 64];
+    let used = {
+        let mut os = OStream::new(&mut buf);
+        if decoded.len() == 1 {
+            os.write_boolean(id, decoded[0])?;
+        } else {
+            #[cfg(feature = "array")]
+            {
+                let elements: Vec<u8> = decoded.iter().map(|&b| b as u8).collect();
+                os.write_array_unsigned(id, &elements)?;
+            }
+            #[cfg(not(feature = "array"))]
+            unreachable!("a multi-element case needs `array`, which this build gates out");
+        }
+        os.bytes_used()
+    };
+    Ok(buf[..used].to_vec())
+}
+
+/// The destination bytes a case expects: `0` for `false`, `1` for `true`.
+fn expected_boolean_bytes(values: &[bool]) -> Vec<u8> {
+    values.iter().map(|&b| b as u8).collect()
+}
+
+/// A case's `expect.values`, read strictly — a non-boolean JSON value is a
+/// loader error, never coerced (§11.4).
+fn boolean_case_values(case: &Value, name: &str) -> Vec<bool> {
+    case["expect"]["values"]
+        .as_array()
+        .unwrap_or_else(|| panic!("[{name}] expect.values is an array"))
+        .iter()
+        .map(|v| {
+            v.as_bool()
+                .unwrap_or_else(|| panic!("[{name}] expect.values holds a JSON boolean"))
+        })
+        .collect()
+}
+
+/// Run one `boolean_tolerant` case on the **positive** path. Returns the number
+/// of checks performed.
+fn run_boolean_tolerant_case(case: &Value) -> usize {
+    let name = case["name"].as_str().expect("case name");
+    // Read from the case, never hardcoded: every case carries id 0 today, and a
+    // hardcoded 0 would silently decode — and re-encode — at the wrong field the
+    // moment the corpus adds one that does not (§11.9).
+    let id = field_id_of_value(&case["id"]);
+    let bytes = hex_to_bytes(case["serialized_hex"].as_str().expect("serialized_hex"));
+    let values = boolean_case_values(case, name);
+    let reencoded_hex = case["expect"]["reencoded_hex"]
+        .as_str()
+        .expect("expect.reencoded_hex");
+
+    // Read the key rather than assume it: the block is `complete` throughout
+    // today, and a future case with another outcome must fail loudly here rather
+    // than be mis-run by a runner that hardcoded the answer (§11.14).
+    let outcome_key = case["expect"]["outcome"].as_str().expect("expect.outcome");
+    assert_eq!(
+        outcome_key, "complete",
+        "[{name}] carries an outcome this runner does not implement",
+    );
+
+    let expected_slots = expected_boolean_bytes(&values);
+
+    // --- A. decode ---------------------------------------------------------
+    // A fresh decoder and a freshly poisoned destination per case: a latched
+    // verdict or a retained buffer from the previous case must not reach this
+    // one (§11.11).
+    let mut reader = BooleanReader::new(id, values.len());
+    let mut is = IStream::new();
+    let outcome = is.feed(&bytes, &mut reader);
+
+    assert_eq!(
+        outcome,
+        Ok(Status::Complete),
+        "[{name}] a tolerated boolean is not a rejected one — §4.4 makes every \
+         non-zero value `true`, not INVALID",
+    );
+    assert_eq!(
+        reader.overflow, 0,
+        "[{name}] the decoder delivered more elements than the wire declares",
+    );
+    assert_eq!(
+        reader.written,
+        values.len(),
+        "[{name}] the decoder delivered {} of {} element(s)",
+        reader.written,
+        values.len(),
+    );
+    if let Some((count, kind_is_unsigned)) = reader.announced {
+        // §13's element-count cross-check: the count the array header announced
+        // must be the count the case carries, so a decoder that delivers fewer
+        // elements than the wire declares cannot hide behind a short loop.
+        assert_eq!(
+            count,
+            values.len(),
+            "[{name}] `array_begin` announced {count} element(s)",
+        );
+        assert!(
+            kind_is_unsigned,
+            "[{name}] a boolean array rides the unsigned-varint array wire type",
+        );
+    }
+    // The whole point: the *stored representation*, not a truthiness test. A
+    // decoder that truncated `256` into an 8-bit destination stores `0` here and
+    // answers `COMPLETE` above — that pair is the trap case 5 exists for.
+    assert_eq!(
+        reader.slots, expected_slots,
+        "[{name}] decoded to {:?}, expected {expected_slots:?} — §4.4: every \
+         value other than 0 reads as true, normalized, never truncated",
+        reader.slots,
+    );
+
+    // --- B. re-encode ------------------------------------------------------
+    // From the decode destination, never from `expect.values` (§11.3): feeding
+    // the expectation back in would make this half of the case tautological.
+    let decoded: Vec<bool> = reader.slots.iter().map(|&b| b == 1).collect();
+    let produced = reencode_booleans(id, &decoded)
+        .unwrap_or_else(|e| panic!("[{name}] the boolean write surface failed: {e:?}"));
+    assert_eq!(
+        bytes_to_hex(&produced),
+        reencoded_hex,
+        "[{name}] re-encode mismatch — §4.4 is canonical on encode: `true` is \
+         written as `1`, whatever value it was read from",
+    );
+
+    // --- chunked decode (§13) ----------------------------------------------
+    // The same feed one byte at a time. Cases 6 and 8 carry ten-byte varints, so
+    // this is the shape that makes the accumulator span feed boundaries.
+    let mut chunked = BooleanReader::new(id, values.len());
+    let mut is = IStream::new();
+    let mut last = Ok(Status::Incomplete);
+    for b in &bytes {
+        last = is.feed(&[*b], &mut chunked);
+        assert!(
+            last.is_ok(),
+            "[{name}] chunked feeding rejected a well-formed prefix: {last:?}",
+        );
+    }
+    assert_eq!(
+        last,
+        Ok(Status::Complete),
+        "[{name}] chunked decode outcome"
+    );
+    assert_eq!(
+        chunked.slots, expected_slots,
+        "[{name}] chunked decode produced different values",
+    );
+
+    // The C reference counts 2 per positive case (decode + re-encode); the third
+    // is the chunked feed above, which this port adds and counts, so the tally
+    // printed here is comparable to the reference's once that is known.
+    3
+}
+
+/// Run one `boolean_tolerant` case on the **reject** path, for a build whose
+/// capabilities its `requires` names but this build lacks. Returns the number of
+/// checks performed.
+///
+/// §4.4 lifts the width bound the *type* carries, not the one a *build* carries:
+/// CORELIB_PLAN §6.2.2 makes a narrowed scalar width a permitted profile
+/// variation, and §6.2 makes a varint that does not fit the built width
+/// `INVALID` (§5.2.2). So under `value64` off a boolean carrying `2^64-1`
+/// overflows the accumulator before any boolean rule can apply, and rejecting is
+/// the conformant answer — reading it as `true` by truncation is the corruption
+/// this block exists to catch, and *skipping* the case asserts nothing at all in
+/// exactly the build most likely to have it. The same holds for `array`: this
+/// port drops the wire construct with the feature, so a message carrying one is
+/// rejected rather than partially decoded (see
+/// [`unsupported_vectors_are_rejected_not_ignored`]).
+fn expect_boolean_tolerant_rejected(case: &Value) -> usize {
+    let name = case["name"].as_str().expect("case name");
+    let bytes = hex_to_bytes(case["serialized_hex"].as_str().expect("serialized_hex"));
+
+    // A visitor that binds nothing: fields standing before the offending one may
+    // legitimately have been delivered already, so the verdict is what is
+    // asserted, not what arrived.
+    let (outcome, _) = common::feed(&bytes);
+    assert_eq!(
+        outcome,
+        Err(Error::InvalidMsg),
+        "[{name}] needs {:?}, which this build lacks — a width overflow or a \
+         dropped construct is INVALID (§5.2.2), not a decoded `true`",
+        parse_requires(case),
+    );
+
+    // Terminal (§5.2): one more byte must not lift the verdict.
+    let mut rec = common::Recorder::new();
+    let mut is = IStream::new();
+    assert_eq!(is.feed(&bytes, &mut rec), Err(Error::InvalidMsg));
+    assert_eq!(
+        is.feed(&[0x00], &mut rec),
+        Err(Error::InvalidMsg),
+        "[{name}] a later feed lifted the rejection — INVALID is terminal",
+    );
+
+    // Chunked (§13): every byte before the verdict is a well-formed prefix, and
+    // once INVALID appears it stays.
+    let mut rec = common::Recorder::new();
+    let mut is = IStream::new();
+    let mut reached = false;
+    for b in &bytes {
+        match is.feed(&[*b], &mut rec) {
+            Ok(Status::Complete) | Ok(Status::Incomplete) => {}
+            Err(Error::InvalidMsg) => {
+                reached = true;
+                break;
+            }
+            other => panic!("[{name}] chunked reject produced {other:?}"),
+        }
+    }
+    assert!(
+        reached,
+        "[{name}] chunked feeding never reached the rejection",
+    );
+    assert_eq!(
+        is.feed(&[0x00], &mut rec),
+        Err(Error::InvalidMsg),
+        "[{name}] the chunked rejection was not terminal",
+    );
+
+    1
+}
+
+#[test]
+fn boolean_tolerant_block_is_well_formed() {
+    // The loader guard. Every failure mode in §11 that runs *fewer* cases than
+    // the file carries — a stale copy of the corpus, a filter that drops the
+    // array cases, a truncating loader — is invisible without this and the tally
+    // in `boolean_tolerant_cases_conform`: the loop body simply never runs and
+    // the suite is green.
+    let doc: Value = serde_json::from_str(VECTORS_JSON).unwrap();
+    let cases = doc["boolean_tolerant"]
+        .as_array()
+        .expect("the boolean_tolerant block");
+
+    // A floor, not an equality: the block may grow upstream, and this file is a
+    // verbatim copy that must not need editing when it does (the same rule the
+    // rest of the inventory guards here follow).
+    assert!(
+        cases.len() >= 8,
+        "expected at least the eight documented boolean_tolerant cases, found {}",
+        cases.len(),
+    );
+
+    let mut untagged = 0;
+    let mut scalar = 0;
+    let mut arrays = 0;
+    for case in cases {
+        let name = case["name"].as_str().expect("case name");
+        assert_eq!(
+            case["group"].as_str(),
+            Some("boolean/tolerant"),
+            "[{name}] group",
+        );
+        let hex = case["serialized_hex"]
+            .as_str()
+            .unwrap_or_else(|| panic!("[{name}] serialized_hex"));
+        assert!(hex.len() % 2 == 0 && !hex.is_empty(), "[{name}] hex length");
+        assert!(
+            hex.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()),
+            "[{name}] serialized_hex is lowercase hex",
+        );
+        assert!(
+            case["expect"]["reencoded_hex"].as_str().is_some(),
+            "[{name}] expect.reencoded_hex",
+        );
+        let values = boolean_case_values(case, name);
+        assert!(!values.is_empty(), "[{name}] expect.values is non-empty");
+        if values.len() == 1 {
+            scalar += 1;
+        } else {
+            arrays += 1;
+        }
+        if parse_requires(case).is_empty() {
+            untagged += 1;
+        }
+    }
+
+    // Floors on the block's shape, so a corpus that lost a half of the rule is
+    // caught here rather than showing up as a still-green run with a smaller
+    // tally. The array cases are the ones a scalar-only runner drops (§11.13).
+    assert!(untagged >= 5, "the unconditional floor of §7: {untagged}");
+    assert!(scalar >= 6, "scalar cases: {scalar}");
+    assert!(arrays >= 2, "array cases: {arrays}");
+    println!(
+        "[vectors] boolean_tolerant: {} cases ({scalar} scalar, {arrays} array, \
+         {untagged} untagged)",
+        cases.len(),
+    );
+}
+
+#[test]
+fn boolean_tolerant_cases_conform() {
+    // CORELIB_PLAN §4.4: canonical on encode, tolerant on decode. An encoder
+    // MUST write `true` as `1`; a decoder MUST read every value other than `0`
+    // as `true` — not INVALID, normalized away, and a re-encode emits `1`.
+    //
+    // The positive `vectors` array cannot reach this half of the rule: its bytes
+    // are produced by replaying `fields` through a conforming encoder, and a
+    // conforming encoder never emits a non-canonical boolean. Bytes carrying
+    // `2`, `256` or `2^64-1` at a boolean position only ever arrive from someone
+    // else's encoder, which is why this block is hand-authored and separate.
+    //
+    // Both halves are asserted for every case, because the three defects §4.4 is
+    // written against land in three different places: answering INVALID for
+    // `256` shows up in the outcome, truncating `256` to `false` only in the
+    // stored value (the outcome is a perfect COMPLETE), and storing the raw `2`
+    // without normalizing only in the re-encoded bytes (`2` is true under every
+    // truthiness test there is).
+    let doc: Value = serde_json::from_str(VECTORS_JSON).unwrap();
+    let cases = doc["boolean_tolerant"]
+        .as_array()
+        .expect("the boolean_tolerant block");
+
+    let found = cases.len();
+    let mut decoded: Vec<&str> = Vec::new();
+    let mut rejected: Vec<(&str, Vec<&str>)> = Vec::new();
+    let mut checks = 0;
+
+    for case in cases {
+        let name = case["name"].as_str().expect("case name");
+        let requires = parse_requires(case);
+        // Unlike `header_limits`, an unsatisfied tag here is a *negative* case,
+        // not a skip — see `expect_boolean_tolerant_rejected`. `vector_supported`
+        // is the same mapping the positive vectors use (`int64` -> `value64`,
+        // unknown tags assumed supported, per the corpus's forward-compatibility
+        // rule).
+        if vector_supported(&requires) {
+            decoded.push(name);
+            checks += run_boolean_tolerant_case(case);
+        } else {
+            rejected.push((name, requires));
+            checks += expect_boolean_tolerant_rejected(case);
+        }
+    }
+
+    println!(
+        "[vectors] boolean_tolerant: {found} cases found, {} decoded, {} rejected, \
+         {checks} checks",
+        decoded.len(),
+        rejected.len(),
+    );
+    for (name, requires) in &rejected {
+        println!("[vectors] boolean_tolerant: rejected {name} — needs {requires:?}");
+    }
+
+    // A run that found nothing is a failure, not a pass: that is what a stale
+    // copy of the shared corpus looks like from in here.
+    assert!(found > 0, "the boolean_tolerant block is empty");
+    assert_eq!(
+        decoded.len() + rejected.len(),
+        found,
+        "every case is either decoded or asserted rejected — never merely skipped",
+    );
+    // The five untagged cases are §7's unconditional floor: they run positively
+    // in every build this crate can be compiled into, the most reduced one
+    // included.
+    assert!(
+        decoded.len() >= 5,
+        "the untagged cases must run positively in every configuration, got {}",
+        decoded.len(),
+    );
+    // A rejection is only legitimate for a capability this build really lacks.
+    for (name, requires) in &rejected {
+        assert!(
+            requires.iter().any(|r| !vector_supported(&[r])),
+            "[{name}] was rejected although every tag it needs is satisfied",
+        );
+    }
+    // With every feature on there is nothing to gate, so the block must run
+    // whole — the shape CI's full leg is asserting.
+    if cfg!(all(feature = "array", feature = "value64")) {
+        assert!(
+            rejected.is_empty(),
+            "a full build gates nothing out: {rejected:?}",
+        );
+    }
 }
