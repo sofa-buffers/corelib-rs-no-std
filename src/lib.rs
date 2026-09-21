@@ -33,6 +33,13 @@
 //!   because decoding streams, fields ahead of the offending construct have
 //!   already reached the [`Visitor`] when the rejection arrives; see
 //!   [`IStream::feed`] and the README's "Feature flags" section.
+//! * **Wrapper-array slots in [`seq`]** — the generic helpers generated code
+//!   calls to place an element at its id, fill the gap before it and check the
+//!   index against the schema `count` (`INVALID`) or a passed-in receiver cap
+//!   (`LIMIT_EXCEEDED`). The codec never calls them. They are generic over the
+//!   destination: `heapless::Vec` behind the optional `heapless` feature,
+//!   `alloc::vec::Vec` behind the optional `alloc` feature — neither is on by
+//!   default, and neither adds wire code.
 //! * **Sequences frame lazily** — [`OStream::write_sequence_begin_lazy`] holds a
 //!   sequence header back until the sequence turns out to have content, so a
 //!   sequence-typed *field* equal to its declared default is omitted rather than
@@ -101,11 +108,15 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+#[cfg(feature = "alloc")]
+extern crate alloc;
+
 mod error;
 mod istream;
 mod ostream;
 #[cfg(feature = "fixlen")]
 mod payload;
+pub mod seq;
 mod types;
 mod varint;
 

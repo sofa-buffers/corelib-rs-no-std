@@ -193,7 +193,10 @@ jobs:
       # that only surface when a feature is off. `--no-dev-deps` keeps it to the
       # library (the conformance test crates need all wire types to compile).
       - name: Clippy every feature combination (library)
-        run: cargo hack --feature-powerset --no-dev-deps clippy --lib -- -D warnings
+        # `alloc` / `heapless` only add a `seq::SeqVec` impl that touches no wire
+        # feature; `--all-features` in `lint` covers them, so they stay out of
+        # the sweep rather than quadrupling it.
+        run: cargo hack --feature-powerset --no-dev-deps --exclude-features alloc,heapless clippy --lib -- -D warnings
 
       # Behavioural smoke test (encode -> decode) under every combination. The
       # config_tests crate is `cfg`-gated so it builds and runs for any subset.
@@ -210,7 +213,7 @@ jobs:
       # width would leave the narrowed ceiling unpinned.
       - name: Test every feature combination (config + vector conformance + ID_MAX)
         run: |
-          cargo hack --feature-powerset test \
+          cargo hack --feature-powerset --exclude-features alloc,heapless test \
             --test config_tests --test vectors_tests --test id_max_tests
 
   coverage:

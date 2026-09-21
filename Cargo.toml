@@ -80,6 +80,23 @@ fp64 = ["fixlen"]
 value64 = []
 
 # ---------------------------------------------------------------------------
+# Destination containers for `sofab::seq`, the wrapper-array helpers generated
+# code calls. Unlike the flags above these add no wire code and narrow nothing:
+# each implements `sofab::seq::SeqVec` for one container type, so the generic
+# helpers can grow it. Both are off by default and cost nothing unless a
+# generated crate names them — sofabgen does, for exactly the storage it emits.
+# ---------------------------------------------------------------------------
+# `alloc::vec::Vec` (sofabgen `rust.allow_dynamic: true`). Links `alloc`, so it
+# needs a global allocator in the final image; the crate stays `#![no_std]`.
+alloc = []
+# `heapless::Vec<T, N>` (sofabgen `rust.allow_dynamic: false`, the default):
+# fixed-capacity storage sized from the schema, no allocator.
+heapless = ["dep:heapless"]
+
+[dependencies]
+heapless = { version = "0.8", optional = true, default-features = false }
+
+# ---------------------------------------------------------------------------
 # Size-optimized release profile suitable for embedded firmware.
 # ---------------------------------------------------------------------------
 [profile.release]
