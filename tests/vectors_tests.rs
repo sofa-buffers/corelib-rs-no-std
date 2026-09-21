@@ -113,6 +113,39 @@
 //! the bound can answer there. `header_limits_cases_conform` models that
 //! consumer.
 //!
+//! ## Nested header-ceiling cases — `header_limits_nested`
+//!
+//! The same assertion as `header_limits`, one or two sequence frames deeper.
+//! Every flat case puts its field at the top level, so one axis stays untested
+//! there: the identical over-ceiling header delivered **inside an open
+//! sequence**. This block is that axis and only that axis — the key set, the
+//! outcome vocabulary, the terminality rule and the pairing of each rejection
+//! with an in-ceiling control are inherited unchanged. Its one new key is
+//! `frames`: the chain of sequence ids the field is nested in, outermost first
+//! (`[7]`, or `[7, 3]` for the depth-2 pair), which the receiver
+//! ([`SchemaBoundedField`]) rebuilds from `sequence_begin` / `sequence_end` and
+//! compares before it applies the bound. It is a **separate** top-level block
+//! for exactly that reason: a runner that ignored `frames` would bind its
+//! ceiling at the top level, cap nothing, and answer INCOMPLETE.
+//!
+//! Depth makes INCOMPLETE a far better trap than it is at the top level: these
+//! messages end with their sequences **still open**, so a decoder has a second,
+//! fully independent reason to answer INCOMPLETE — and a port that rejected
+//! unclosed frames on general principle would answer INVALID and pass while
+//! never having consulted the ceiling. Both halves are covered:
+//! [`header_limits_nested_cases_conform`] fails the first,
+//! [`header_limits_nested_verdicts_come_from_the_ceiling`] the second, by
+//! lifting the bound and requiring the verdict to change.
+//!
+//! **This profile runs the depth-1 schema-bounded pair and skips the other
+//! six**, for the same reason it skips eight of the flat ten: `receiver_caps` is
+//! a profile capability this one does not declare. Both depth-2 cases are
+//! cap-bound, so the shared block's depth-2 axis cannot run here; it is mirrored
+//! instead by [`nested_depth2_schema_bounded_mirror`], which feeds those cases'
+//! own bytes under a schema `maxlen`. The leaf is the *same* leaf the flat block
+//! uses — a nested block with a reimplemented leaf would test this file's own
+//! size comparison rather than the decoder's enforcement point.
+//!
 //! ## Boolean tolerance — `boolean_tolerant`
 //!
 //! The file's sixth block, and the only one whose bytes no conforming encoder
@@ -757,6 +790,11 @@ fn shared_vectors_present_and_parsed() {
     );
     // `header_limits` *is* run here, in part: see `header_limits_cases_conform`.
     assert!(doc.get("header_limits").is_some(), "header_limits block");
+    // As is `header_limits_nested` — the same cases one or two frames deeper.
+    assert!(
+        doc.get("header_limits_nested").is_some(),
+        "header_limits_nested block",
+    );
     // `boolean_tolerant` is run here whole: see `boolean_tolerant_cases_conform`
     // and the shape guard in `boolean_tolerant_block_is_well_formed`. A copy of
     // the corpus that predates the block would fail here rather than iterate
@@ -1311,11 +1349,25 @@ fn header_case_supported(requires: &[&str]) -> bool {
 /// it: the `maxlen` lives here, the corelib knows nothing about it, and the
 /// bound is latched at [`Visitor::fixlen_begin`] — the length word, before any
 /// payload byte (`istream.rs`, and `fixlen_header_tests`).
+///
+/// **Where** the field lives is `frames`: the chain of sequence ids the bound
+/// field is nested in, outermost first, empty for a top-level field. It is the
+/// only thing the `header_limits_nested` block adds to the flat one, and it is
+/// carried *here*, in the one leaf both blocks share — a nested block with a
+/// leaf of its own would test this file's own size comparison rather than the
+/// decoder's enforcement point.
 #[cfg(feature = "fixlen")]
 #[derive(Debug)]
 struct SchemaBoundedField {
     field_id: Id,
     maxlen: usize,
+    /// The sequence ids the bound field is nested in, outermost first. Empty
+    /// means the top level, which is every `header_limits` case.
+    frames: Vec<Id>,
+    /// The sequence ids currently open, outermost first — the decoder's own
+    /// frame chain, rebuilt from `sequence_begin` / `sequence_end`. The bound
+    /// applies only where this equals `frames`.
+    open: Vec<Id>,
     /// The `total` the corelib announced at the length word, if it announced one.
     announced: Option<usize>,
     /// The bound was breached by the announced length.
@@ -1323,6 +1375,38 @@ struct SchemaBoundedField {
     /// Every callback the decoder made, so "a further feed consumed nothing"
     /// can be asserted rather than assumed.
     deliveries: usize,
+    /// Payload bytes of the bound field handed over. §6.2.1 is "rejected, never
+    /// clamped": after a ceiling has fired this must still be zero, however many
+    /// payload bytes arrive afterwards.
+    materialized: usize,
+    /// The deepest the decoder's frame chain ever got, so "the chain really was
+    /// descended" is asserted rather than assumed.
+    deepest: usize,
+}
+
+#[cfg(feature = "fixlen")]
+impl SchemaBoundedField {
+    fn new(field_id: Id, maxlen: usize, frames: &[Id]) -> Self {
+        Self {
+            field_id,
+            maxlen,
+            frames: frames.to_vec(),
+            open: Vec::new(),
+            announced: None,
+            breached: false,
+            deliveries: 0,
+            materialized: 0,
+            deepest: 0,
+        }
+    }
+
+    /// Whether the decoder is exactly where this field lives: at the innermost
+    /// frame of `frames`, and not at some other depth that happens to reuse the
+    /// id. This is what binds the ceiling to the *nested* field rather than to
+    /// the top level — the mistake `header_limits_nested` exists to catch.
+    fn at_field(&self, id: Id) -> bool {
+        id == self.field_id && self.open == self.frames
+    }
 }
 
 #[cfg(feature = "fixlen")]
@@ -1331,21 +1415,38 @@ impl Visitor for SchemaBoundedField {
         self.deliveries += 1;
         // The subtype is the one *on the wire*: a field whose schema declares
         // something else is a §7.3 skip, not a `maxlen` measurement (§4.8).
-        if id == self.field_id && subtype == sofab::FixlenType::Str && total > self.maxlen {
+        if self.at_field(id) && subtype == sofab::FixlenType::Str && total > self.maxlen {
             self.breached = true;
         }
-        if id == self.field_id {
+        if self.at_field(id) {
             self.announced = Some(total);
         }
     }
-    fn string(&mut self, _id: Id, _total: usize, _offset: usize, _chunk: &[u8]) {
+    fn string(&mut self, id: Id, _total: usize, _offset: usize, chunk: &[u8]) {
         self.deliveries += 1;
+        if self.at_field(id) {
+            self.materialized += chunk.len();
+        }
     }
-    fn blob(&mut self, _id: Id, _total: usize, _offset: usize, _chunk: &[u8]) {
+    fn blob(&mut self, id: Id, _total: usize, _offset: usize, chunk: &[u8]) {
         self.deliveries += 1;
+        if self.at_field(id) {
+            self.materialized += chunk.len();
+        }
     }
     fn unsigned(&mut self, _id: Id, _value: Unsigned) {
         self.deliveries += 1;
+    }
+    #[cfg(feature = "sequence")]
+    fn sequence_begin(&mut self, id: Id) {
+        self.deliveries += 1;
+        self.open.push(id);
+        self.deepest = self.deepest.max(self.open.len());
+    }
+    #[cfg(feature = "sequence")]
+    fn sequence_end(&mut self) {
+        self.deliveries += 1;
+        self.open.pop();
     }
 }
 
@@ -1363,16 +1464,10 @@ struct HeaderReceiver {
 
 #[cfg(feature = "fixlen")]
 impl HeaderReceiver {
-    fn new(field_id: Id, maxlen: usize) -> Self {
+    fn new(field_id: Id, maxlen: usize, frames: &[Id]) -> Self {
         Self {
             stream: IStream::new(),
-            field: SchemaBoundedField {
-                field_id,
-                maxlen,
-                announced: None,
-                breached: false,
-                deliveries: 0,
-            },
+            field: SchemaBoundedField::new(field_id, maxlen, frames),
             verdict: None,
         }
     }
@@ -1406,6 +1501,27 @@ impl HeaderReceiver {
     }
 }
 
+/// The sequence chain a header-ceiling case's field lives in, outermost first.
+///
+/// Absent (every `header_limits` case) means the top level. Present (every
+/// `header_limits_nested` case) it must be non-empty — a nested case with an
+/// empty chain would be a flat case wearing the key, and would bind its ceiling
+/// at the top level while claiming to test depth.
+fn header_frames(case: &Value) -> Vec<Id> {
+    match case.get("frames") {
+        None => Vec::new(),
+        Some(f) => {
+            let ids = f.as_array().expect("`frames` is an array");
+            assert!(
+                !ids.is_empty(),
+                "[{}] `frames` is present but empty",
+                case["name"],
+            );
+            ids.iter().map(field_id_of_value).collect()
+        }
+    }
+}
+
 /// Feed one case's bytes under a `maxlen` and return the receiver and the
 /// outcome of the last feed.
 ///
@@ -1413,9 +1529,14 @@ impl HeaderReceiver {
 /// property of the bytes and not of the split (§7.2 item 4), so the chunks must
 /// reassemble to `serialized`, and a decoder that compares before the varint is
 /// complete sees a truncated number.
+///
+/// The frame chain comes from the case's own `frames` (empty for a flat case),
+/// so the two blocks run through this one path and differ only in *where* the
+/// field arrives.
 #[cfg(feature = "fixlen")]
 fn feed_header_case(case: &Value, field_id: Id, maxlen: usize) -> (HeaderReceiver, HeaderOutcome) {
     let name = case["name"].as_str().expect("case name");
+    let frames = header_frames(case);
     let bytes = hex_to_bytes(case["serialized"].as_str().expect("serialized"));
     let chunks: Vec<Vec<u8>> = match case.get("chunks") {
         Some(cs) => cs
@@ -1432,10 +1553,20 @@ fn feed_header_case(case: &Value, field_id: Id, maxlen: usize) -> (HeaderReceive
         "[{name}] `chunks` do not reassemble `serialized`",
     );
 
-    let mut rx = HeaderReceiver::new(field_id, maxlen);
+    let mut rx = HeaderReceiver::new(field_id, maxlen, &frames);
     let mut outcome = HeaderOutcome::Incomplete;
-    for chunk in &chunks {
+    let last = chunks.len() - 1;
+    for (i, chunk) in chunks.iter().enumerate() {
         outcome = rx.feed(chunk);
+        // Every feed before the last must be INCOMPLETE: an earlier verdict
+        // would mean the decoder answered on bytes it had not yet seen.
+        if i < last {
+            assert_eq!(
+                outcome,
+                HeaderOutcome::Incomplete,
+                "[{name}] chunk {i} answered before the last chunk arrived",
+            );
+        }
     }
     (rx, outcome)
 }
@@ -1457,17 +1588,34 @@ fn run_header_case(case: &Value) -> usize {
         ),
     };
 
+    let frames = header_frames(case);
     let (mut rx, outcome) = feed_header_case(case, field_id, maxlen);
     assert_eq!(outcome, expected, "[{name}] outcome");
     let mut checks = 1;
 
     // The ceiling can only answer at the word if the word was reported there:
     // the announced length is the number generated code judges, and the case's
-    // `declared` is what it must be.
+    // `declared` is what it must be. `announced` is set only while the decoder's
+    // open frame chain *equals* the case's (`SchemaBoundedField::at_field`), so
+    // this is also the depth assertion: a nested case whose bound was bound at
+    // the top level never announces anything and fails here.
     assert_eq!(
         rx.field.announced,
         Some(declared),
-        "[{name}] the length word declaring {declared} was not announced at the header",
+        "[{name}] the length word declaring {declared} was not announced at the header, \
+         inside the frame chain {frames:?}",
+    );
+    checks += 1;
+
+    // And the chain was actually descended, to exactly the stated depth: a
+    // builder that stops one frame short, or treats the inner sequence header as
+    // the target field, never reaches it.
+    assert_eq!(
+        rx.field.deepest,
+        frames.len(),
+        "[{name}] the decoder opened {} frame(s), the case names {}",
+        rx.field.deepest,
+        frames.len(),
     );
     checks += 1;
 
@@ -1477,12 +1625,12 @@ fn run_header_case(case: &Value) -> usize {
             "[{name}] `terminal` is set on a non-rejection",
         );
         // A further feed re-raises rather than consuming: the payload the header
-        // declared, arriving late, cannot lift a verdict already reached (§6.3,
+        // declared, arriving late — and, for a nested case, the end markers that
+        // would close its frames — cannot lift a verdict already reached (§6.3,
         // §5.2.1).
         let before = rx.field.deliveries;
-        let late_payload = vec![b'x'; declared];
         assert_eq!(
-            rx.feed(&late_payload),
+            rx.feed(&rest_of_message(declared, &frames)),
             expected,
             "[{name}] a further feed changed the verdict — the rejection is not terminal",
         );
@@ -1490,25 +1638,65 @@ fn run_header_case(case: &Value) -> usize {
             rx.field.deliveries, before,
             "[{name}] a further feed was consumed after the rejection",
         );
-        checks += 2;
+        // "Rejected, never clamped" (§6.2.1): not one payload byte was
+        // materialized — checked *after* the late feed, so a clamp that
+        // materializes on the payload rather than on the header is caught too.
+        assert_eq!(
+            rx.field.materialized, 0,
+            "[{name}] payload bytes were materialized for a field the ceiling rejected",
+        );
+        // And the bytes just fed were not junk the decoder would have refused
+        // anyway: with the ceiling lifted, that same continuation *completes*
+        // the message. Terminality therefore means the verdict survived input
+        // that would otherwise have finished the field — the check that
+        // separates a real terminality test from re-reading a stored status.
+        let mut lifted = HeaderReceiver::new(field_id, usize::MAX, &frames);
+        assert_eq!(
+            lifted.feed(&hex_to_bytes(case["serialized"].as_str().unwrap())),
+            HeaderOutcome::Incomplete,
+            "[{name}] the header alone is not INCOMPLETE with the ceiling lifted",
+        );
+        assert_eq!(
+            lifted.feed(&rest_of_message(declared, &frames)),
+            HeaderOutcome::Complete,
+            "[{name}] the continuation fed to the terminality check would not have \
+             completed the message even with the ceiling lifted",
+        );
+        checks += 5;
     } else {
         // The in-ceiling control, and the half that keeps the block honest: not
         // only must these bytes answer INCOMPLETE, the state must really be the
-        // one more bytes lift — its declared payload completes the message.
+        // one more bytes lift — its declared payload, plus an end marker for
+        // each frame the case left open, completes the message.
         assert_eq!(
             expected,
             HeaderOutcome::Incomplete,
             "[{name}] a non-terminal case that is not INCOMPLETE",
         );
-        let payload = vec![b'x'; declared];
         assert_eq!(
-            rx.feed(&payload),
+            rx.feed(&rest_of_message(declared, &frames)),
             HeaderOutcome::Complete,
-            "[{name}] the in-ceiling control did not complete once its payload arrived",
+            "[{name}] the in-ceiling control did not complete once its payload \
+             (and its {} open frame(s)) arrived",
+            frames.len(),
         );
         checks += 1;
     }
     checks
+}
+
+/// The bytes that would finish a header-ceiling case's message: the `declared`
+/// payload bytes the length word promised, then one `SEQUENCE_END` marker per
+/// frame the case left open (id 0, wire type 7 — the single byte `0x07`).
+///
+/// For a flat case the chain is empty and this is just the payload, exactly as
+/// before. For a nested case it is what makes "more bytes could still change the
+/// verdict" a claim with a witness: the control really does complete.
+#[cfg(feature = "fixlen")]
+fn rest_of_message(declared: usize, frames: &[Id]) -> Vec<u8> {
+    let mut bytes = vec![b'x'; declared];
+    bytes.resize(declared + frames.len(), 0x07);
+    bytes
 }
 
 /// Every case in the block needs `fixlen` or `array`, and every `array` case
@@ -1765,6 +1953,372 @@ fn header_limits_verdicts_come_from_the_ceiling() {
         rejections, 1,
         "expected the one schema-bounded rejection to run on this profile",
     );
+}
+
+// --- the `header_limits_nested` block ---------------------------------------
+//
+// The same assertion as `header_limits`, one or two sequence frames deeper. See
+// the module-level "Nested header-ceiling cases" note for why depth is its own
+// axis and for what this profile runs.
+
+/// The ids of the cases this profile can run, in file order.
+///
+/// Both carry `schema` rather than `limits`, so neither needs the
+/// `receiver_caps` capability this profile does not declare. They are the
+/// depth-1 pair: the rejection and its in-bound control.
+#[cfg(all(feature = "fixlen", feature = "sequence"))]
+const NESTED_CASES_THIS_PROFILE_RUNS: [&str; 2] = [
+    "nested_string_schema_bounded",
+    "nested_string_schema_bounded_in_bound",
+];
+
+#[test]
+fn header_limits_nested_block_is_well_formed() {
+    // The block's own invariants, asserted before anything is run and
+    // independently of what this build can execute — `frames` above all, which
+    // is the one key the flat block does not have and the whole reason this one
+    // is separate.
+    let doc: Value = serde_json::from_str(VECTORS_JSON).unwrap();
+    let cases = doc["header_limits_nested"]
+        .as_array()
+        .expect("the header_limits_nested block");
+    assert!(!cases.is_empty(), "the block is present and non-empty");
+    assert_eq!(cases.len(), 8, "the eight nested header-ceiling cases");
+
+    // ceiling key -> (rejections, in-ceiling controls)
+    let mut pairs: BTreeMap<&str, (usize, usize)> = BTreeMap::new();
+    let mut depths: BTreeSet<usize> = BTreeSet::new();
+
+    for case in cases {
+        let name = case["name"].as_str().expect("case name");
+        let requires = parse_requires(case);
+        let ceiling = header_ceiling(case);
+        let outcome = HeaderOutcome::parse(case["expect"]["outcome"].as_str().expect("outcome"));
+        let terminal = case["expect"].get("terminal").and_then(Value::as_bool);
+
+        // The new key, and the invariant that makes the block what it claims to
+        // be: a nested case is nested. `header_frames` rejects an empty chain.
+        let frames = header_frames(case);
+        assert!(
+            case.get("frames").is_some(),
+            "[{name}] a nested case names the sequence chain it lives in",
+        );
+        assert!(
+            requires.contains(&"sequence"),
+            "[{name}] lives inside a sequence but is not gated by `sequence`",
+        );
+        depths.insert(frames.len());
+
+        assert!(
+            case.get("field_id").is_some() && case.get("declared").is_some(),
+            "[{name}] a header-ceiling case names its field and its declared length",
+        );
+        assert!(
+            !case["serialized"].as_str().expect("serialized").is_empty(),
+            "[{name}] carries the header bytes",
+        );
+
+        // Which ceiling speaks decides the category — and which tag gates it.
+        // Identical to the flat block, deliberately: depth is the only axis
+        // this block varies.
+        match ceiling {
+            Ceiling::ReceiverCap(k, _) => {
+                assert!(
+                    requires.contains(&"receiver_caps"),
+                    "[{name}] configures the cap `{k}` but is not gated by `receiver_caps`",
+                );
+                if outcome.is_rejection() {
+                    assert_eq!(
+                        outcome,
+                        HeaderOutcome::LimitExceeded,
+                        "[{name}] a cap breach is `limit_exceeded` (§6.2.1)",
+                    );
+                }
+            }
+            Ceiling::SchemaMaxlen(_) => {
+                assert!(
+                    !requires.contains(&"receiver_caps"),
+                    "[{name}] a schema-bounded case needs no receiver cap",
+                );
+                if outcome.is_rejection() {
+                    assert_eq!(
+                        outcome,
+                        HeaderOutcome::Invalid,
+                        "[{name}] a schema-bound breach is `invalid` (MESSAGE_SPEC §7.1)",
+                    );
+                }
+            }
+        }
+
+        assert_eq!(
+            terminal,
+            if outcome.is_rejection() {
+                Some(true)
+            } else {
+                None
+            },
+            "[{name}] `expect.terminal` must be set on a rejection and absent otherwise",
+        );
+
+        let slot = pairs.entry(ceiling.key()).or_insert((0, 0));
+        if outcome.is_rejection() {
+            slot.0 += 1;
+        } else {
+            slot.1 += 1;
+        }
+    }
+
+    // Every rejection is paired with the same shape at a length its ceiling
+    // admits — without the control a port that rejects everything nested passes
+    // every rejection case and is badly broken.
+    for (key, (rejections, controls)) in &pairs {
+        if *rejections > 0 {
+            assert!(
+                *controls > 0,
+                "ceiling `{key}` has {rejections} rejection case(s) and no in-ceiling control",
+            );
+        }
+    }
+    // Two depths, because one level may be special-cased: a chain builder that
+    // is off by one passes at depth 1 and fails at depth 2.
+    assert!(
+        depths.contains(&1) && depths.contains(&2),
+        "the block exercises both depth 1 and depth 2 (saw {depths:?})",
+    );
+    println!("[vectors] header_limits_nested: ceilings (rejections, controls) {pairs:?}");
+    println!("[vectors] header_limits_nested: frame depths {depths:?}");
+}
+
+#[test]
+fn header_limits_nested_cases_conform() {
+    // The flat block's assertion, one or two frames deeper: the ceiling is
+    // decided at the length word regardless of depth (§6.2.1), so the answer is
+    // the ceiling's and it is terminal — never INCOMPLETE, even though here a
+    // sequence really is open and INCOMPLETE would look plausible (§5.2.1,
+    // §6.3).
+    let doc: Value = serde_json::from_str(VECTORS_JSON).unwrap();
+    let cases = doc["header_limits_nested"]
+        .as_array()
+        .expect("the header_limits_nested block");
+
+    let mut ran: Vec<&str> = Vec::new();
+    let mut gated: Vec<(&str, Vec<&str>)> = Vec::new();
+    let mut checks = 0;
+
+    for case in cases {
+        let name = case["name"].as_str().expect("case name");
+        let requires = parse_requires(case);
+        if !header_case_supported(&requires) {
+            gated.push((name, requires));
+            continue;
+        }
+        ran.push(name);
+        checks += run_header_case(case);
+    }
+
+    println!(
+        "[vectors] header_limits_nested: {} cases ran, {} gated out by `requires`, {checks} checks",
+        ran.len(),
+        gated.len(),
+    );
+    println!("[vectors] header_limits_nested: ran {ran:?}");
+    for (name, requires) in &gated {
+        let missing: Vec<&&str> = requires
+            .iter()
+            .filter(|r| !header_tag_satisfied(r))
+            .collect();
+        println!("[vectors] header_limits_nested: skipped {name} — needs {missing:?}");
+    }
+
+    assert_eq!(
+        ran.len() + gated.len(),
+        cases.len(),
+        "every case is either run or accounted for as a skip",
+    );
+    for (name, requires) in &gated {
+        assert!(
+            requires.iter().any(|r| !header_tag_satisfied(r)),
+            "[{name}] was skipped although every tag it needs is satisfied",
+        );
+    }
+
+    // What this profile owes, pinned exactly: the depth-1 schema-bounded pair.
+    // The other six configure a §6.2.1 receiver cap, which this profile does not
+    // have — including both depth-2 cases, so the depth-2 axis of the shared
+    // block cannot run here. It is not left unexercised: the port-local
+    // `nested_depth2_schema_bounded_mirror` runs the identical depth-2 bytes
+    // under a schema bound through this same leaf.
+    #[cfg(all(feature = "fixlen", feature = "sequence"))]
+    {
+        assert_eq!(
+            ran, NESTED_CASES_THIS_PROFILE_RUNS,
+            "the nested schema-bounded pair must run on this profile",
+        );
+        assert_eq!(gated.len(), 6, "the six cap-bound cases are skipped");
+        for (name, requires) in &gated {
+            assert!(
+                requires.contains(&"receiver_caps"),
+                "[{name}] was skipped for something other than the undeclared \
+                 `receiver_caps` — a wire construct this build lacks is a \
+                 different kind of skip and should be named as such",
+            );
+        }
+    }
+    // Without `fixlen` there is no length word to judge, and without `sequence`
+    // there is no frame to judge it in: either way the whole block gates out.
+    #[cfg(not(all(feature = "fixlen", feature = "sequence")))]
+    assert!(
+        ran.is_empty(),
+        "no nested header-ceiling case can run without both `fixlen` and `sequence`",
+    );
+}
+
+/// The negative control — and here it is load-bearing, not a formality.
+///
+/// These cases end with the sequence **still open**, so the decoder has a
+/// second, fully independent reason to answer INCOMPLETE — and, symmetrically, a
+/// port that rejected unclosed frames on general principle would answer INVALID
+/// and pass the forward pass while never having consulted the ceiling. Lifting
+/// the ceiling is the only thing that tells the two apart: with no bound to
+/// breach, the same bytes at the same depth must stop being a rejection.
+///
+/// It is also the assertion that this corelib enforces no limit of its own
+/// (`error.rs`, [`Error::LimitExceeded`]) *inside a sequence* either.
+#[cfg(all(feature = "fixlen", feature = "sequence"))]
+#[test]
+fn header_limits_nested_verdicts_come_from_the_ceiling() {
+    let doc: Value = serde_json::from_str(VECTORS_JSON).unwrap();
+    let cases = doc["header_limits_nested"].as_array().unwrap();
+
+    let mut checked = 0;
+    let mut changed: Vec<(&str, HeaderOutcome)> = Vec::new();
+    for case in cases {
+        if !header_case_supported(&parse_requires(case)) {
+            continue;
+        }
+        let name = case["name"].as_str().unwrap();
+        let field_id = field_id_of_value(&case["field_id"]);
+        let expected = HeaderOutcome::parse(case["expect"]["outcome"].as_str().unwrap());
+
+        // `usize::MAX` is the ceiling lifted: far above any `declared` in this
+        // block, and nothing in this profile allocates on the strength of it.
+        let (_, lifted) = feed_header_case(case, field_id, usize::MAX);
+        if expected.is_rejection() {
+            checked += 1;
+            // Only that it *changed*: what the alternative answer is is not the
+            // point, and asserting INCOMPLETE specifically would quietly make
+            // this a test of the open frame rather than of the ceiling.
+            assert_ne!(
+                lifted, expected,
+                "[{name}] still {expected:?} with the ceiling lifted — the verdict does \
+                 not come from the ceiling but from something incidental \
+                 (an open frame, a depth guard, a truncated-varint path)",
+            );
+            changed.push((name, lifted));
+        } else {
+            assert_eq!(
+                lifted, expected,
+                "[{name}] an in-ceiling control changed when the ceiling was lifted",
+            );
+        }
+    }
+
+    println!("[vectors] header_limits_nested: ceilings lifted — {checked} rejection(s) checked");
+    for (name, now) in &changed {
+        println!("[vectors] header_limits_nested: {name} became {now:?} with the ceiling lifted");
+    }
+    // Asserting the count is what stops the control degenerating into a loop
+    // that examines nothing. On this profile exactly one rejection runs — the
+    // depth-1 schema-bounded case; the other three are cap-bound and gated out.
+    assert_eq!(
+        checked, 1,
+        "expected the one nested schema-bounded rejection to run on this profile",
+    );
+}
+
+/// The depth-2 axis, mirrored locally because the shared block only carries it
+/// cap-bound.
+///
+/// `nested_depth2_string_over_cap` and its control both configure a §6.2.1
+/// receiver cap, so both gate out here — and with them the one thing the block
+/// adds beyond depth 1, that a chain builder handling one frame may mishandle
+/// two. This test feeds those cases' **own bytes** (`3e 1e 02 a2 06`: a sequence
+/// at id 7, a sequence at id 3 inside it, then a 100-byte string at id 0) under
+/// a schema `maxlen` of 16 instead of the cap. The expectation is the same
+/// clause the shared block's depth-1 schema case rests on — a schema bound
+/// breached at the length word is INVALID (MESSAGE_SPEC §7.1), terminal (§6.3) —
+/// read at a depth this profile can otherwise not reach.
+///
+/// It is deliberately *not* a case added to the vector file: the shared file is
+/// `corelib-c-cpp`'s and is checked byte-identical across the family.
+#[cfg(all(feature = "fixlen", feature = "sequence"))]
+#[test]
+fn nested_depth2_schema_bounded_mirror() {
+    let doc: Value = serde_json::from_str(VECTORS_JSON).unwrap();
+    let cases = doc["header_limits_nested"].as_array().unwrap();
+    let over = cases
+        .iter()
+        .find(|c| c["name"] == "nested_depth2_string_over_cap")
+        .expect("the depth-2 over-ceiling case");
+    let control = cases
+        .iter()
+        .find(|c| c["name"] == "nested_depth2_string_in_cap")
+        .expect("the depth-2 in-ceiling case");
+
+    let frames = header_frames(over);
+    assert_eq!(frames.len(), 2, "the depth-2 case is two frames deep");
+    assert_eq!(header_frames(control), frames, "the pair shares its chain");
+    let field_id = field_id_of_value(&over["field_id"]);
+    let declared = over["declared"].as_u64().unwrap() as usize;
+    let maxlen = 16;
+    assert!(declared > maxlen, "the over-bound case breaches the bound");
+
+    // Over the bound, two frames deep: INVALID at the length word, not the
+    // INCOMPLETE the two open frames would otherwise make plausible.
+    let mut rx = HeaderReceiver::new(field_id, maxlen, &frames);
+    assert_eq!(
+        rx.feed(&hex_to_bytes(over["serialized"].as_str().unwrap())),
+        HeaderOutcome::Invalid,
+        "a bound breached two frames deep is INVALID at the word",
+    );
+    assert_eq!(
+        rx.field.announced,
+        Some(declared),
+        "the length word was not announced at the inner frame",
+    );
+    assert_eq!(rx.field.deepest, 2, "both frames were opened");
+    // Terminal, and nothing materialized.
+    assert_eq!(
+        rx.feed(&rest_of_message(declared, &frames)),
+        HeaderOutcome::Invalid,
+        "the depth-2 rejection is terminal",
+    );
+    assert_eq!(rx.field.materialized, 0, "rejected, never clamped");
+
+    // The control: the same shape at a length the bound admits, which really
+    // does complete once its payload and both end markers arrive.
+    let in_bound = control["declared"].as_u64().unwrap() as usize;
+    let mut rx = HeaderReceiver::new(field_id, maxlen, &frames);
+    assert_eq!(
+        rx.feed(&hex_to_bytes(control["serialized"].as_str().unwrap())),
+        HeaderOutcome::Incomplete,
+        "the in-bound control at depth 2",
+    );
+    assert_eq!(
+        rx.feed(&rest_of_message(in_bound, &frames)),
+        HeaderOutcome::Complete,
+        "the in-bound control did not complete once its payload and frames arrived",
+    );
+
+    // The negative control for the mirror: with the bound lifted, the same
+    // bytes at the same depth are no longer a rejection.
+    let mut rx = HeaderReceiver::new(field_id, usize::MAX, &frames);
+    assert_ne!(
+        rx.feed(&hex_to_bytes(over["serialized"].as_str().unwrap())),
+        HeaderOutcome::Invalid,
+        "the depth-2 rejection did not come from the bound",
+    );
+    println!("[vectors] header_limits_nested: depth-2 mirrored under a schema bound (3 checks)");
 }
 
 // --- the `boolean_tolerant` block -------------------------------------------
