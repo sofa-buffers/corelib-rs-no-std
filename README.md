@@ -29,7 +29,9 @@ bare-metal `thumbv6m` / `thumbv7em` / `riscv32imc`.
 
 ### Dependencies
 
-None at runtime — only `core` (no `alloc`). `libc` and `serde_json` are
+None at runtime by default — only `core` (no `alloc`). The two optional
+container features below are the exception: `heapless` pulls in the `heapless`
+crate, `alloc` links the `alloc` crate. `libc` and `serde_json` are
 `dev-dependencies` for benchmarks and the test suite.
 
 ### Packaging
@@ -73,6 +75,8 @@ to shrink the binary.
 | `sequence` | ✅ | nested sequences (`SEQUENCE_START` / `END`) |
 | `fp64` | ✅ | 64-bit floats (implies `fixlen`) |
 | `value64` | ✅ | 64-bit scalar value type (`u64`/`i64`); disable for 32-bit (`u32`/`i32`) |
+| `heapless` | — | `sofab::seq::SeqVec` for `heapless::Vec<T, N>` — no wire code, no allocator |
+| `alloc` | — | `sofab::seq::SeqVec` for `alloc::vec::Vec<T>` — no wire code; needs a global allocator |
 
 ```toml
 # Smallest build: integers only, 32-bit values. The crate is still `sofab`.
@@ -99,6 +103,27 @@ sofa-buffers-corelib-no-std = { version = "0.1", default-features = false }
 
 (Array element widths are compile-time type parameters, so an invalid element
 size is unrepresentable.)
+
+#### Wrapper-array containers (`heapless`, `alloc`)
+
+These two are not wire features and narrow nothing. `sofab::seq` is the support
+layer generated code calls to grow a wrapper array (MESSAGE_SPEC §5.1):
+`place_elem` puts a `string` / `blob` element at its id, `reserve_elem` makes the
+slot a `struct` / `union` / nested element is routed into, `reserve_row`
+reserves and empties a matrix row, and `check_index` / `check_len` are the
+comparisons alone. Each fills a gap with the element default and checks the id
+**before** it grows anything. The bound is passed in: `seq::Bound::Schema(n)` for
+the schema's `count` / `maxlen` (a breach is `InvalidMsg`), `seq::Bound::Cap(n)`
+for a receiver cap on a field the schema leaves open (a breach is
+`LimitExceeded`). The crate holds no cap of its own.
+
+The helpers are generic over the destination through the `seq::SeqVec` trait,
+and each feature adds one impl: `heapless` for the fixed-capacity storage a
+default sofabgen build emits (`rust.allow_dynamic: false`), `alloc` for the
+`Vec` storage of `rust.allow_dynamic: true`. A full `heapless::Vec` refuses with
+`Error::Argument` and grows by nothing — never a truncated array. sofabgen turns
+on exactly the feature its generated storage needs; with neither on, the module
+still provides the comparisons and the trait for a container of your own.
 
 #### Verifying the build configuration
 

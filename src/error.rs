@@ -52,7 +52,9 @@ pub enum Error {
     ///
     /// This corelib **enforces no limit of its own**: it has no configuration,
     /// invents no default, and this variant is never returned from
-    /// [`crate::IStream::feed`]. What the codec contributes is the report the
+    /// [`crate::IStream::feed`]. The [`crate::seq`] helpers return it, but only
+    /// against a cap the caller passes in for that one call
+    /// ([`crate::seq::Bound::Cap`]) — a comparison, not a limit held here. What the codec contributes is the report the
     /// decision is made on — the element count on `Visitor::array_begin`,
     /// the payload length on `Visitor::fixlen_begin`, the element id
     /// inside a sequence array — all of them delivered at the count/length word,
