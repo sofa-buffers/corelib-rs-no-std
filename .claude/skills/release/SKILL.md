@@ -16,6 +16,14 @@ be yanked, never replaced — so every check happens before that step.
 Argument: the target version `X.Y.Z` (without `v`). If missing, propose one
 (step 2) and ask.
 
+**Tag format: always a lowercase `v` + the plain semver version**, e.g.
+`v1.2.3` — never `1.2.3`, `V1.2.3` or `release-1.2.3`. The version in
+`Cargo.toml` carries **no** `v` (`version = "1.2.3"`). The workflows do not
+fully enforce this: `version.yml` only fires on `v*` tags, but `release.yml`
+strips an optional `v` (`${TAG#v}`), so a bare `1.2.3` tag would slip through
+its guard. Check the tag name yourself before creating it:
+`[[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]`.
+
 **Stop and ask the user before each outward-facing, irreversible step:** pushing
 the tag (step 7) and publishing the GitHub Release (step 9).
 
