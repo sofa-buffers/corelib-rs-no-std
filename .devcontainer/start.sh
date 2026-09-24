@@ -9,7 +9,7 @@ if [[ "${1:-}" == "rebuild" ]]; then
 fi
 
 # Define the container image name
-IMAGE_NAME="sofab-rs-devcontainer"
+IMAGE_NAME="sofab-rs-no-std-devcontainer"
 
 # Resolve this script's directory so it works regardless of the caller's cwd.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
