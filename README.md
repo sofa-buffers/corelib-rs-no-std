@@ -762,7 +762,7 @@ encoder/decoder API:
   caller buffers, size-optimized profile. For **microcontrollers and
   footprint-constrained firmware**. In the multi-language arena it runs at
   roughly **1.4× micropb** per-message throughput while fitting a bare-metal
-  Cortex-M image of about **6.8 KB flash versus micropb's ~8.5 KB**.
+  Cortex-M image of about **6.9 KB flash versus micropb's ~8.4 KB**.
 - **[`corelib-rs`](https://github.com/sofa-buffers/corelib-rs)** — the `std`
   port, `opt-level = 3`, allocates freely (owned `String`/`Vec`, one-shot
   `decode()`). For **servers and desktops** wanting maximum throughput and
@@ -776,7 +776,7 @@ encoder/decoder API:
 | Decode model | push to a `Visitor`; a `chunk` borrows your input for the callback | owning one-shot `decode()` |
 | Release profile | `opt-level = "z"`, LTO, `panic = "abort"` | `opt-level = 3`, LTO |
 | Optimized for | small `.text` + zero heap | raw throughput |
-| Arena result | ~1.4× micropb throughput; ~6.8 KB Cortex-M flash | ~1.4× prost throughput |
+| Arena result | ~1.4× micropb throughput; ~6.9 KB Cortex-M flash | ~1.4× prost throughput |
 
 Both crates run the identical `perf` and `bench` tools. In the multi-language
 [arena](https://github.com/sofa-buffers/arena) (best-of-5, encode+decode roundtrip
