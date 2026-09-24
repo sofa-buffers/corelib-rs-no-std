@@ -103,8 +103,10 @@ manifest in line with the vX.Y.Z tag that follows.
 <one paragraph: what is breaking since the previous version, if anything>
 ```
 
-Open the PR (`gh pr create`), wait for CI, merge. `main` is not branch-protected,
-so a direct commit on `main` also works if the user prefers it.
+Open the PR (`gh pr create`), wait for CI, merge. The repository allows
+**rebase merges only** (squash and merge commits are disabled):
+`gh pr merge <n> --rebase --delete-branch`. `main` is not branch-protected, so a
+direct commit on `main` also works if the user prefers it.
 
 ## 6. Wait for CI on the exact commit that gets tagged
 
@@ -170,6 +172,12 @@ curl -s -A release-skill https://crates.io/api/v1/crates/sofa-buffers-corelib-no
   date"** → step 3 was incomplete; fix as above.
 - **ci-status: "no successful run for SHA"** → the tag points at a commit CI
   never ran on (or is still running). Wait, or re-tag the right commit.
+- **`publish`: 403 "The provided access token is not valid for crate …"** →
+  the Trusted Publisher on crates.io is missing or does not match. The user sets
+  it under https://crates.io/crates/sofa-buffers-corelib-no-std/settings →
+  Trusted Publishing: owner `sofa-buffers`, repo `corelib-rs-no-std`, workflow
+  `release.yml`, environment `crates-io`. Nothing was uploaded; keep tag and
+  release and run `gh run rerun <run-id> --failed`.
 - **After `publish` succeeded**: the version is final. Never re-tag it. A broken
   release is fixed with a new patch version (and `cargo yank` if necessary —
   ask the user).
