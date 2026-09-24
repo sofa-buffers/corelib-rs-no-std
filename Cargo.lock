@@ -107,7 +107,7 @@ dependencies = [
 
 [[package]]
 name = "sofa-buffers-corelib-no-std"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "heapless",
  "libc",
