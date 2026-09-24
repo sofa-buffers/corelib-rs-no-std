@@ -3,7 +3,7 @@
 # ordinary dependency, through nothing but its public API.
 #
 #   CRATE=sofa-buffers-corelib-no-std .github/smoke/run.sh 'path = "/abs/path/to/package"'
-#   CRATE=sofa-buffers-corelib-no-std .github/smoke/run.sh 'version = "=0.11.0"'
+#   CRATE=sofa-buffers-corelib-no-std .github/smoke/run.sh 'version = "=0.12.0"'
 #
 # The argument is the right-hand side of the dependency line, so the same script
 # covers both halves of a release: the packaged artifact before the upload, and
