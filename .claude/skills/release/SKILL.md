@@ -18,10 +18,11 @@ Argument: the target version `X.Y.Z` (without `v`). If missing, propose one
 
 **Tag format: always a lowercase `v` + the plain semver version**, e.g.
 `v1.2.3` — never `1.2.3`, `V1.2.3` or `release-1.2.3`. The version in
-`Cargo.toml` carries **no** `v` (`version = "1.2.3"`). The workflows do not
-fully enforce this: `version.yml` only fires on `v*` tags, but `release.yml`
-strips an optional `v` (`${TAG#v}`), so a bare `1.2.3` tag would slip through
-its guard. Check the tag name yourself before creating it:
+`Cargo.toml` carries **no** `v` (`version = "1.2.3"`). On every `v*` tag push,
+`version-consistency.yaml` asserts the tag format and that every file in the
+step-3 table matches the tag; `release.yml` refuses to publish unless that run
+succeeded on the tagged commit. A tag without `v` triggers neither check, so
+verify the name yourself before creating it:
 `[[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]`.
 
 **Stop and ask the user before each outward-facing, irreversible step:** pushing
@@ -61,9 +62,9 @@ version from tags **and** crates.io, whichever is higher.
 
 | File | What | Checked by |
 |---|---|---|
-| `Cargo.toml` | `[package] version = "X.Y.Z"` | `version.yml` (tag push), `release.yml` guard |
-| `Cargo.lock` | the `sofa-buffers-corelib-no-std` entry | `release.yml` guard (`cargo metadata --locked`) |
-| `README.md` | the dependency snippet `sofa-buffers-corelib-no-std = { version = "0.N", … }` — set to `"X.Y"` (0.x: major.minor) | nobody — easy to forget |
+| `Cargo.toml` | `[package] version = "X.Y.Z"` | `version-consistency.yaml`, `release.yml` guard |
+| `Cargo.lock` | the `sofa-buffers-corelib-no-std` entry | `version-consistency.yaml`, `release.yml` guard |
+| `README.md` | every dependency snippet `sofa-buffers-corelib-no-std = { version = "X.Y", … }` — major.minor | `version-consistency.yaml` |
 | `.github/smoke/run.sh`, `.github/workflows/release.yml` | example versions in comments (`=0.11.0`, `v0.11.0`) | cosmetic, optional |
 
 ```bash
@@ -123,7 +124,7 @@ Annotated tag, message = tag name (as for `v0.11.0`):
 ```bash
 git tag -a vX.Y.Z -m vX.Y.Z "$SHA"
 git push origin vX.Y.Z
-gh run list -w version.yml -L 1          # "Tag matches Cargo.toml" must pass
+gh run list -w version-consistency.yaml -L 1   # must pass — release.yml gates on it
 ```
 
 Optional dress rehearsal — runs guard, ci-status, package + smoke, publishes nothing:

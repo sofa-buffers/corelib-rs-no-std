@@ -1,0 +1,100 @@
+name: "Version consistency"
+
+# The git tag is the source of truth for the version: every place in the
+# repository that names the crate version must match it. Each place is checked
+# in its own step, so one run reports every mismatch at once.
+#
+#   Cargo.toml  [package] version        exact:  X.Y.Z
+#   Cargo.lock  our own package entry    exact:  X.Y.Z
+#   README.md   the dependency snippet   X.Y     (a caret requirement: "0.11"
+#                                                 means ^0.11 — any 0.11.z)
+#
+# The tag itself must be `v` + semver (v1.2.3). The `v*` filter alone would let
+# `vfoo` or `v1.2` through, and release.yml strips the `v` and compares only the
+# rest, so the format is asserted here.
+#
+# Tags only: the comparison is only meaningful when there is a tag to compare
+# against. Between releases the manifests may legitimately sit ahead of the
+# newest tag. release.yml lists this workflow in GATING_WORKFLOWS, so a GitHub
+# Release on a tag that failed here is not published to crates.io.
+on:
+  push:
+    tags: ["v*"]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CRATE: sofa-buffers-corelib-no-std
+
+jobs:
+  # A checkout plus some shell; see the note in `ci.yml` on why every job here is
+  # bounded well below GitHub's 360-minute default.
+  check-versions:
+    name: Tag matches every version
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Reference version (git tag)
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="$GITHUB_REF_NAME"
+          if ! [[ "$TAG" =~ ^v([0-9]+)\.([0-9]+)\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::tag '$TAG' is not 'v' + semver (e.g. v1.2.3)"
+            exit 1
+          fi
+          {
+            echo "REF_VERSION=${TAG#v}"
+            echo "REF_MINOR=${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
+          } >> "$GITHUB_ENV"
+          echo "tag $TAG -> version ${TAG#v}"
+
+      - name: Check Cargo.toml
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ -n "${REF_VERSION:-}" ]] || { echo "::error::no reference version (tag check failed)"; exit 1; }
+          name=$(sed -n '/^\[package\]/,/^\[/ s/^name *= *"\(.*\)"/\1/p' Cargo.toml | head -1)
+          version=$(sed -n '/^\[package\]/,/^\[/ s/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -1)
+          [[ "$name" == "$CRATE" ]] || { echo "::error::Cargo.toml name: '$name' != '$CRATE'"; exit 1; }
+          [[ "$version" == "$REF_VERSION" ]] || { echo "::error::Cargo.toml version: '$version' != '$REF_VERSION'"; exit 1; }
+          echo "Cargo.toml: $version"
+
+      - name: Check Cargo.lock
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ -n "${REF_VERSION:-}" ]] || { echo "::error::no reference version (tag check failed)"; exit 1; }
+          # The `version` line right after our own `name` line.
+          version=$(awk -v n="name = \"$CRATE\"" '$0 == n { getline; gsub(/^version = "|"$/, ""); print; exit }' Cargo.lock)
+          [[ -n "$version" ]] || { echo "::error::Cargo.lock: no entry for $CRATE"; exit 1; }
+          [[ "$version" == "$REF_VERSION" ]] || { echo "::error::Cargo.lock version: '$version' != '$REF_VERSION' — run 'cargo update -p $CRATE' and commit the lockfile"; exit 1; }
+          echo "Cargo.lock: $version"
+
+      - name: Check README.md dependency snippets
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ -n "${REF_MINOR:-}" ]] || { echo "::error::no reference version (tag check failed)"; exit 1; }
+          # Both `crate = "X.Y"` and `crate = { version = "X.Y", ... }`. At least
+          # one must exist: a snippet that silently stopped matching would turn
+          # this step into a no-op.
+          mapfile -t found < <(grep -oP "^\s*$CRATE\s*=\s*(\{[^}]*\bversion\s*=\s*)?\"\K[^\"]+" README.md || true)
+          (( ${#found[@]} > 0 )) || { echo "::error::README.md: no '$CRATE = ...' dependency snippet found"; exit 1; }
+          failed=0
+          for v in "${found[@]}"; do
+            if [[ "$v" == "$REF_MINOR" ]]; then
+              echo "README.md: $v"
+            else
+              echo "::error::README.md dependency snippet: '$v' != '$REF_MINOR'"
+              failed=1
+            fi
+          done
+          exit "$failed"

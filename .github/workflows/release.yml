@@ -179,6 +179,11 @@ jobs:
   # that drifts: the bare-metal targets were three caller files until they were
   # folded into ci.yml, and a name that no longer exists must fail loudly rather
   # than as "no successful run".
+  #
+  # version-consistency.yaml runs on the tag push, not on main, so it gates the
+  # release only if the tag was pushed (and its run finished) before the GitHub
+  # Release was published. A tag that predates that workflow has no run and
+  # cannot be rehearsed here.
   # ---------------------------------------------------------------------------
   ci-status:
     name: CI passed on this commit
@@ -196,7 +201,7 @@ jobs:
       - name: Require a successful run of every gating workflow
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GATING_WORKFLOWS: ci.yml
+          GATING_WORKFLOWS: ci.yml version-consistency.yaml
         run: |
           set -euo pipefail
           SHA="$(git rev-parse HEAD)"
