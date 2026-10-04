@@ -40,6 +40,10 @@
 //!   destination: `heapless::Vec` behind the optional `heapless` feature,
 //!   `alloc::vec::Vec` behind the optional `alloc` feature — neither is on by
 //!   default, and neither adds wire code.
+//! * **Float-array equality in [`floats`]** — `bits_equal_f32` / `bits_equal_f64`,
+//!   the comparison generated code makes against a field's default: equal iff
+//!   the same length and the same IEEE-754 *bit pattern* at every index (so
+//!   `-0.0` differs from `0.0` and a NaN equals only itself), never IEEE `==`.
 //! * **Sequences frame lazily** — [`OStream::write_sequence_begin_lazy`] holds a
 //!   sequence header back until the sequence turns out to have content, so a
 //!   sequence-typed *field* equal to its declared default is omitted rather than
@@ -112,6 +116,7 @@
 extern crate alloc;
 
 mod error;
+pub mod floats;
 mod istream;
 mod ostream;
 #[cfg(feature = "fixlen")]
