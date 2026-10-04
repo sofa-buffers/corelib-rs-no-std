@@ -125,6 +125,16 @@ default sofabgen build emits (`rust.allow_dynamic: false`), `alloc` for the
 on exactly the feature its generated storage needs; with neither on, the module
 still provides the comparisons and the trait for a container of your own.
 
+#### Float-array equality (`sofab::floats`)
+
+`floats::bits_equal_f32` / `bits_equal_f64` compare two float slices the way a
+default check needs: equal iff the lengths match and every element has the same
+IEEE-754 bit pattern. `-0.0` differs from `0.0`, and a NaN equals only a NaN with
+the identical payload; IEEE `==` is never used. Generated code calls them with
+the field array and the constant default (both as slices). They are plain `core`
+functions: no allocation, no panic, no `unsafe`, and no code in the image unless
+called (`bits_equal_f32` needs `fixlen`, `bits_equal_f64` needs `fp64`).
+
 #### Verifying the build configuration
 
 The wire types are compile-time switches, so assert the ones your application
