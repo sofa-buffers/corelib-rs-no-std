@@ -22,7 +22,10 @@
 //! ```
 //!
 //! The length is compared first; then every element's bit pattern. Pure `core`:
-//! no allocation, no mutation, no panic, no `unsafe`.
+//! no allocation, no mutation, no panic, no `unsafe`. A block compare
+//! (`memcmp`) is deliberately not used: the crate is `#![forbid(unsafe_code)]`,
+//! `core` has no safe slice-to-bytes view, and the unsafe variant measured
+//! larger on thumbv6m.
 
 /// `true` iff `a` and `b` have the same length and, at every index, the same
 /// 32-bit IEEE-754 bit pattern.
