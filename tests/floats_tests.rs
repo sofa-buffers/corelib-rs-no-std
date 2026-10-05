@@ -153,6 +153,44 @@ macro_rules! suite {
                 }
             }
 
+            /// The helper has three paths by length (a single pass, a pass behind an
+            /// early test of the first two elements, and blocks); every length up
+            /// to past two blocks is walked with a difference at every index.
+            #[test]
+            fn every_length_and_index_with_a_bit_or_sign_difference() {
+                let sign: B = !(B::MAX >> 1);
+                for n in 0usize..=70 {
+                    let base: Vec<F> = (0..n).map(|i| i as F + 0.25).collect();
+                    assert!(eq(&base, &base.clone()), "n={n}");
+                    for pos in 0..n {
+                        for flip in [1 as B, sign] {
+                            let mut other = base.clone();
+                            other[pos] = F::from_bits(other[pos].to_bits() ^ flip);
+                            assert!(!eq(&base, &other), "n={n} pos={pos}");
+                            assert!(!eq(&other, &base), "n={n} pos={pos}");
+                            assert_eq!(eq(&other, &base), reference(&other, &base));
+                        }
+                    }
+                    if n > 0 {
+                        assert!(!eq(&base, &base[..n - 1]), "n={n}");
+                    }
+                }
+            }
+
+            #[test]
+            fn nan_arrays_of_every_length_compare_by_pattern() {
+                for n in 1usize..=70 {
+                    let a = vec![nan_a(); n];
+                    assert!(eq(&a, &a.clone()), "n={n}");
+                    for pos in [0, 1.min(n - 1), n / 2, n - 1] {
+                        let mut b = a.clone();
+                        b[pos] = nan_b();
+                        assert!(!eq(&a, &b), "n={n} pos={pos}");
+                        assert!(!eq(&b, &a), "n={n} pos={pos}");
+                    }
+                }
+            }
+
             #[test]
             fn accepts_vec_array_and_constant_slices() {
                 let v: Vec<F> = vec![0.0, 1.5];
