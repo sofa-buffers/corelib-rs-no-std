@@ -94,7 +94,7 @@ alloc = []
 heapless = ["dep:heapless"]
 
 [dependencies]
-heapless = { version = "0.8", optional = true, default-features = false }
+heapless = { version = "0.9", optional = true, default-features = false }
 
 # ---------------------------------------------------------------------------
 # Size-optimized release profile suitable for embedded firmware.
