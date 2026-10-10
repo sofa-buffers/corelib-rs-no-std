@@ -637,53 +637,20 @@ impl<'a, F: Flush, H: Handoff<'a>> OStream<'a, F, H> {
     #[cold]
     #[inline(never)]
     fn commit_pending(&mut self) -> Result<()> {
-        let mut written = 0;
-        let mut result = Ok(());
-        for i in 0..self.npending {
-            // `get` rather than `self.pending[i]`: `i < npending <= LAZY_SEQ_DEPTH`
-            // holds by construction, but the indexing form still emits a
-            // `core::panicking::panic_bounds_check` path that the linker then
-            // keeps in the image. The whole codec is meant to link without
-            // `core::panicking` (README "Footprint"), so prove the access
-            // in-bounds instead of asserting it.
-            let id = match self.pending.get(i) {
-                Some(&id) => id,
-                None => break,
-            };
-            if let Err(e) =
-                self.write_varint(((id as Unsigned) << 3) | T_SEQUENCE_START as Unsigned)
-            {
-                result = Err(e);
-                break;
+        while self.npending != 0 {
+            // The outermost held-back id is always slot 0, a constant index,
+            // and the shift below runs over the whole array with constant
+            // bounds — both provably in range, so this links no
+            // `core::panicking` (README "Footprint"). Shifting all slots rather
+            // than just the live ones moves a few stale ids along with them,
+            // which nothing reads.
+            self.write_varint(((self.pending[0] as Unsigned) << 3) | T_SEQUENCE_START as Unsigned)?;
+            for i in 1..LAZY_SEQ_DEPTH {
+                self.pending[i - 1] = self.pending[i];
             }
-            written += 1;
+            self.npending -= 1;
         }
-        self.drop_front(written);
-        result
-    }
-
-    /// Drop the outermost `k` entries of the pending run, keeping the rest as the
-    /// innermost suffix. Panic-free by the same rule as [`Self::commit_pending`]:
-    /// `copy_within` carries a range assert, so the shift is spelled out with
-    /// `get`/`get_mut` instead.
-    #[cfg(feature = "sequence")]
-    fn drop_front(&mut self, k: usize) {
-        if k >= self.npending {
-            self.npending = 0;
-            return;
-        }
-        let remaining = self.npending - k;
-        for i in 0..remaining {
-            let id = match self.pending.get(i + k) {
-                Some(&id) => id,
-                None => break,
-            };
-            match self.pending.get_mut(i) {
-                Some(slot) => *slot = id,
-                None => break,
-            }
-        }
-        self.npending = remaining;
+        Ok(())
     }
 
     // --- scalar writers -----------------------------------------------------
