@@ -268,26 +268,18 @@ pub struct IStream {
     acc_lo: u32,
 }
 
-/// What one byte did to the varint being decoded — the result of [`Core::push`].
-///
-/// Flat on purpose. The obvious spelling is `Result<Option<Unsigned>>`, but a
-/// two-level enum is an aggregate that no ABI hands back in registers: `push` is
-/// `inline(never)` and sits on the path of **every decoded byte**, so that
-/// spelling made it write its answer through a caller-provided stack slot
-/// (`sret`) which the caller then reloaded and re-tagged. Flattened, the same
-/// three states are a tag+payload pair returned in registers.
-enum Push {
-    /// The varint is not finished; feed the next byte.
-    More,
-    /// A complete value (the accumulator has been reset).
-    Value(Unsigned),
-    /// The varint runs past the value width (§4.1) — `INVALID`.
-    Overlong,
-}
-
 impl Core {
-    /// Feed one byte into the varint currently being decoded, reporting what it
-    /// did as a [`Push`].
+    /// Feed one byte into the varint currently being decoded.
+    ///
+    /// Returns the completed value once the terminating byte arrives. Whether
+    /// it *has* arrived is read off `shift` rather than returned alongside the
+    /// value: `shift != 0` means the varint continues, and an overlong varint
+    /// (§4.1) moves the machine to the terminal [`State::Invalid`]. The bare
+    /// `Unsigned` comes back in registers; a `(status, value)` enum would be a
+    /// 16-byte aggregate on a `value64` build, which no ABI returns in
+    /// registers — `push` is `inline(never)` on the path of **every decoded
+    /// byte**, and that spelling made it write its answer through a stack slot
+    /// (`sret`) the caller then reloaded and re-tagged.
     ///
     /// `inline(never)`: this is the per-byte prologue of every decoder state,
     /// reached from the monomorphized [`IStream::step`]. Left to LTO it gets
@@ -297,7 +289,7 @@ impl Core {
     /// and visitors, and borrowing only `Core` (not the whole `IStream`) leaves
     /// the surrounding fields promotable to registers.
     #[inline(never)]
-    fn push(&mut self, byte: u8) -> Push {
+    fn push(&mut self, byte: u8) -> Unsigned {
         // Reject an overlong (>value-width) varint before it silently truncates
         // (§4.1/§6.3): a value must not spill past the value width, whether by
         // continuing for another byte or by setting a payload bit above it.
@@ -320,20 +312,19 @@ impl Core {
         // check was unreachable for the same reason, and is gone.
         if room < 7 && (byte & 0x80 != 0 || u32::from(byte & 0x7F) >> room != 0) {
             self.reset_varint();
-            return Push::Overlong;
+            self.state = State::Invalid;
+            return 0;
         }
 
         // OR in the 7 payload bits at the current position.
         self.acc |= ((byte & 0x7F) as Unsigned) << shift;
         self.shift = (shift + 7) as u8;
 
+        let v = self.acc;
         if byte & 0x80 == 0 {
-            let v = self.acc;
             self.reset_varint();
-            return Push::Value(v);
         }
-
-        Push::More
+        v
     }
 
     /// Clear the varint accumulator, so the next value starts from zero and
@@ -541,11 +532,10 @@ impl IStream {
             return self.step_fixlen_val(byte, visitor);
         }
 
-        let value = match self.core.push(byte) {
-            Push::Value(v) => v,
-            Push::More => return Ok(()),
-            Push::Overlong => return Err(Error::InvalidMsg),
-        };
+        let value = self.core.push(byte);
+        if self.core.shift != 0 {
+            return Ok(()); // the varint continues
+        }
 
         match self.core.state {
             State::Idle => self.on_header(value, visitor),
@@ -565,11 +555,11 @@ impl IStream {
             State::FixlenLen => self.on_fixlen_len(value, visitor),
             #[cfg(feature = "array")]
             State::ArrayCount => self.on_array_count(value, visitor),
-            // Handled before the varint decode (`FixlenVal`), in `feed`'s bulk
-            // path (`FixlenRaw`), or never reached at all because `feed` returns
-            // at its first byte (`Invalid`); these arms just keep the match
-            // exhaustive without a panicking `unreachable!`.
-            State::Invalid => Ok(()),
+            // Set by `push` itself for an overlong varint (§4.1).
+            State::Invalid => Err(Error::InvalidMsg),
+            // Handled before the varint decode (`FixlenVal`) or in `feed`'s
+            // bulk path (`FixlenRaw`); this arm just keeps the match exhaustive
+            // without a panicking `unreachable!`.
             #[cfg(feature = "fixlen")]
             State::FixlenVal | State::FixlenRaw => Ok(()),
         }
