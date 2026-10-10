@@ -71,8 +71,8 @@ fp64 = ["fixlen"]
 # 64-bit scalar value type (u64/i64), matching the C default. Disable it
 # (`default-features = false` without re-adding `value64`) to use a 32-bit value
 # type (u32/i32): on a 32-bit MCU this removes all double-width integer
-# arithmetic and the libgcc/compiler 64-bit helpers it pulls in (`__aeabi_llsl`,
-# 8-byte `memclr`) — the single largest footprint item. Trade-off: values above
+# arithmetic, halving every varint operation (~5-14% of the code on Cortex-M0,
+# see README "Footprint"). Trade-off: values above
 # 2^32-1 can no longer be represented or decoded (mirrors a 32-bit
 # `sofab_value_t` build of the C reference). Because it controls a public type it
 # is *not* additive: application code that needs a specific width should guard it
