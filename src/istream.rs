@@ -203,6 +203,12 @@ enum State {
     FixlenRaw,
     #[cfg(feature = "array")]
     ArrayCount,
+    /// The `fixlen_word` of a fixlen array (§4.8), read after its count word.
+    /// A state of its own — rather than [`State::FixlenLen`] plus an
+    /// "in an array" flag — because the count cannot tell the two words apart:
+    /// an empty array leaves `array_remaining` at zero, just as a scalar does.
+    #[cfg(all(feature = "array", feature = "fixlen"))]
+    FixlenArrayLen,
 }
 
 /// The decoder's per-byte state, grouped into one struct.
@@ -225,15 +231,12 @@ struct Core {
     shift: u8,
     state: State,
 
+    /// Element kind of the array whose count word is being read. A fixlen
+    /// array's kind is not known yet at that point — it arrives with the
+    /// `fixlen_word` — so [`ArrayKind::Fp32`] stands in for "a fixlen array"
+    /// until [`IStream::on_fixlen_len`] reads the real one.
     #[cfg(feature = "array")]
     array_kind: ArrayKind,
-    #[cfg(feature = "array")]
-    in_array: bool,
-    /// The array being decoded is a fixlen array, so its element kind is still
-    /// unknown while the count varint is read: it arrives with the
-    /// `fixlen_word`, and `array_kind` is only meaningful from then on.
-    #[cfg(all(feature = "array", feature = "fixlen"))]
-    array_fixlen: bool,
 
     #[cfg(feature = "fixlen")]
     fixlen_type: FixlenType,
@@ -249,7 +252,9 @@ pub struct IStream {
     core: Core,
     id: Id,
 
-    // array context
+    /// Elements still to come in the array being decoded. Zero for every
+    /// scalar field and at every field boundary, so a non-zero value *is* the
+    /// "inside an array" flag.
     #[cfg(feature = "array")]
     array_remaining: usize,
 
@@ -268,26 +273,43 @@ pub struct IStream {
     acc_lo: u32,
 }
 
-/// What one byte did to the varint being decoded — the result of [`Core::push`].
-///
-/// Flat on purpose. The obvious spelling is `Result<Option<Unsigned>>`, but a
-/// two-level enum is an aggregate that no ABI hands back in registers: `push` is
-/// `inline(never)` and sits on the path of **every decoded byte**, so that
-/// spelling made it write its answer through a caller-provided stack slot
-/// (`sret`) which the caller then reloaded and re-tagged. Flattened, the same
-/// three states are a tag+payload pair returned in registers.
-enum Push {
-    /// The varint is not finished; feed the next byte.
-    More,
-    /// A complete value (the accumulator has been reset).
-    Value(Unsigned),
-    /// The varint runs past the value width (§4.1) — `INVALID`.
-    Overlong,
+/// `payload << shift` in the value type, for the 7 payload bits of a varint byte.
+#[cfg(not(all(feature = "value64", target_pointer_width = "32")))]
+#[inline(always)]
+fn payload_at(payload: u8, shift: u32) -> Unsigned {
+    (payload as Unsigned) << shift
+}
+
+/// `payload << shift` for a 64-bit value on a 32-bit target, composed from the
+/// two 32-bit halves. A plain `u64 << shift` with a variable count is lowered to
+/// a call into the compiler's double-word shift helper (`__aeabi_llsl` on Arm,
+/// `__ashldi3` on RISC-V), and this is its only call site in the codec; the
+/// halves need only single-word shifts, which every 32-bit core has.
+#[cfg(all(feature = "value64", target_pointer_width = "32"))]
+#[inline(always)]
+fn payload_at(payload: u8, shift: u32) -> Unsigned {
+    let p = u32::from(payload);
+    if shift < 32 {
+        // `(p >> 1) >> (31 - shift)` is `p >> (32 - shift)` without the
+        // out-of-range shift by 32 at `shift == 0`.
+        (u64::from((p >> 1) >> (31 - shift)) << 32) | u64::from(p << shift)
+    } else {
+        u64::from(p << (shift - 32)) << 32
+    }
 }
 
 impl Core {
-    /// Feed one byte into the varint currently being decoded, reporting what it
-    /// did as a [`Push`].
+    /// Feed one byte into the varint currently being decoded.
+    ///
+    /// Returns the completed value once the terminating byte arrives. Whether
+    /// it *has* arrived is read off `shift` rather than returned alongside the
+    /// value: `shift != 0` means the varint continues, and an overlong varint
+    /// (§4.1) moves the machine to the terminal [`State::Invalid`]. The bare
+    /// `Unsigned` comes back in registers; a `(status, value)` enum would be a
+    /// 16-byte aggregate on a `value64` build, which no ABI returns in
+    /// registers — `push` is `inline(never)` on the path of **every decoded
+    /// byte**, and that spelling made it write its answer through a stack slot
+    /// (`sret`) the caller then reloaded and re-tagged.
     ///
     /// `inline(never)`: this is the per-byte prologue of every decoder state,
     /// reached from the monomorphized [`IStream::step`]. Left to LTO it gets
@@ -297,7 +319,7 @@ impl Core {
     /// and visitors, and borrowing only `Core` (not the whole `IStream`) leaves
     /// the surrounding fields promotable to registers.
     #[inline(never)]
-    fn push(&mut self, byte: u8) -> Push {
+    fn push(&mut self, byte: u8) -> Unsigned {
         // Reject an overlong (>value-width) varint before it silently truncates
         // (§4.1/§6.3): a value must not spill past the value width, whether by
         // continuing for another byte or by setting a payload bit above it.
@@ -319,21 +341,22 @@ impl Core {
         // but no room left" test the loop used to carry after the terminator
         // check was unreachable for the same reason, and is gone.
         if room < 7 && (byte & 0x80 != 0 || u32::from(byte & 0x7F) >> room != 0) {
-            self.reset_varint();
-            return Push::Overlong;
+            // Terminal, so the accumulator is never read again: only `shift`
+            // has to drop to zero, which sends `step` on to the `Invalid` arm.
+            self.shift = 0;
+            self.state = State::Invalid;
+            return 0;
         }
 
         // OR in the 7 payload bits at the current position.
-        self.acc |= ((byte & 0x7F) as Unsigned) << shift;
+        self.acc |= payload_at(byte & 0x7F, shift);
         self.shift = (shift + 7) as u8;
 
+        let v = self.acc;
         if byte & 0x80 == 0 {
-            let v = self.acc;
             self.reset_varint();
-            return Push::Value(v);
         }
-
-        Push::More
+        v
     }
 
     /// Clear the varint accumulator, so the next value starts from zero and
@@ -361,10 +384,6 @@ impl IStream {
                 state: State::Idle,
                 #[cfg(feature = "array")]
                 array_kind: ArrayKind::Unsigned,
-                #[cfg(feature = "array")]
-                in_array: false,
-                #[cfg(all(feature = "array", feature = "fixlen"))]
-                array_fixlen: false,
                 // Any subtype will do — `on_fixlen_len` sets it before anything
                 // reads it — and a non-zero one keeps the whole struct from
                 // being an all-zero image, which the compiler would otherwise
@@ -447,12 +466,7 @@ impl IStream {
                 let rest = &data[i..];
                 let take = rest.len().min(self.fixlen_remaining);
                 let offset = self.fixlen_total - self.fixlen_remaining;
-                let chunk = &rest[..take];
-                match self.core.fixlen_type {
-                    FixlenType::Str => visitor.string(self.id, self.fixlen_total, offset, chunk),
-                    FixlenType::Blob => visitor.blob(self.id, self.fixlen_total, offset, chunk),
-                    _ => return Err(self.latch(Error::InvalidMsg)),
-                }
+                self.payload_chunk(offset, &rest[..take], visitor);
                 self.fixlen_remaining -= take;
                 i += take;
                 if self.fixlen_remaining == 0 {
@@ -461,8 +475,8 @@ impl IStream {
                 continue;
             }
 
-            if let Err(e) = self.step(data[i], visitor) {
-                return Err(self.latch(e));
+            if self.step(data[i], visitor).is_err() {
+                return Err(self.latch());
             }
             i += 1;
         }
@@ -482,25 +496,23 @@ impl IStream {
         }
     }
 
-    /// Enter the terminal [`State::Invalid`] and hand the error straight back,
-    /// so every site that produces one is a single `return Err(self.latch(e))`.
+    /// Enter the terminal [`State::Invalid`] and hand back the error to return.
     ///
-    /// Only [`Error::InvalidMsg`] latches: it is the one outcome §5.2 declares
-    /// terminal. [`Status::Incomplete`] never reaches here at all — it is not an
-    /// error, and is computed from the state after the loop rather than returned
-    /// by a step — and must not be latched even if it ever did: feeding more
-    /// bytes is exactly how it is resolved.
+    /// Every error a step can produce is [`Error::InvalidMsg`] — the visitor
+    /// callbacks cannot fail, and [`Error::LimitExceeded`] is the generated
+    /// visitor's to report, never `feed`'s — so this latches unconditionally
+    /// and does not need to look at which error it was. [`Status::Incomplete`]
+    /// never reaches here at all: it is not an error, and is computed from the
+    /// state after the loop rather than returned by a step.
     ///
     /// `cold` + `inline(never)`: this runs once per broken message, on the way
     /// out, and keeping it out of the per-byte loop's body leaves the loop (and
     /// its register allocation) as it was.
     #[cold]
     #[inline(never)]
-    fn latch(&mut self, e: Error) -> Error {
-        if e == Error::InvalidMsg {
-            self.core.state = State::Invalid;
-        }
-        e
+    fn latch(&mut self) -> Error {
+        self.core.state = State::Invalid;
+        Error::InvalidMsg
     }
 
     /// True when the decoder sits **exactly** at a top-level field boundary: no
@@ -541,11 +553,10 @@ impl IStream {
             return self.step_fixlen_val(byte, visitor);
         }
 
-        let value = match self.core.push(byte) {
-            Push::Value(v) => v,
-            Push::More => return Ok(()),
-            Push::Overlong => return Err(Error::InvalidMsg),
-        };
+        let value = self.core.push(byte);
+        if self.core.shift != 0 {
+            return Ok(()); // the varint continues
+        }
 
         match self.core.state {
             State::Idle => self.on_header(value, visitor),
@@ -563,13 +574,15 @@ impl IStream {
             }
             #[cfg(feature = "fixlen")]
             State::FixlenLen => self.on_fixlen_len(value, visitor),
+            #[cfg(all(feature = "array", feature = "fixlen"))]
+            State::FixlenArrayLen => self.on_fixlen_len(value, visitor),
             #[cfg(feature = "array")]
             State::ArrayCount => self.on_array_count(value, visitor),
-            // Handled before the varint decode (`FixlenVal`), in `feed`'s bulk
-            // path (`FixlenRaw`), or never reached at all because `feed` returns
-            // at its first byte (`Invalid`); these arms just keep the match
-            // exhaustive without a panicking `unreachable!`.
-            State::Invalid => Ok(()),
+            // Set by `push` itself for an overlong varint (§4.1).
+            State::Invalid => Err(Error::InvalidMsg),
+            // Handled before the varint decode (`FixlenVal`) or in `feed`'s
+            // bulk path (`FixlenRaw`); this arm just keeps the match exhaustive
+            // without a panicking `unreachable!`.
             #[cfg(feature = "fixlen")]
             State::FixlenVal | State::FixlenRaw => Ok(()),
         }
@@ -583,14 +596,6 @@ impl IStream {
             return Err(Error::InvalidMsg);
         }
         self.id = id as Id;
-        #[cfg(feature = "array")]
-        {
-            self.core.in_array = false;
-        }
-        #[cfg(all(feature = "array", feature = "fixlen"))]
-        {
-            self.core.array_fixlen = false;
-        }
 
         match wire_type {
             T_VARINT_UNSIGNED => self.core.state = State::VarintUnsigned,
@@ -612,9 +617,10 @@ impl IStream {
             #[cfg(all(feature = "array", feature = "fixlen"))]
             T_FIXLENARRAY => {
                 // The element kind is not known yet — it is carried by the
-                // `fixlen_word` that follows the count (§4.8), so `array_kind`
-                // is set (and the array announced) in `on_fixlen_len`.
-                self.core.array_fixlen = true;
+                // `fixlen_word` that follows the count (§4.8), so `Fp32` only
+                // marks a fixlen array here; the real kind is set (and the
+                // array announced) in `on_fixlen_len`.
+                self.core.array_kind = ArrayKind::Fp32;
                 self.core.state = State::ArrayCount;
             }
 
@@ -651,12 +657,11 @@ impl IStream {
     #[inline]
     fn advance_after_element(&mut self) -> bool {
         #[cfg(feature = "array")]
-        if self.core.in_array {
+        if self.array_remaining != 0 {
             self.array_remaining -= 1;
-            if self.array_remaining > 0 {
+            if self.array_remaining != 0 {
                 return true;
             }
-            self.core.in_array = false;
         }
         self.core.state = State::Idle;
         false
@@ -692,7 +697,7 @@ impl IStream {
         // element subtype, so this — not the count word — is where the array is
         // announced to the visitor.
         #[cfg(feature = "array")]
-        if self.core.in_array {
+        if self.core.state == State::FixlenArrayLen {
             // Format first: an array element must be a fixed-width subtype whose
             // per-element length matches it. A string/blob subtype, or an fp32
             // that is not 4 bytes / an fp64 that is not 8, is malformed outright
@@ -711,7 +716,6 @@ impl IStream {
             };
             #[cfg(not(feature = "fp64"))]
             let kind = ArrayKind::Fp32;
-            self.core.array_kind = kind;
             // §4.8 step 2/3: the subtype is known, so the consumer can compare
             // it against a declared element type and skip the whole field
             // before any schema bound on `count` comes into play.
@@ -721,7 +725,6 @@ impl IStream {
                 // An empty fixlen array still carries its `fixlen_word` (so an
                 // empty fp32 stays distinct from an empty fp64), but no payload
                 // follows: resume at the next field without entering `FixlenVal`.
-                self.core.in_array = false;
                 self.core.state = State::Idle;
             } else {
                 self.core.state = State::FixlenVal;
@@ -756,15 +759,24 @@ impl IStream {
         if length == 0 {
             // An empty string/blob has no payload to stream, so it is delivered
             // as the single zero-length chunk the callback contract promises.
-            match subtype {
-                FixlenType::Blob => visitor.blob(self.id, 0, 0, &[]),
-                _ => visitor.string(self.id, 0, 0, &[]),
-            }
+            self.payload_chunk(0, &[], visitor);
             self.core.state = State::Idle;
         } else {
             self.core.state = State::FixlenRaw;
         }
         Ok(())
+    }
+
+    /// Hand one chunk of a string/blob payload to the visitor. Only those two
+    /// subtypes ever carry a streamed payload (`on_fixlen_len` sends the float
+    /// ones to `FixlenVal`), so anything that is not a blob is the string.
+    #[cfg(feature = "fixlen")]
+    fn payload_chunk<V: Visitor>(&self, offset: usize, chunk: &[u8], visitor: &mut V) {
+        if self.core.fixlen_type == FixlenType::Blob {
+            visitor.blob(self.id, self.fixlen_total, offset, chunk);
+        } else {
+            visitor.string(self.id, self.fixlen_total, offset, chunk);
+        }
     }
 
     /// Absorb one byte of an `fp32` / `fp64` payload.
@@ -884,10 +896,9 @@ impl IStream {
         // is what makes a message truncated *between* the two words INCOMPLETE
         // rather than judged on the count alone.
         #[cfg(feature = "fixlen")]
-        if self.core.array_fixlen {
+        if self.core.array_kind == ArrayKind::Fp32 {
             self.array_remaining = count;
-            self.core.in_array = true;
-            self.core.state = State::FixlenLen;
+            self.core.state = State::FixlenArrayLen;
             return Ok(());
         }
 
@@ -898,13 +909,11 @@ impl IStream {
         // A zero-count integer array is exactly `[ header ][ count = 0 ]` and
         // resumes at the next field (§4.7).
         if count == 0 {
-            self.core.in_array = false;
             self.core.state = State::Idle;
             return Ok(());
         }
 
         self.array_remaining = count;
-        self.core.in_array = true;
         // Only the two integer kinds can reach this point; a fixlen array
         // returned above.
         self.core.state = if self.core.array_kind == ArrayKind::Signed {

@@ -358,7 +358,7 @@ provided it documents the bound:
   exceeding it is `Error::Argument`.
 
 The window costs RAM: on Cortex-M0 the pending array grows `OStream` from
-**16 B to 52 B** (`4 * LAZY_SEQ_DEPTH` plus the count) — see the RAM table under
+**12 B to 48 B** (`4 * LAZY_SEQ_DEPTH` plus the depth and count) — see the RAM table under
 [Footprint](#footprint), where the `sequence`-enabled rows carry exactly that
 cost.
 
@@ -711,27 +711,29 @@ are zero and flash equals `.text`:
 
 | Configuration | Cortex-M0 | Cortex-M4F | RISC-V 32 |
 |---------------|----------:|-----------:|----------:|
-| **MIN** — integers only, 32-bit (`default-features = false`) | **614 B** | **624 B** | **802 B** |
-| integers only, 64-bit (`value64`) | 762 B | 808 B | 978 B |
-| `+ sequence` (64-bit) | 1 098 B | 1 128 B | 1 474 B |
-| `+ array` (64-bit) | 1 046 B | 1 074 B | 1 312 B |
-| `+ fixlen` (fp32 / str / blob, 64-bit) | 1 131 B | 1 173 B | 1 433 B |
-| all wire types, 32-bit | 1 903 B | 1 905 B | 2 501 B |
-| **MAX** — all wire types, 64-bit (default) | **2 191 B** | **2 109 B** | **2 777 B** |
-| generated-shape visitor (MAX) | 4 173 B | 4 117 B | 5 265 B |
+| **MIN** — integers only, 32-bit (`default-features = false`) | **612 B** | **624 B** | **798 B** |
+| integers only, 64-bit (`value64`) | 708 B | 744 B | 886 B |
+| `+ sequence` (64-bit) | 996 B | 1 036 B | 1 310 B |
+| `+ array` (64-bit) | 968 B | 1 028 B | 1 216 B |
+| `+ fixlen` (fp32 / str / blob, 64-bit) | 1 053 B | 1 117 B | 1 333 B |
+| all wire types, 32-bit | 1 805 B | 1 781 B | 2 313 B |
+| **MAX** — all wire types, 64-bit (default) | **1 909 B** | **1 927 B** | **2 501 B** |
+| generated-shape visitor (MAX) | 3 923 B | 3 807 B | 4 913 B |
 
 The `sequence` rows carry the lazy-framing machinery of MESSAGE_SPEC §2 (the
-hold-back run, [above](#sequence-framing-and-the-hold-back-window)): about 200 B
+hold-back run, [above](#sequence-framing-and-the-hold-back-window)): about 140 B
 of flash on Cortex-M0 over an eager `begin`/`end` pair, plus the pending array's
-RAM in the table below. Roughly 60 B of that is `commit_pending`, which tracks
-how much of the run reached the buffer so a `BufferFull` in the middle of one
-keeps the ids it did not emit.
+RAM in the table below. 60 B of that is `commit_pending`, which drops an id from
+the run only once its header has reached the buffer, so a `BufferFull` in the
+middle of one keeps the ids it did not emit.
 
-The codec spans **≈0.6 KiB** (integer-only, 32-bit) to **≈2.1 KiB** (every wire
-type, 64-bit) of flash on Cortex-M0; disabling `value64` removes ~13% of the code
-by deleting the 64-bit shift helpers and halving every varint operation. The
-decoder carries no panic paths (all bounds are proven in-bounds), so the whole
-codec links without `core::panicking`.
+The codec spans **≈0.6 KiB** (integer-only, 32-bit) to **≈1.9 KiB** (every wire
+type, 64-bit) of flash on Cortex-M0; disabling `value64` removes ~5–14% of the
+code by halving every varint operation. Neither width links a double-word shift
+helper (`__aeabi_llsl` / `__ashldi3`): the decoder's one variable-count 64-bit
+shift is composed from 32-bit halves on 32-bit targets. The decoder carries no
+panic paths (all bounds are proven in-bounds), so the whole codec links without
+`core::panicking`.
 
 The **generated-shape visitor** row measures the same MAX build against a
 visitor mirroring sofabgen output (location stack, per-`(location, id)`
@@ -746,21 +748,21 @@ allocated. Sizes are identical across these 32-bit targets:
 |---------------|----------:|----------:|------:|
 | **MIN** — integers only, 32-bit | 12 B | 12 B | **24 B** |
 | integers only, 64-bit | 24 B | 12 B | 36 B |
-| `+ sequence` (64-bit) | 24 B | 52 B | 76 B |
+| `+ sequence` (64-bit) | 24 B | 48 B | 72 B |
 | `+ array` (64-bit) | 24 B | 12 B | 36 B |
 | `+ fixlen` (64-bit) | 32 B | 12 B | 44 B |
-| all wire types, 32-bit | 32 B | 52 B | 84 B |
-| **MAX** — all wire types, 64-bit (default) | 32 B | 52 B | **84 B** |
+| all wire types, 32-bit | 32 B | 48 B | 80 B |
+| **MAX** — all wire types, 64-bit (default) | 32 B | 48 B | **80 B** |
 
 The decoder state is held at **32 bytes or less** in every configuration, which
 is a flash figure as much as a RAM one: at or below that size the compiler
 zero-initializes an `IStream` with inline stores, while a larger one links a
 ~158-byte `__aeabi_memclr8` helper.
 
-The `sequence` rows are where `OStream` grows from 12/16 B to 52 B: the
+The `sequence` rows are where `OStream` grows from 12 B to 48 B: the
 `LAZY_SEQ_DEPTH`-slot hold-back array
 ([above](#sequence-framing-and-the-hold-back-window)), `4 * 8` bytes of ids plus
-the count. It is the only per-stream cost of omitting all-default sequences and
+two 16-bit counters (open depth and held-back count). It is the only per-stream cost of omitting all-default sequences and
 is fixed at build time.
 
 ### Choosing between the two Rust corelibs

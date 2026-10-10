@@ -247,7 +247,7 @@ impl<'a> Handoff<'a> for &'a Handover<'a> {
 /// (MESSAGE_SPEC §2). Deliberately far below the format's [`MAX_DEPTH`] ceiling:
 /// the array costs `4 * LAZY_SEQ_DEPTH` bytes of encoder state, and a heap-free
 /// target pays that in RAM — measured on Cortex-M0, the `OStream` grows from
-/// 16 B to 52 B at 8.
+/// 12 B to 48 B at 8.
 ///
 /// It is **fixed at 8 for every build of this crate**: there is no Cargo feature,
 /// no `cfg` and no environment variable that changes it, so a target that cannot
@@ -326,8 +326,13 @@ pub struct OStream<'a, F: Flush = NoFlush, H: Handoff<'a> = NoHandoff> {
     /// [`Handover`] carries no state for it and no branch either.
     handoff: H,
     /// Currently-open nested-sequence depth, capped at [`MAX_DEPTH`].
+    ///
+    /// This and [`Self::npending`] are `u16` because both fit (`MAX_DEPTH` is
+    /// 255, `LAZY_SEQ_DEPTH` 8) and the pair then shares the one word a single
+    /// `u32`/`usize` counter took: 4 B less encoder RAM. `u8` would save no
+    /// more — the struct is word-aligned — and costs extra zero-extensions.
     #[cfg(feature = "sequence")]
-    depth: u32,
+    depth: u16,
     /// Ids of the innermost open sequences whose header has not been written yet
     /// (MESSAGE_SPEC §2 lazy framing). Always a contiguous suffix of the open
     /// sequences: writing any field commits the whole run at once.
@@ -335,7 +340,7 @@ pub struct OStream<'a, F: Flush = NoFlush, H: Handoff<'a> = NoHandoff> {
     pending: [Id; LAZY_SEQ_DEPTH],
     /// Number of valid entries in [`Self::pending`].
     #[cfg(feature = "sequence")]
-    npending: usize,
+    npending: u16,
 }
 
 impl<'a> OStream<'a, NoFlush> {
@@ -637,53 +642,20 @@ impl<'a, F: Flush, H: Handoff<'a>> OStream<'a, F, H> {
     #[cold]
     #[inline(never)]
     fn commit_pending(&mut self) -> Result<()> {
-        let mut written = 0;
-        let mut result = Ok(());
-        for i in 0..self.npending {
-            // `get` rather than `self.pending[i]`: `i < npending <= LAZY_SEQ_DEPTH`
-            // holds by construction, but the indexing form still emits a
-            // `core::panicking::panic_bounds_check` path that the linker then
-            // keeps in the image. The whole codec is meant to link without
-            // `core::panicking` (README "Footprint"), so prove the access
-            // in-bounds instead of asserting it.
-            let id = match self.pending.get(i) {
-                Some(&id) => id,
-                None => break,
-            };
-            if let Err(e) =
-                self.write_varint(((id as Unsigned) << 3) | T_SEQUENCE_START as Unsigned)
-            {
-                result = Err(e);
-                break;
+        while self.npending != 0 {
+            // The outermost held-back id is always slot 0, a constant index,
+            // and the shift below runs over the whole array with constant
+            // bounds — both provably in range, so this links no
+            // `core::panicking` (README "Footprint"). Shifting all slots rather
+            // than just the live ones moves a few stale ids along with them,
+            // which nothing reads.
+            self.write_varint(((self.pending[0] as Unsigned) << 3) | T_SEQUENCE_START as Unsigned)?;
+            for i in 1..LAZY_SEQ_DEPTH {
+                self.pending[i - 1] = self.pending[i];
             }
-            written += 1;
+            self.npending -= 1;
         }
-        self.drop_front(written);
-        result
-    }
-
-    /// Drop the outermost `k` entries of the pending run, keeping the rest as the
-    /// innermost suffix. Panic-free by the same rule as [`Self::commit_pending`]:
-    /// `copy_within` carries a range assert, so the shift is spelled out with
-    /// `get`/`get_mut` instead.
-    #[cfg(feature = "sequence")]
-    fn drop_front(&mut self, k: usize) {
-        if k >= self.npending {
-            self.npending = 0;
-            return;
-        }
-        let remaining = self.npending - k;
-        for i in 0..remaining {
-            let id = match self.pending.get(i + k) {
-                Some(&id) => id,
-                None => break,
-            };
-            match self.pending.get_mut(i) {
-                Some(slot) => *slot = id,
-                None => break,
-            }
-        }
-        self.npending = remaining;
+        Ok(())
     }
 
     // --- scalar writers -----------------------------------------------------
@@ -780,14 +752,21 @@ impl<'a, F: Flush, H: Handoff<'a>> OStream<'a, F, H> {
 
     // --- array writers ------------------------------------------------------
 
+    /// The field header and count word every array starts with. Shared by the
+    /// element-generic writers, so each instantiation carries only its loop.
+    #[cfg(feature = "array")]
+    fn write_array_head(&mut self, id: Id, wire_type: u8, count: usize) -> Result<()> {
+        self.write_id_type(id, wire_type)?;
+        self.write_varint(count as Unsigned)
+    }
+
     /// Write an array of unsigned integers (`u8`/`u16`/`u32`/`u64` elements).
     ///
     /// Element width is fixed by the type at compile time, so the invalid
     /// element-size error from the C API is impossible here.
     #[cfg(feature = "array")]
     pub fn write_array_unsigned<T: UnsignedElem>(&mut self, id: Id, data: &[T]) -> Result<()> {
-        self.write_id_type(id, T_VARINTARRAY_UNSIGNED)?;
-        self.write_varint(data.len() as Unsigned)?;
+        self.write_array_head(id, T_VARINTARRAY_UNSIGNED, data.len())?;
         for e in data {
             self.write_varint(e.widen())?;
         }
@@ -797,8 +776,7 @@ impl<'a, F: Flush, H: Handoff<'a>> OStream<'a, F, H> {
     /// Write an array of signed integers (`i8`/`i16`/`i32`/`i64` elements).
     #[cfg(feature = "array")]
     pub fn write_array_signed<T: SignedElem>(&mut self, id: Id, data: &[T]) -> Result<()> {
-        self.write_id_type(id, T_VARINTARRAY_SIGNED)?;
-        self.write_varint(data.len() as Unsigned)?;
+        self.write_array_head(id, T_VARINTARRAY_SIGNED, data.len())?;
         for e in data {
             self.write_varint(zigzag_encode(e.widen()))?;
         }
@@ -813,8 +791,7 @@ impl<'a, F: Flush, H: Handoff<'a>> OStream<'a, F, H> {
     /// where an empty array simply has no payload.
     #[cfg(all(feature = "array", feature = "fixlen"))]
     pub fn write_array_fp32(&mut self, id: Id, data: &[f32]) -> Result<()> {
-        self.write_id_type(id, T_FIXLENARRAY)?;
-        self.write_varint(data.len() as Unsigned)?;
+        self.write_array_head(id, T_FIXLENARRAY, data.len())?;
         self.write_varint((4 << 3) | FixlenType::Fp32 as Unsigned)?;
         for &e in data {
             self.push_raw(&e.to_le_bytes())?;
@@ -830,8 +807,7 @@ impl<'a, F: Flush, H: Handoff<'a>> OStream<'a, F, H> {
     /// where an empty array simply has no payload.
     #[cfg(all(feature = "array", feature = "fp64"))]
     pub fn write_array_fp64(&mut self, id: Id, data: &[f64]) -> Result<()> {
-        self.write_id_type(id, T_FIXLENARRAY)?;
-        self.write_varint(data.len() as Unsigned)?;
+        self.write_array_head(id, T_FIXLENARRAY, data.len())?;
         self.write_varint((8 << 3) | FixlenType::Fp64 as Unsigned)?;
         for &e in data {
             self.push_raw(&e.to_le_bytes())?;
@@ -868,7 +844,7 @@ impl<'a, F: Flush, H: Handoff<'a>> OStream<'a, F, H> {
     #[cfg(feature = "sequence")]
     #[inline]
     pub fn write_sequence_begin_lazy(&mut self, id: Id) -> Result<()> {
-        if self.depth >= MAX_DEPTH {
+        if u32::from(self.depth) >= MAX_DEPTH {
             return Err(Error::Argument);
         }
         // Same width-aware ceiling as `write_id_type`: this id reaches the wire
@@ -880,7 +856,7 @@ impl<'a, F: Flush, H: Handoff<'a>> OStream<'a, F, H> {
         }
         // `get_mut` is the panic-free spelling of `self.npending < LAZY_SEQ_DEPTH`
         // followed by an index: `None` *is* the window-full case.
-        if let Some(slot) = self.pending.get_mut(self.npending) {
+        if let Some(slot) = self.pending.get_mut(usize::from(self.npending)) {
             *slot = id;
             self.npending += 1;
         } else {
