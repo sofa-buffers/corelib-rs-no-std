@@ -268,6 +268,31 @@ pub struct IStream {
     acc_lo: u32,
 }
 
+/// `payload << shift` in the value type, for the 7 payload bits of a varint byte.
+#[cfg(not(all(feature = "value64", target_pointer_width = "32")))]
+#[inline(always)]
+fn payload_at(payload: u8, shift: u32) -> Unsigned {
+    (payload as Unsigned) << shift
+}
+
+/// `payload << shift` for a 64-bit value on a 32-bit target, composed from the
+/// two 32-bit halves. A plain `u64 << shift` with a variable count is lowered to
+/// a call into the compiler's double-word shift helper (`__aeabi_llsl` on Arm,
+/// `__ashldi3` on RISC-V), and this is its only call site in the codec; the
+/// halves need only single-word shifts, which every 32-bit core has.
+#[cfg(all(feature = "value64", target_pointer_width = "32"))]
+#[inline(always)]
+fn payload_at(payload: u8, shift: u32) -> Unsigned {
+    let p = u32::from(payload);
+    if shift < 32 {
+        // `(p >> 1) >> (31 - shift)` is `p >> (32 - shift)` without the
+        // out-of-range shift by 32 at `shift == 0`.
+        (u64::from((p >> 1) >> (31 - shift)) << 32) | u64::from(p << shift)
+    } else {
+        u64::from(p << (shift - 32)) << 32
+    }
+}
+
 impl Core {
     /// Feed one byte into the varint currently being decoded.
     ///
@@ -317,7 +342,7 @@ impl Core {
         }
 
         // OR in the 7 payload bits at the current position.
-        self.acc |= ((byte & 0x7F) as Unsigned) << shift;
+        self.acc |= payload_at(byte & 0x7F, shift);
         self.shift = (shift + 7) as u8;
 
         let v = self.acc;
