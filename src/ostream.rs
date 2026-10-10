@@ -247,7 +247,7 @@ impl<'a> Handoff<'a> for &'a Handover<'a> {
 /// (MESSAGE_SPEC §2). Deliberately far below the format's [`MAX_DEPTH`] ceiling:
 /// the array costs `4 * LAZY_SEQ_DEPTH` bytes of encoder state, and a heap-free
 /// target pays that in RAM — measured on Cortex-M0, the `OStream` grows from
-/// 16 B to 52 B at 8.
+/// 12 B to 48 B at 8.
 ///
 /// It is **fixed at 8 for every build of this crate**: there is no Cargo feature,
 /// no `cfg` and no environment variable that changes it, so a target that cannot
@@ -326,8 +326,13 @@ pub struct OStream<'a, F: Flush = NoFlush, H: Handoff<'a> = NoHandoff> {
     /// [`Handover`] carries no state for it and no branch either.
     handoff: H,
     /// Currently-open nested-sequence depth, capped at [`MAX_DEPTH`].
+    ///
+    /// This and [`Self::npending`] are `u16` because both fit (`MAX_DEPTH` is
+    /// 255, `LAZY_SEQ_DEPTH` 8) and the pair then shares the one word a single
+    /// `u32`/`usize` counter took: 4 B less encoder RAM. `u8` would save no
+    /// more — the struct is word-aligned — and costs extra zero-extensions.
     #[cfg(feature = "sequence")]
-    depth: u32,
+    depth: u16,
     /// Ids of the innermost open sequences whose header has not been written yet
     /// (MESSAGE_SPEC §2 lazy framing). Always a contiguous suffix of the open
     /// sequences: writing any field commits the whole run at once.
@@ -335,7 +340,7 @@ pub struct OStream<'a, F: Flush = NoFlush, H: Handoff<'a> = NoHandoff> {
     pending: [Id; LAZY_SEQ_DEPTH],
     /// Number of valid entries in [`Self::pending`].
     #[cfg(feature = "sequence")]
-    npending: usize,
+    npending: u16,
 }
 
 impl<'a> OStream<'a, NoFlush> {
@@ -835,7 +840,7 @@ impl<'a, F: Flush, H: Handoff<'a>> OStream<'a, F, H> {
     #[cfg(feature = "sequence")]
     #[inline]
     pub fn write_sequence_begin_lazy(&mut self, id: Id) -> Result<()> {
-        if self.depth >= MAX_DEPTH {
+        if u32::from(self.depth) >= MAX_DEPTH {
             return Err(Error::Argument);
         }
         // Same width-aware ceiling as `write_id_type`: this id reaches the wire
@@ -847,7 +852,7 @@ impl<'a, F: Flush, H: Handoff<'a>> OStream<'a, F, H> {
         }
         // `get_mut` is the panic-free spelling of `self.npending < LAZY_SEQ_DEPTH`
         // followed by an index: `None` *is* the window-full case.
-        if let Some(slot) = self.pending.get_mut(self.npending) {
+        if let Some(slot) = self.pending.get_mut(usize::from(self.npending)) {
             *slot = id;
             self.npending += 1;
         } else {
