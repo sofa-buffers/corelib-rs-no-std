@@ -464,12 +464,7 @@ impl IStream {
                 let rest = &data[i..];
                 let take = rest.len().min(self.fixlen_remaining);
                 let offset = self.fixlen_total - self.fixlen_remaining;
-                let chunk = &rest[..take];
-                match self.core.fixlen_type {
-                    FixlenType::Str => visitor.string(self.id, self.fixlen_total, offset, chunk),
-                    FixlenType::Blob => visitor.blob(self.id, self.fixlen_total, offset, chunk),
-                    _ => return Err(self.latch(Error::InvalidMsg)),
-                }
+                self.payload_chunk(offset, &rest[..take], visitor);
                 self.fixlen_remaining -= take;
                 i += take;
                 if self.fixlen_remaining == 0 {
@@ -764,15 +759,24 @@ impl IStream {
         if length == 0 {
             // An empty string/blob has no payload to stream, so it is delivered
             // as the single zero-length chunk the callback contract promises.
-            match subtype {
-                FixlenType::Blob => visitor.blob(self.id, 0, 0, &[]),
-                _ => visitor.string(self.id, 0, 0, &[]),
-            }
+            self.payload_chunk(0, &[], visitor);
             self.core.state = State::Idle;
         } else {
             self.core.state = State::FixlenRaw;
         }
         Ok(())
+    }
+
+    /// Hand one chunk of a string/blob payload to the visitor. Only those two
+    /// subtypes ever carry a streamed payload (`on_fixlen_len` sends the float
+    /// ones to `FixlenVal`), so anything that is not a blob is the string.
+    #[cfg(feature = "fixlen")]
+    fn payload_chunk<V: Visitor>(&self, offset: usize, chunk: &[u8], visitor: &mut V) {
+        if self.core.fixlen_type == FixlenType::Blob {
+            visitor.blob(self.id, self.fixlen_total, offset, chunk);
+        } else {
+            visitor.string(self.id, self.fixlen_total, offset, chunk);
+        }
     }
 
     /// Absorb one byte of an `fp32` / `fp64` payload.
