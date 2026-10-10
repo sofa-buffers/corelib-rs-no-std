@@ -473,8 +473,8 @@ impl IStream {
                 continue;
             }
 
-            if let Err(e) = self.step(data[i], visitor) {
-                return Err(self.latch(e));
+            if self.step(data[i], visitor).is_err() {
+                return Err(self.latch());
             }
             i += 1;
         }
@@ -494,25 +494,23 @@ impl IStream {
         }
     }
 
-    /// Enter the terminal [`State::Invalid`] and hand the error straight back,
-    /// so every site that produces one is a single `return Err(self.latch(e))`.
+    /// Enter the terminal [`State::Invalid`] and hand back the error to return.
     ///
-    /// Only [`Error::InvalidMsg`] latches: it is the one outcome §5.2 declares
-    /// terminal. [`Status::Incomplete`] never reaches here at all — it is not an
-    /// error, and is computed from the state after the loop rather than returned
-    /// by a step — and must not be latched even if it ever did: feeding more
-    /// bytes is exactly how it is resolved.
+    /// Every error a step can produce is [`Error::InvalidMsg`] — the visitor
+    /// callbacks cannot fail, and [`Error::LimitExceeded`] is the generated
+    /// visitor's to report, never `feed`'s — so this latches unconditionally
+    /// and does not need to look at which error it was. [`Status::Incomplete`]
+    /// never reaches here at all: it is not an error, and is computed from the
+    /// state after the loop rather than returned by a step.
     ///
     /// `cold` + `inline(never)`: this runs once per broken message, on the way
     /// out, and keeping it out of the per-byte loop's body leaves the loop (and
     /// its register allocation) as it was.
     #[cold]
     #[inline(never)]
-    fn latch(&mut self, e: Error) -> Error {
-        if e == Error::InvalidMsg {
-            self.core.state = State::Invalid;
-        }
-        e
+    fn latch(&mut self) -> Error {
+        self.core.state = State::Invalid;
+        Error::InvalidMsg
     }
 
     /// True when the decoder sits **exactly** at a top-level field boundary: no
