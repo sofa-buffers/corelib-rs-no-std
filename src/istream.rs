@@ -341,7 +341,9 @@ impl Core {
         // but no room left" test the loop used to carry after the terminator
         // check was unreachable for the same reason, and is gone.
         if room < 7 && (byte & 0x80 != 0 || u32::from(byte & 0x7F) >> room != 0) {
-            self.reset_varint();
+            // Terminal, so the accumulator is never read again: only `shift`
+            // has to drop to zero, which sends `step` on to the `Invalid` arm.
+            self.shift = 0;
             self.state = State::Invalid;
             return 0;
         }
