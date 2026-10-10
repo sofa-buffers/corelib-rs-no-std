@@ -752,14 +752,21 @@ impl<'a, F: Flush, H: Handoff<'a>> OStream<'a, F, H> {
 
     // --- array writers ------------------------------------------------------
 
+    /// The field header and count word every array starts with. Shared by the
+    /// element-generic writers, so each instantiation carries only its loop.
+    #[cfg(feature = "array")]
+    fn write_array_head(&mut self, id: Id, wire_type: u8, count: usize) -> Result<()> {
+        self.write_id_type(id, wire_type)?;
+        self.write_varint(count as Unsigned)
+    }
+
     /// Write an array of unsigned integers (`u8`/`u16`/`u32`/`u64` elements).
     ///
     /// Element width is fixed by the type at compile time, so the invalid
     /// element-size error from the C API is impossible here.
     #[cfg(feature = "array")]
     pub fn write_array_unsigned<T: UnsignedElem>(&mut self, id: Id, data: &[T]) -> Result<()> {
-        self.write_id_type(id, T_VARINTARRAY_UNSIGNED)?;
-        self.write_varint(data.len() as Unsigned)?;
+        self.write_array_head(id, T_VARINTARRAY_UNSIGNED, data.len())?;
         for e in data {
             self.write_varint(e.widen())?;
         }
@@ -769,8 +776,7 @@ impl<'a, F: Flush, H: Handoff<'a>> OStream<'a, F, H> {
     /// Write an array of signed integers (`i8`/`i16`/`i32`/`i64` elements).
     #[cfg(feature = "array")]
     pub fn write_array_signed<T: SignedElem>(&mut self, id: Id, data: &[T]) -> Result<()> {
-        self.write_id_type(id, T_VARINTARRAY_SIGNED)?;
-        self.write_varint(data.len() as Unsigned)?;
+        self.write_array_head(id, T_VARINTARRAY_SIGNED, data.len())?;
         for e in data {
             self.write_varint(zigzag_encode(e.widen()))?;
         }
@@ -785,8 +791,7 @@ impl<'a, F: Flush, H: Handoff<'a>> OStream<'a, F, H> {
     /// where an empty array simply has no payload.
     #[cfg(all(feature = "array", feature = "fixlen"))]
     pub fn write_array_fp32(&mut self, id: Id, data: &[f32]) -> Result<()> {
-        self.write_id_type(id, T_FIXLENARRAY)?;
-        self.write_varint(data.len() as Unsigned)?;
+        self.write_array_head(id, T_FIXLENARRAY, data.len())?;
         self.write_varint((4 << 3) | FixlenType::Fp32 as Unsigned)?;
         for &e in data {
             self.push_raw(&e.to_le_bytes())?;
@@ -802,8 +807,7 @@ impl<'a, F: Flush, H: Handoff<'a>> OStream<'a, F, H> {
     /// where an empty array simply has no payload.
     #[cfg(all(feature = "array", feature = "fp64"))]
     pub fn write_array_fp64(&mut self, id: Id, data: &[f64]) -> Result<()> {
-        self.write_id_type(id, T_FIXLENARRAY)?;
-        self.write_varint(data.len() as Unsigned)?;
+        self.write_array_head(id, T_FIXLENARRAY, data.len())?;
         self.write_varint((8 << 3) | FixlenType::Fp64 as Unsigned)?;
         for &e in data {
             self.push_raw(&e.to_le_bytes())?;
