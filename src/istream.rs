@@ -203,6 +203,12 @@ enum State {
     FixlenRaw,
     #[cfg(feature = "array")]
     ArrayCount,
+    /// The `fixlen_word` of a fixlen array (§4.8), read after its count word.
+    /// A state of its own — rather than [`State::FixlenLen`] plus an
+    /// "in an array" flag — because the count cannot tell the two words apart:
+    /// an empty array leaves `array_remaining` at zero, just as a scalar does.
+    #[cfg(all(feature = "array", feature = "fixlen"))]
+    FixlenArrayLen,
 }
 
 /// The decoder's per-byte state, grouped into one struct.
@@ -225,15 +231,12 @@ struct Core {
     shift: u8,
     state: State,
 
+    /// Element kind of the array whose count word is being read. A fixlen
+    /// array's kind is not known yet at that point — it arrives with the
+    /// `fixlen_word` — so [`ArrayKind::Fp32`] stands in for "a fixlen array"
+    /// until [`IStream::on_fixlen_len`] reads the real one.
     #[cfg(feature = "array")]
     array_kind: ArrayKind,
-    #[cfg(feature = "array")]
-    in_array: bool,
-    /// The array being decoded is a fixlen array, so its element kind is still
-    /// unknown while the count varint is read: it arrives with the
-    /// `fixlen_word`, and `array_kind` is only meaningful from then on.
-    #[cfg(all(feature = "array", feature = "fixlen"))]
-    array_fixlen: bool,
 
     #[cfg(feature = "fixlen")]
     fixlen_type: FixlenType,
@@ -249,7 +252,9 @@ pub struct IStream {
     core: Core,
     id: Id,
 
-    // array context
+    /// Elements still to come in the array being decoded. Zero for every
+    /// scalar field and at every field boundary, so a non-zero value *is* the
+    /// "inside an array" flag.
     #[cfg(feature = "array")]
     array_remaining: usize,
 
@@ -377,10 +382,6 @@ impl IStream {
                 state: State::Idle,
                 #[cfg(feature = "array")]
                 array_kind: ArrayKind::Unsigned,
-                #[cfg(feature = "array")]
-                in_array: false,
-                #[cfg(all(feature = "array", feature = "fixlen"))]
-                array_fixlen: false,
                 // Any subtype will do — `on_fixlen_len` sets it before anything
                 // reads it — and a non-zero one keeps the whole struct from
                 // being an all-zero image, which the compiler would otherwise
@@ -578,6 +579,8 @@ impl IStream {
             }
             #[cfg(feature = "fixlen")]
             State::FixlenLen => self.on_fixlen_len(value, visitor),
+            #[cfg(all(feature = "array", feature = "fixlen"))]
+            State::FixlenArrayLen => self.on_fixlen_len(value, visitor),
             #[cfg(feature = "array")]
             State::ArrayCount => self.on_array_count(value, visitor),
             // Set by `push` itself for an overlong varint (§4.1).
@@ -598,14 +601,6 @@ impl IStream {
             return Err(Error::InvalidMsg);
         }
         self.id = id as Id;
-        #[cfg(feature = "array")]
-        {
-            self.core.in_array = false;
-        }
-        #[cfg(all(feature = "array", feature = "fixlen"))]
-        {
-            self.core.array_fixlen = false;
-        }
 
         match wire_type {
             T_VARINT_UNSIGNED => self.core.state = State::VarintUnsigned,
@@ -627,9 +622,10 @@ impl IStream {
             #[cfg(all(feature = "array", feature = "fixlen"))]
             T_FIXLENARRAY => {
                 // The element kind is not known yet — it is carried by the
-                // `fixlen_word` that follows the count (§4.8), so `array_kind`
-                // is set (and the array announced) in `on_fixlen_len`.
-                self.core.array_fixlen = true;
+                // `fixlen_word` that follows the count (§4.8), so `Fp32` only
+                // marks a fixlen array here; the real kind is set (and the
+                // array announced) in `on_fixlen_len`.
+                self.core.array_kind = ArrayKind::Fp32;
                 self.core.state = State::ArrayCount;
             }
 
@@ -666,12 +662,11 @@ impl IStream {
     #[inline]
     fn advance_after_element(&mut self) -> bool {
         #[cfg(feature = "array")]
-        if self.core.in_array {
+        if self.array_remaining != 0 {
             self.array_remaining -= 1;
-            if self.array_remaining > 0 {
+            if self.array_remaining != 0 {
                 return true;
             }
-            self.core.in_array = false;
         }
         self.core.state = State::Idle;
         false
@@ -707,7 +702,7 @@ impl IStream {
         // element subtype, so this — not the count word — is where the array is
         // announced to the visitor.
         #[cfg(feature = "array")]
-        if self.core.in_array {
+        if self.core.state == State::FixlenArrayLen {
             // Format first: an array element must be a fixed-width subtype whose
             // per-element length matches it. A string/blob subtype, or an fp32
             // that is not 4 bytes / an fp64 that is not 8, is malformed outright
@@ -726,7 +721,6 @@ impl IStream {
             };
             #[cfg(not(feature = "fp64"))]
             let kind = ArrayKind::Fp32;
-            self.core.array_kind = kind;
             // §4.8 step 2/3: the subtype is known, so the consumer can compare
             // it against a declared element type and skip the whole field
             // before any schema bound on `count` comes into play.
@@ -736,7 +730,6 @@ impl IStream {
                 // An empty fixlen array still carries its `fixlen_word` (so an
                 // empty fp32 stays distinct from an empty fp64), but no payload
                 // follows: resume at the next field without entering `FixlenVal`.
-                self.core.in_array = false;
                 self.core.state = State::Idle;
             } else {
                 self.core.state = State::FixlenVal;
@@ -899,10 +892,9 @@ impl IStream {
         // is what makes a message truncated *between* the two words INCOMPLETE
         // rather than judged on the count alone.
         #[cfg(feature = "fixlen")]
-        if self.core.array_fixlen {
+        if self.core.array_kind == ArrayKind::Fp32 {
             self.array_remaining = count;
-            self.core.in_array = true;
-            self.core.state = State::FixlenLen;
+            self.core.state = State::FixlenArrayLen;
             return Ok(());
         }
 
@@ -913,13 +905,11 @@ impl IStream {
         // A zero-count integer array is exactly `[ header ][ count = 0 ]` and
         // resumes at the next field (§4.7).
         if count == 0 {
-            self.core.in_array = false;
             self.core.state = State::Idle;
             return Ok(());
         }
 
         self.array_remaining = count;
-        self.core.in_array = true;
         // Only the two integer kinds can reach this point; a fixlen array
         // returned above.
         self.core.state = if self.core.array_kind == ArrayKind::Signed {
