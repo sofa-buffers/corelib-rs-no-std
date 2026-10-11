@@ -121,17 +121,23 @@ the schema's `count` / `maxlen` (a breach is `InvalidMsg`), `seq::Bound::Cap(n)`
 for a receiver cap on a field the schema leaves open (a breach is
 `LimitExceeded`). The crate holds no cap of its own.
 
-The helpers are generic over the destination through the `seq::SeqVec` trait,
-and each feature adds one impl: `heapless` for the fixed-capacity storage a
-default sofabgen build emits (`rust.allow_dynamic: false`), `heapless09` for the
-same storage when the crate depends on heapless 0.9 (sofabgen
-`rust.heapless: "0.9"`), `alloc` for the `Vec` storage of
-`rust.allow_dynamic: true`. A `heapless::Vec` of 0.8 and one of 0.9 are
-different types, so the feature has to match the major the crate's own
-`heapless` dependency names; `heapless` and `heapless09` can be on together. A full `heapless::Vec` refuses with
-`Error::Argument` and grows by nothing — never a truncated array. sofabgen turns
-on exactly the feature its generated storage needs; with neither on, the module
-still provides the comparisons and the trait for a container of your own.
+The helpers are generic over the destination through the `seq::SeqVec` trait.
+The trait, the helpers and the comparisons are always compiled in; each
+container feature only adds one ready-made `SeqVec` impl:
+
+| Features on | `SeqVec` is implemented for |
+|-------------|-----------------------------|
+| none | nothing built in: implement `SeqVec` for a container of your own |
+| `heapless` | heapless 0.8's `heapless::Vec<T, N>`: the fixed-capacity storage of sofabgen `rust.allow_dynamic: false` (the default) |
+| `heapless09` | heapless 0.9's `heapless::Vec<T, N, LenT>`: the same storage when the crate depends on heapless 0.9 (sofabgen `rust.heapless: "0.9"`) |
+| `alloc` | `alloc::vec::Vec<T>`: the storage of sofabgen `rust.allow_dynamic: true` |
+
+The features combine freely; each one adds its impl and nothing else. A
+`heapless::Vec` of 0.8 and one of 0.9 are different types, so the heapless
+feature has to match the major the crate's own `heapless` dependency names.
+A full `heapless::Vec` refuses with `Error::Argument` and grows by nothing —
+never a truncated array. sofabgen turns on exactly the feature its generated
+storage needs.
 
 #### Float-array equality (`sofab::floats`)
 
