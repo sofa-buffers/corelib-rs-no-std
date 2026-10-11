@@ -83,9 +83,16 @@ jobs:
         #   after the next pin bump.
         # - 1.97/1.96/1.95: the current stable and its two predecessors, pinned
         #   so a green run stays reproducible. Bump when a new stable ships.
+        # - 1.87: the floor of the `heapless09` feature (heapless 0.9's own
+        #   rust-version), so that feature is built and tested at the oldest
+        #   compiler it promises.
         # - 1.70: the declared MSRV (Cargo.toml `rust-version`), so an
-        #   accidental MSRV bump fails CI.
-        toolchain: [stable, "1.97", "1.96", "1.95", "1.70"]
+        #   accidental MSRV bump fails CI. It builds every feature except
+        #   `heapless09`, which needs 1.87 and is the one documented exception.
+        toolchain: [stable, "1.97", "1.96", "1.95", "1.87", "1.70"]
+        include:
+          - toolchain: "1.70"
+            features: --features alloc,heapless
     steps:
       - uses: actions/checkout@v7
 
@@ -102,16 +109,18 @@ jobs:
       # the newest semver-compatible versions, and serde_json's transitive deps
       # (zmij, syn, quote, …) keep bumping their own MSRV past 1.70 in patch
       # releases — silently breaking this job.
+      # `matrix.features` narrows the 1.70 leg to the features its MSRV
+      # covers; every other leg builds and tests all of them.
       - name: Build (all features, debug)
-        run: cargo build --locked --all-features --verbose
+        run: cargo build --locked ${{ matrix.features || '--all-features' }} --verbose
 
       # The size-optimized release profile is the shipping config for this
       # crate, so it must build (and stay MSRV-clean) too (§12.1 step 4).
       - name: Build (all features, release)
-        run: cargo build --locked --all-features --release --verbose
+        run: cargo build --locked ${{ matrix.features || '--all-features' }} --release --verbose
 
       - name: Test (all features)
-        run: cargo test --locked --all-features --verbose
+        run: cargo test --locked ${{ matrix.features || '--all-features' }} --verbose
 
       - name: Test (default features)
         run: cargo test --locked --verbose
@@ -193,10 +202,10 @@ jobs:
       # that only surface when a feature is off. `--no-dev-deps` keeps it to the
       # library (the conformance test crates need all wire types to compile).
       - name: Clippy every feature combination (library)
-        # `alloc` / `heapless` only add a `seq::SeqVec` impl that touches no wire
-        # feature; `--all-features` in `lint` covers them, so they stay out of
-        # the sweep rather than quadrupling it.
-        run: cargo hack --feature-powerset --no-dev-deps --exclude-features alloc,heapless clippy --lib -- -D warnings
+        # `alloc` / `heapless` / `heapless09` only add a `seq::SeqVec` impl that
+        # touches no wire feature; `--all-features` in `lint` covers them, so
+        # they stay out of the sweep rather than multiplying it by eight.
+        run: cargo hack --feature-powerset --no-dev-deps --exclude-features alloc,heapless,heapless09 clippy --lib -- -D warnings
 
       # Behavioural smoke test (encode -> decode) under every combination. The
       # config_tests crate is `cfg`-gated so it builds and runs for any subset.
@@ -213,7 +222,7 @@ jobs:
       # width would leave the narrowed ceiling unpinned.
       - name: Test every feature combination (config + vector conformance + ID_MAX)
         run: |
-          cargo hack --feature-powerset --exclude-features alloc,heapless test \
+          cargo hack --feature-powerset --exclude-features alloc,heapless,heapless09 test \
             --test config_tests --test vectors_tests --test id_max_tests
 
   coverage:
