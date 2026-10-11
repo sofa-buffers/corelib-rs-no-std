@@ -91,10 +91,17 @@ value64 = []
 alloc = []
 # `heapless::Vec<T, N>` (sofabgen `rust.allow_dynamic: false`, the default):
 # fixed-capacity storage sized from the schema, no allocator.
+#
+# One feature per heapless major, because a `heapless::Vec` of 0.8 and one of
+# 0.9 are different types: `heapless` is 0.8, `heapless09` is 0.9 (a renamed
+# dependency, so both can be on at once). heapless 0.9 needs rustc 1.87; the
+# crate's MSRV of 1.70 holds for every build that leaves `heapless09` off.
 heapless = ["dep:heapless"]
+heapless09 = ["dep:heapless09"]
 
 [dependencies]
 heapless = { version = "0.8", optional = true, default-features = false }
+heapless09 = { package = "heapless", version = "0.9", optional = true, default-features = false }
 
 # ---------------------------------------------------------------------------
 # Size-optimized release profile suitable for embedded firmware.

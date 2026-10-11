@@ -37,9 +37,10 @@
 //!   calls to place an element at its id, fill the gap before it and check the
 //!   index against the schema `count` (`INVALID`) or a passed-in receiver cap
 //!   (`LIMIT_EXCEEDED`). The codec never calls them. They are generic over the
-//!   destination: `heapless::Vec` behind the optional `heapless` feature,
-//!   `alloc::vec::Vec` behind the optional `alloc` feature — neither is on by
-//!   default, and neither adds wire code.
+//!   destination: `heapless::Vec` behind the optional `heapless` (heapless 0.8)
+//!   and `heapless09` (heapless 0.9, needs rustc 1.87) features,
+//!   `alloc::vec::Vec` behind the optional `alloc` feature — none is on by
+//!   default, and none adds wire code.
 //! * **Float-array equality in [`floats`]** — `bits_equal_f32` / `bits_equal_f64`,
 //!   the comparison generated code makes against a field's default: equal iff
 //!   the same length and the same IEEE-754 *bit pattern* at every index (so

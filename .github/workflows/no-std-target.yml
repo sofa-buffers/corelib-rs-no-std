@@ -108,14 +108,20 @@ jobs:
           cargo build --locked --lib --release --target ${{ inputs.target }} \
             --no-default-features --features "fixlen,array,sequence,fp64,value64"
 
-      # The two `sofab::seq` container impls, each on its own and on the
-      # target: they add no wire code, but `alloc` links the `alloc` crate and
-      # `heapless` pulls in the one optional dependency.
+      # The `sofab::seq` container impls, each on its own and on the target:
+      # they add no wire code, but `alloc` links the `alloc` crate and
+      # `heapless` / `heapless09` pull in heapless 0.8 / 0.9.
       - name: "seq containers: heapless"
         if: always()
         run: |
           cargo build --locked --lib --release --target ${{ inputs.target }} \
             --features "heapless"
+
+      - name: "seq containers: heapless09"
+        if: always()
+        run: |
+          cargo build --locked --lib --release --target ${{ inputs.target }} \
+            --features "heapless09"
 
       - name: "seq containers: alloc"
         if: always()
@@ -136,9 +142,10 @@ jobs:
   # shallow where `build` is deep: it catches a missing `#[cfg(feature = ...)]`
   # in a combination none of the eight profiles happens to hit.
   #
-  # `alloc` and `heapless` are left out of the powerset: they only add a
-  # `sofab::seq::SeqVec` impl, which touches no wire feature, so crossing them
-  # with the wire flags would quadruple the sweep and test nothing new. The
+  # `alloc`, `heapless` and `heapless09` are left out of the powerset: they
+  # only add a `sofab::seq::SeqVec` impl, which touches no wire feature, so
+  # crossing them with the wire flags would multiply the sweep by eight and
+  # test nothing new. The
   # `build` job builds each on its own, and ci.yml's `--all-features` legs
   # build and test them together.
   powerset:
@@ -167,7 +174,7 @@ jobs:
       - name: Check every feature combination
         run: |
           cargo hack --feature-powerset --no-dev-deps \
-            --exclude-features alloc,heapless \
+            --exclude-features alloc,heapless,heapless09 \
             check --lib --target ${{ inputs.target }}
 
   # The size report for this target. Runs after the configurations are known to
