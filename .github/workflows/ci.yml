@@ -111,15 +111,15 @@ jobs:
       # releases — silently breaking this job.
       # `matrix.features` narrows the 1.70 leg to the features its MSRV
       # covers; every other leg builds and tests all of them.
-      - name: Build (all features, debug)
+      - name: Build (${{ matrix.features && 'MSRV features' || 'all features' }}, debug)
         run: cargo build --locked ${{ matrix.features || '--all-features' }} --verbose
 
       # The size-optimized release profile is the shipping config for this
       # crate, so it must build (and stay MSRV-clean) too (§12.1 step 4).
-      - name: Build (all features, release)
+      - name: Build (${{ matrix.features && 'MSRV features' || 'all features' }}, release)
         run: cargo build --locked ${{ matrix.features || '--all-features' }} --release --verbose
 
-      - name: Test (all features)
+      - name: Test (${{ matrix.features && 'MSRV features' || 'all features' }})
         run: cargo test --locked ${{ matrix.features || '--all-features' }} --verbose
 
       - name: Test (default features)
