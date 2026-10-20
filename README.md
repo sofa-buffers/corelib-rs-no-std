@@ -84,7 +84,7 @@ to shrink the binary.
 
 ```toml
 # Smallest build: integers only, 32-bit values. The crate is still `sofab`.
-sofa-buffers-corelib-no-std = { version = "0.12", default-features = false }
+sofa-buffers-corelib-no-std = { version = "0.13", default-features = false }
 ```
 
 > **`value64` side effects.** Turning it off shrinks 64-bit varint math
