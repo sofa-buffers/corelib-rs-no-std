@@ -49,7 +49,7 @@ jobs:
       - name: Install Rust toolchain (1.97)
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.99"
+          toolchain: "1.100"
           components: rustfmt, clippy
 
       - name: Cache cargo registry & build
@@ -136,7 +136,7 @@ jobs:
       - name: Install Rust toolchain (1.97)
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.99"
+          toolchain: "1.100"
 
       - name: Cache cargo registry & build
         uses: Swatinem/rust-cache@v2
@@ -188,7 +188,7 @@ jobs:
       - name: Install Rust toolchain (1.97)
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.99"
+          toolchain: "1.100"
           components: clippy
 
       - name: Cache cargo registry & build
@@ -238,7 +238,7 @@ jobs:
       - name: Install Rust toolchain (1.97)
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.99"
+          toolchain: "1.100"
           components: llvm-tools-preview
 
       - name: Cache cargo registry & build
