@@ -38,7 +38,7 @@
 //!   index against the schema `count` (`INVALID`) or a passed-in receiver cap
 //!   (`LIMIT_EXCEEDED`). The codec never calls them. They are generic over the
 //!   destination: `heapless::Vec` behind the optional `heapless` (heapless 0.8)
-//!   and `heapless09` (heapless 0.9, needs rustc 1.87) features,
+//!   and `heapless09` (heapless 0.9, needs rustc 1.88) features,
 //!   `alloc::vec::Vec` behind the optional `alloc` feature — none is on by
 //!   default, and none adds wire code.
 //! * **Float-array equality in [`floats`]** — `bits_equal_f32` / `bits_equal_f64`,

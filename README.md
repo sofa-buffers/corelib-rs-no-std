@@ -26,7 +26,7 @@ into firmware where an allocator (and the `std`-based
 
 Rust **1.70+** (MSRV), edition 2021, stable. Builds on any target, including
 bare-metal `thumbv6m` / `thumbv7em` / `riscv32imc`. The optional `heapless09`
-feature needs Rust **1.87+** (heapless 0.9's own minimum); every build without it
+feature needs Rust **1.88+** (heapless 0.9's own minimum); every build without it
 keeps the 1.70 floor.
 
 ### Dependencies
@@ -79,7 +79,7 @@ to shrink the binary.
 | `fp64` | ✅ | 64-bit floats (implies `fixlen`) |
 | `value64` | ✅ | 64-bit scalar value type (`u64`/`i64`); disable for 32-bit (`u32`/`i32`) |
 | `heapless` | — | `sofab::seq::SeqVec` for heapless 0.8's `heapless::Vec<T, N>` — no wire code, no allocator |
-| `heapless09` | — | `sofab::seq::SeqVec` for heapless 0.9's `heapless::Vec<T, N, LenT>` — no wire code, no allocator; needs Rust 1.87 |
+| `heapless09` | — | `sofab::seq::SeqVec` for heapless 0.9's `heapless::Vec<T, N, LenT>` — no wire code, no allocator; needs Rust 1.88 |
 | `alloc` | — | `sofab::seq::SeqVec` for `alloc::vec::Vec<T>` — no wire code; needs a global allocator |
 
 ```toml
