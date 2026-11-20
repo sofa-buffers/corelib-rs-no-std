@@ -94,7 +94,7 @@ alloc = []
 #
 # One feature per heapless major, because a `heapless::Vec` of 0.8 and one of
 # 0.9 are different types: `heapless` is 0.8, `heapless09` is 0.9 (a renamed
-# dependency, so both can be on at once). heapless 0.9 needs rustc 1.87; the
+# dependency, so both can be on at once). heapless 0.9 needs rustc 1.88; the
 # crate's MSRV of 1.70 holds for every build that leaves `heapless09` off.
 heapless = ["dep:heapless"]
 heapless09 = ["dep:heapless09"]
